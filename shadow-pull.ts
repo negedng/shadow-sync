@@ -32,7 +32,11 @@ if (values.help) {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-const SCRIPT_DIR  = path.dirname(new URL(import.meta.url ?? `file://${__filename}`).pathname);
+const SCRIPT_DIR  = path.dirname(
+  typeof __filename !== "undefined"
+    ? __filename
+    : new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+);
 const localBranch = getCurrentBranch();
 
 // Resolve remote + dir: explicit flags win, then look up in REMOTES, then fall

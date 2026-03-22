@@ -294,7 +294,9 @@ export function acquireLock(scriptDir: string, name: string): () => void {
 
   if (fs.existsSync(lock)) {
     const existingPid = fs.readFileSync(lock, "utf8").trim();
-    const alive = runSafe(`kill -0 ${existingPid}`).ok;
+    const alive = process.platform === "win32"
+      ? runSafe(`tasklist /FI "PID eq ${existingPid}" /NH`).stdout.includes(existingPid)
+      : runSafe(`kill -0 ${existingPid}`).ok;
     if (alive) die(`Another ${name} is already running (PID ${existingPid}).`);
     fs.unlinkSync(lock);
   }

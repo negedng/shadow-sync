@@ -3,7 +3,7 @@ import { parseArgs } from "util";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import {
   REMOTES, PUSH_TRAILER,
   run, runSafe, refExists, listTeamBranches,
@@ -37,7 +37,11 @@ const commitMsg = values.message;
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-const SCRIPT_DIR  = path.dirname(new URL(import.meta.url ?? `file://${__filename}`).pathname);
+const SCRIPT_DIR  = path.dirname(
+  typeof __filename !== "undefined"
+    ? __filename
+    : new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+);
 const localBranch = getCurrentBranch();
 
 // Resolve remote + dir: explicit flags win, then look up in REMOTES, then fall
@@ -89,14 +93,11 @@ if (!refExists(teamRef)) {
   console.error("Available branches:");
   listTeamBranches(remote).forEach(b => console.error(`  ${b}`));
 
-  const readline = await import("readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>(res =>
-    rl.question(`\nCreate '${teamBranch}' on '${remote}'? [y/N] `, res)
-  );
-  rl.close();
-
-  if (answer.toLowerCase() !== "y") { console.log("Aborted."); process.exit(0); }
+  // Auto-create the branch from main/master if --branch was explicitly passed,
+  // otherwise abort so the user can decide.
+  if (!values.branch) {
+    die(`Pass -b ${teamBranch} explicitly to confirm creating a new remote branch.`);
+  }
 
   const base = ["main", "master"].find(c => refExists(`${remote}/${c}`));
   if (!base) die(`Could not find a base branch (main/master) on '${remote}'.`);
@@ -107,8 +108,9 @@ if (!refExists(teamRef)) {
 
 // ── Worktree ──────────────────────────────────────────────────────────────────
 
-const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-push-"));
-const archiveDir  = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-archive-"));
+// Normalize to forward slashes so paths work in git shell commands on Windows
+const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-push-")).replace(/\\/g, "/");
+const archiveDir  = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-archive-")).replace(/\\/g, "/");
 const tempBranch  = `shadow-push-${Date.now()}`;
 let   cleanupDone = false;
 
@@ -125,25 +127,72 @@ process.on("SIGINT",  () => { cleanup(); process.exit(130); });
 process.on("SIGTERM", () => { cleanup(); process.exit(143); });
 
 console.log(`Extracting committed '${dir}/' from HEAD...`);
-execSync(
-  `git archive HEAD -- ${dir} | tar -x --strip-components=1 -C ${archiveDir}`,
-  { shell: true }
-);
+// List files tracked by git in the subdirectory and copy them to archiveDir
+const trackedFiles = run(`git ls-tree -r --name-only HEAD -- ${dir}/`)
+  .split("\n")
+  .filter(Boolean);
+
+for (const filePath of trackedFiles) {
+  // filePath is e.g. "frontend/README.md" — strip the dir prefix
+  const relPath = filePath.replace(new RegExp(`^${dir}/`), "");
+  const destPath = path.join(archiveDir, relPath);
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  // Extract file content from git index (git requires forward slashes)
+  const gitPath = filePath.replace(/\\/g, "/");
+  const content = execSync(`git show HEAD:${gitPath}`, { encoding: "buffer" });
+  fs.writeFileSync(destPath, content);
+}
 
 run(`git worktree add -b ${tempBranch} ${worktreeDir} ${resolvedTeamRef}`);
 
 console.log(`Syncing into temporary worktree...`);
 
-const rsyncCmd = [
-  "rsync", "-a", "--delete",
-  ...ignore.rsyncExcludes,
-  ...ignore.rsyncProtects,
-  "--exclude=.git",
-  `${archiveDir}/`,
-  `${worktreeDir}/`,
-].join(" ");
+// Mirror archiveDir into worktreeDir (like rsync --delete), skipping .git and .shadowignore patterns
+function syncDirs(src: string, dest: string, ignorePatterns: string[]) {
+  // Remove files in dest that aren't in src (except .git and ignored patterns)
+  const destFiles = listAllFiles(dest);
+  for (const rel of destFiles) {
+    if (rel.startsWith(".git/") || rel === ".git") continue;
+    if (ignorePatterns.some(p => rel.match(globToRegex(p)))) continue;
+    const srcPath = path.join(src, rel);
+    if (!fs.existsSync(srcPath)) {
+      fs.rmSync(path.join(dest, rel), { force: true });
+    }
+  }
+  // Copy all files from src to dest
+  const srcFiles = listAllFiles(src);
+  for (const rel of srcFiles) {
+    if (ignorePatterns.some(p => rel.match(globToRegex(p)))) continue;
+    const srcPath = path.join(src, rel);
+    const destPath = path.join(dest, rel);
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.copyFileSync(srcPath, destPath);
+  }
+}
 
-execSync(rsyncCmd, { stdio: "inherit" });
+function listAllFiles(dir: string, prefix = ""): string[] {
+  const results: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (entry.name === ".git") continue;
+      results.push(...listAllFiles(path.join(dir, entry.name), rel));
+    } else {
+      results.push(rel);
+    }
+  }
+  return results;
+}
+
+function globToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`);
+}
+
+syncDirs(archiveDir, worktreeDir, ignore.patterns);
 
 // ── Commit & push ─────────────────────────────────────────────────────────────
 
@@ -161,7 +210,12 @@ execSync("git diff --cached --stat", { cwd: worktreeDir, stdio: "inherit" });
 console.log();
 
 const fullMsg = appendTrailer(commitMsg, `${PUSH_TRAILER}: ${localHead}`);
-execSync(`git commit -m ${JSON.stringify(fullMsg)}`, { cwd: worktreeDir, stdio: "inherit" });
+const commitResult = spawnSync("git", ["commit", "-m", fullMsg], {
+  cwd: worktreeDir,
+  encoding: "utf8",
+  stdio: "inherit",
+});
+if (commitResult.status !== 0) die("git commit failed in worktree.");
 
 console.log(`Pushing to ${remote}/${teamBranch}...`);
 run(`git push ${remote} HEAD:${teamBranch}`, worktreeDir);
