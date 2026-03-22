@@ -210,9 +210,7 @@ export function appendTrailer(message: string, trailer: string): string {
 // ── .shadowignore ─────────────────────────────────────────────────────────────
 
 export interface ShadowIgnore {
-  patterns:      string[];
-  rsyncExcludes: string[];
-  rsyncProtects: string[];
+  patterns: string[];
 }
 
 export function parseShadowIgnore(scriptDir: string): ShadowIgnore {
@@ -228,11 +226,7 @@ export function parseShadowIgnore(scriptDir: string): ShadowIgnore {
     console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
   }
 
-  return {
-    patterns,
-    rsyncExcludes: patterns.map(p => `--exclude=${p}`),
-    rsyncProtects: patterns.map(p => `--filter=protect ${p}`),
-  };
+  return { patterns };
 }
 
 // ── History scan ──────────────────────────────────────────────────────────────
