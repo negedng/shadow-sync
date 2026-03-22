@@ -119,21 +119,27 @@ export function getCommitMeta(hash: string): CommitMeta {
 export function applyPatch(patch: string, subdir: string): boolean {
   const applyArgs = ["apply", "--directory", subdir, "--ignore-whitespace"];
 
-  const result = spawnSync("git", applyArgs, {
-    input: patch,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  // Write patch to a temp file to avoid Windows spawnSync stdin deadlocks
+  const tmpPatch = path.join(os.tmpdir(), `shadow-patch-${process.pid}.patch`);
+  fs.writeFileSync(tmpPatch, patch);
 
-  if (result.status === 0) return true;
+  try {
+    const result = spawnSync("git", [...applyArgs, tmpPatch], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
-  spawnSync("git", [...applyArgs, "--reject"], {
-    input: patch,
-    encoding: "utf8",
-    stdio: "inherit",
-  });
+    if (result.status === 0) return true;
 
-  return false;
+    spawnSync("git", [...applyArgs, "--reject", tmpPatch], {
+      encoding: "utf8",
+      stdio: "inherit",
+    });
+
+    return false;
+  } finally {
+    try { fs.unlinkSync(tmpPatch); } catch {}
+  }
 }
 
 /**
@@ -141,14 +147,24 @@ export function applyPatch(patch: string, subdir: string): boolean {
  *   root commit   → diff against empty tree
  *   merge commit  → diff against first parent (^1) to capture conflict resolutions
  *   normal commit → diff against its single parent
+ *
+ * Returns the raw diff output (not trimmed) so the patch stays valid.
  */
 export function diffForCommit(meta: CommitMeta): string {
   const { hash, parentCount } = meta;
   if (parentCount === 0) {
-    return run(`git diff ${EMPTY_TREE} ${hash}`);
+    return execSync(`git diff ${EMPTY_TREE} ${hash}`, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   }
-  const parent = parentCount > 1 ? `${hash}^1` : `${hash}^`;
-  return run(`git diff ${parent} ${hash}`);
+  // Resolve parent hash explicitly to avoid ^ which is a shell escape char on Windows
+  const parentRef = parentCount > 1 ? `${hash}^1` : `${hash}^`;
+  const parentHash = run(`git rev-parse "${parentRef}"`);
+  return execSync(`git diff ${parentHash} ${hash}`, {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
 }
 
 /**
