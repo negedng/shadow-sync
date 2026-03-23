@@ -9,6 +9,7 @@ import {
   run, runSafe, refExists, listTeamBranches,
   getCurrentBranch, appendTrailer,
   parseShadowIgnore, acquireLock, die,
+  preflightChecks, handlePreflightResults,
 } from "./shadow-common";
 
 // ── Args ──────────────────────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ const dirtyStaged   = !runSafe(["diff", "--cached", "--quiet", "--", `${dir}/`])
 const dirtyUnstaged = !runSafe(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
 if (dirtyStaged || dirtyUnstaged) {
   console.error(`✘ '${dir}/' has uncommitted changes:\n`);
-  spawnSync("git", ["status", "--short", "--", `${dir}/`], { stdio: "inherit" });
+  spawnSync("git", ["-c", "core.autocrlf=false", "status", "--short", "--", `${dir}/`], { stdio: "inherit" });
   console.error(`\nCommit or stash them before running shadow-push.`);
   process.exit(1);
 }
@@ -108,6 +109,13 @@ if (!refExists(teamRef)) {
 
   resolvedTeamRef = `${remote}/${base}`;
   console.log(`Branching from ${resolvedTeamRef}...`);
+}
+
+// ── Pre-flight checks ────────────────────────────────────────────────────────
+
+const warnings = preflightChecks(remote, resolvedTeamRef);
+if (!handlePreflightResults(warnings)) {
+  process.exit(1);
 }
 
 // ── Worktree ──────────────────────────────────────────────────────────────────
@@ -149,7 +157,8 @@ for (const filePath of trackedFiles) {
   fs.mkdirSync(path.dirname(destPath), { recursive: true });
   // Extract file content from git index using array-form spawnSync
   const gitPath = filePath.replace(/\\/g, "/");
-  const result = spawnSync("git", ["show", `HEAD:${gitPath}`], {
+  const result = spawnSync("git", ["-c", "core.autocrlf=false", "show", `HEAD:${gitPath}`], {
+    maxBuffer: 50 * 1024 * 1024,
     stdio: ["pipe", "pipe", "pipe"],
   });
   if (result.status !== 0) die(`Failed to extract ${gitPath} from HEAD`);
@@ -250,7 +259,7 @@ if (!hasStagedChanges) {
 }
 
 console.log("\nChanges to be pushed:");
-spawnSync("git", ["diff", "--cached", "--stat"], { cwd: worktreeDir, stdio: "inherit" });
+spawnSync("git", ["-c", "core.autocrlf=false", "diff", "--cached", "--stat"], { cwd: worktreeDir, stdio: "inherit" });
 console.log();
 
 if (dryRun) {
@@ -260,7 +269,7 @@ if (dryRun) {
 }
 
 const fullMsg = appendTrailer(commitMsg, `${PUSH_TRAILER}: ${localHead}`);
-const commitResult = spawnSync("git", ["commit", "-m", fullMsg], {
+const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-m", fullMsg], {
   cwd: worktreeDir,
   encoding: "utf8",
   stdio: "inherit",
@@ -268,7 +277,32 @@ const commitResult = spawnSync("git", ["commit", "-m", fullMsg], {
 if (commitResult.status !== 0) die("git commit failed in worktree.");
 
 console.log(`Pushing to ${remote}/${teamBranch}...`);
-run(["push", remote, `HEAD:${teamBranch}`], worktreeDir);
+
+// Retry on non-fast-forward: someone may have pushed between our fetch and push.
+const MAX_RETRIES = 3;
+let pushed = false;
+for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  const pushResult = runSafe(["push", remote, `HEAD:${teamBranch}`], worktreeDir);
+  if (pushResult.ok) {
+    pushed = true;
+    break;
+  }
+  const isNonFF = pushResult.stderr.includes("non-fast-forward")
+    || pushResult.stderr.includes("rejected")
+    || pushResult.stderr.includes("fetch first");
+  if (!isNonFF || attempt === MAX_RETRIES) {
+    console.error(pushResult.stderr);
+    die(`git push failed after ${attempt} attempt(s).`);
+  }
+  console.log(`  Push rejected (non-fast-forward), retrying (${attempt}/${MAX_RETRIES})...`);
+  // Re-fetch, rebase the worktree branch on the updated remote
+  run(["fetch", remote]);
+  const updatedRef = run(["rev-parse", `${remote}/${teamBranch}`]);
+  const rebaseResult = runSafe(["rebase", updatedRef], worktreeDir);
+  if (!rebaseResult.ok) {
+    die("Rebase onto updated remote failed. Resolve manually and retry.");
+  }
+}
 
 cleanup();
 

@@ -75,11 +75,30 @@ export interface CommitMeta {
 
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
+/** 50 MB — large enough for big binary diffs, prevents silent truncation. */
+const MAX_BUFFER = 50 * 1024 * 1024;
+
+/**
+ * Git config overrides for cross-OS consistency.
+ * These ensure diffs and applies behave identically on Linux, macOS, and Windows:
+ *   core.autocrlf=false  — prevent line-ending conversion that breaks patches
+ *   core.safecrlf=false  — don't reject files with mixed line endings
+ *   core.filemode=false  — ignore file permission changes (Windows has no chmod)
+ *   core.precomposeunicode=true — normalize NFD→NFC on macOS
+ */
+const GIT_CONFIG_OVERRIDES = [
+  "-c", "core.autocrlf=false",
+  "-c", "core.safecrlf=false",
+  "-c", "core.precomposeunicode=true",
+  "-c", "core.quotepath=false",
+];
+
 /** Run a git command (pass args as an array), return trimmed stdout. Throws on non-zero exit. */
 export function run(args: string[], cwd?: string): string {
-  const result = spawnSync("git", args, {
+  const result = spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
     encoding: "utf8",
     cwd,
+    maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
   if (result.status !== 0) {
@@ -91,9 +110,10 @@ export function run(args: string[], cwd?: string): string {
 
 /** Run a git command (pass args as an array), return { stdout, stderr, status } — never throws. */
 export function runSafe(args: string[], cwd?: string) {
-  const result = spawnSync("git", args, {
+  const result = spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
     encoding: "utf8",
     cwd,
+    maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
   return {
@@ -146,16 +166,20 @@ export function getCommitMeta(hash: string): CommitMeta {
  * conflict markers, or "failed" if the patch couldn't be applied at all.
  */
 export function applyPatch(patch: string, subdir: string): ApplyResult {
-  const baseArgs = ["apply", "--directory", subdir, "--ignore-whitespace"];
+  const baseArgs = [...GIT_CONFIG_OVERRIDES, "apply", "--directory", subdir,
+    "--ignore-whitespace"];
 
-  // Write patch to a temp file to avoid Windows spawnSync stdin deadlocks
+  // Write patch to a temp file to avoid Windows spawnSync stdin deadlocks.
+  // Normalize line endings to LF so patches generated on any OS apply consistently.
+  const normalizedPatch = patch.replace(/\r\n/g, "\n");
   const tmpPatch = path.join(os.tmpdir(), `shadow-patch-${process.pid}.patch`);
-  fs.writeFileSync(tmpPatch, patch);
+  fs.writeFileSync(tmpPatch, normalizedPatch);
 
   try {
     // 1) Try exact apply
     const result = spawnSync("git", [...baseArgs, tmpPatch], {
       encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
     if (result.status === 0) return "applied";
@@ -163,6 +187,7 @@ export function applyPatch(patch: string, subdir: string): ApplyResult {
     // 2) Fall back to 3-way merge, same as git merge/rebase would.
     const threeWay = spawnSync("git", [...baseArgs, "--3way", tmpPatch], {
       encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
       stdio: "inherit",
     });
     if (threeWay.status === 0) return "applied";
@@ -191,17 +216,24 @@ export function applyPatch(patch: string, subdir: string): ApplyResult {
  */
 export function diffForCommit(meta: CommitMeta): string {
   const { hash, parentCount } = meta;
+  // --no-ext-diff: prevent external diff drivers from altering output
+  // --no-textconv: prevent text conversion filters (important for cross-OS)
+  // core.filemode=false: ignore permission changes that don't apply on Windows
+  const diffArgs = [...GIT_CONFIG_OVERRIDES, "-c", "core.filemode=false",
+    "diff", "--binary", "-M", "--no-ext-diff", "--no-textconv"];
   if (parentCount === 0) {
-    const result = spawnSync("git", ["diff", "--binary", EMPTY_TREE, hash], {
+    const result = spawnSync("git", [...diffArgs, EMPTY_TREE, hash], {
       encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
     return result.stdout ?? "";
   }
   const parentRef = parentCount > 1 ? `${hash}^1` : `${hash}^`;
   const parentHash = run(["rev-parse", parentRef]);
-  const result = spawnSync("git", ["diff", "--binary", parentHash, hash], {
+  const result = spawnSync("git", [...diffArgs, parentHash, hash], {
     encoding: "utf8",
+    maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
   return result.stdout ?? "";
@@ -225,7 +257,7 @@ export function commitWithMeta(
     GIT_COMMITTER_EMAIL:  meta.committerEmail,
     GIT_COMMITTER_DATE:   meta.committerDate,
   };
-  const args = ["commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message];
+  const args = [...GIT_CONFIG_OVERRIDES, "commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message];
   const result = spawnSync("git", args, { env, encoding: "utf8", stdio: "inherit" });
   if (result.status !== 0) die("git commit failed.");
 }
@@ -237,8 +269,8 @@ export function commitWithMeta(
 export function appendTrailer(message: string, trailer: string): string {
   const result = spawnSync(
     "git",
-    ["interpret-trailers", "--trailer", trailer],
-    { input: message, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    [...GIT_CONFIG_OVERRIDES, "interpret-trailers", "--trailer", trailer],
+    { input: message, encoding: "utf8", maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"] },
   );
   if (result.status !== 0) {
     const trimmed = message.trimEnd();
@@ -424,6 +456,121 @@ export function loadConflictState(scriptDir: string): ConflictState | null {
 export function clearConflictState(scriptDir: string): void {
   const p = conflictStatePath(scriptDir);
   try { fs.unlinkSync(p); } catch {}
+}
+
+// ── Pre-flight checks ─────────────────────────────────────────────────────────
+
+export interface PreflightWarning {
+  level: "error" | "warn";
+  code: string;
+  message: string;
+}
+
+/**
+ * Run pre-flight checks before pull or push.
+ * Returns an array of warnings/errors. Callers should abort on "error" level.
+ */
+export function preflightChecks(remote: string, teamRef: string): PreflightWarning[] {
+  const warnings: PreflightWarning[] = [];
+
+  // 1. Shallow clone detection
+  const shallow = runSafe(["rev-parse", "--is-shallow-repository"]);
+  if (shallow.ok && shallow.stdout === "true") {
+    warnings.push({
+      level: "error",
+      code: "SHALLOW_CLONE",
+      message: "This repository is a shallow clone. Shadow sync requires full history.\n"
+        + "  Run: git fetch --unshallow",
+    });
+  }
+
+  // 2. Check remote tree for problematic entries
+  const tree = runSafe(["ls-tree", "-r", "--long", teamRef]);
+  if (tree.ok && tree.stdout) {
+    const entries = tree.stdout.split("\n").filter(Boolean);
+    const paths: string[] = [];
+
+    for (const entry of entries) {
+      // Format: <mode> <type> <hash> <size>\t<path>
+      const match = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
+      if (!match) continue;
+      const [, mode, , filePath] = match;
+      paths.push(filePath);
+
+      // Submodule detection (mode 160000)
+      if (mode === "160000") {
+        warnings.push({
+          level: "warn",
+          code: "SUBMODULE",
+          message: `Remote contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`,
+        });
+      }
+
+      // Symlink detection (mode 120000)
+      if (mode === "120000") {
+        warnings.push({
+          level: "warn",
+          code: "SYMLINK",
+          message: `Remote contains a symlink at '${filePath}'. Symlink targets are not adjusted for the monorepo subdirectory.`,
+        });
+      }
+    }
+
+    // 3. Case conflict detection (only matters on case-insensitive FS)
+    if (process.platform === "win32" || process.platform === "darwin") {
+      const lower = new Map<string, string>();
+      for (const p of paths) {
+        const key = p.toLowerCase();
+        const existing = lower.get(key);
+        if (existing && existing !== p) {
+          warnings.push({
+            level: "error",
+            code: "CASE_CONFLICT",
+            message: `Case conflict: '${existing}' and '${p}' differ only in case.\n`
+              + "  This will cause data loss on case-insensitive filesystems (Windows/macOS).",
+          });
+        }
+        lower.set(key, p);
+      }
+    }
+  }
+
+  // 4. LFS detection — check for .gitattributes with filter=lfs
+  const attrs = runSafe(["show", `${teamRef}:.gitattributes`]);
+  if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
+    warnings.push({
+      level: "warn",
+      code: "GIT_LFS",
+      message: "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n"
+        + "  Ensure LFS is configured in the monorepo, or large files will be pointers.",
+    });
+  }
+
+  return warnings;
+}
+
+/**
+ * Print preflight warnings and abort on errors.
+ * Returns true if there are only warnings (safe to continue), false if there were errors.
+ */
+export function handlePreflightResults(warnings: PreflightWarning[]): boolean {
+  if (warnings.length === 0) return true;
+
+  const errors = warnings.filter(w => w.level === "error");
+  const warns  = warnings.filter(w => w.level === "warn");
+
+  for (const w of warns) {
+    console.error(`⚠ [${w.code}] ${w.message}`);
+  }
+  for (const e of errors) {
+    console.error(`✘ [${e.code}] ${e.message}`);
+  }
+
+  if (errors.length > 0) {
+    console.error(`\nAborting due to ${errors.length} error(s).`);
+    return false;
+  }
+  return true;
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────

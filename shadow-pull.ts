@@ -1,6 +1,7 @@
 #!/usr/bin/env ts-node
 import { parseArgs } from "util";
 import * as path from "path";
+import { spawnSync } from "child_process";
 import {
   REMOTES, SYNC_TRAILER, PUSH_TRAILER,
   run, runSafe, refExists, listTeamBranches,
@@ -9,6 +10,7 @@ import {
   buildAlreadySyncedSetFor, collectTeamCommits,
   acquireLock, die, setSyncSince,
   saveConflictState, loadConflictState, clearConflictState,
+  preflightChecks, handlePreflightResults,
 } from "./shadow-common";
 
 // ── Args ──────────────────────────────────────────────────────────────────────
@@ -63,6 +65,22 @@ const dir        = values.dir    ?? remoteEntry!.dir;
 const teamBranch = values.branch ?? localBranch;
 const teamRef    = `${remote}/${teamBranch}`;
 
+// Refuse to pull if the local dir has uncommitted changes — applying patches
+// on top of a dirty working tree can silently overwrite local edits.
+// Exception: when resuming after a conflict, the user's staged resolution is expected.
+const resumingConflict = loadConflictState(SCRIPT_DIR);
+if (!resumingConflict || resumingConflict.remote !== remote || resumingConflict.dir !== dir) {
+  const dirtyStaged   = !runSafe(["diff", "--cached", "--quiet", "--", `${dir}/`]).ok;
+  const dirtyUnstaged = !runSafe(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
+  const hasUntracked  = runSafe(["ls-files", "--others", "--exclude-standard", "--", `${dir}/`]).stdout !== "";
+  if (dirtyStaged || dirtyUnstaged || hasUntracked) {
+    console.error(`✘ '${dir}/' has uncommitted changes:\n`);
+    spawnSync("git", ["-c", "core.autocrlf=false", "status", "--short", "--", `${dir}/`], { stdio: "inherit" });
+    console.error(`\nCommit or stash them before running shadow-pull.`);
+    process.exit(1);
+  }
+}
+
 acquireLock(SCRIPT_DIR, "shadow-pull");
 
 console.log(`Remote        : ${remote}`);
@@ -79,6 +97,13 @@ run(["fetch", remote]);
 if (!refExists(teamRef)) {
   console.error(`✘ '${teamRef}' does not exist. Available branches on '${remote}':`);
   listTeamBranches(remote).forEach(b => console.error(`  ${b}`));
+  process.exit(1);
+}
+
+// ── Pre-flight checks ────────────────────────────────────────────────────────
+
+const warnings = preflightChecks(remote, teamRef);
+if (!handlePreflightResults(warnings)) {
   process.exit(1);
 }
 

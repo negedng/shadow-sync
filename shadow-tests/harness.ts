@@ -42,6 +42,7 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
   git('config user.email "team@test.com"', remoteWorking);
   git('config user.name "Team Member"', remoteWorking);
+  git("config core.autocrlf false", remoteWorking);
   fs.writeFileSync(path.join(remoteWorking, "README.md"), "# Remote Repo\n");
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
@@ -52,6 +53,7 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   git("init", localRepo);
   git('config user.email "local@test.com"', localRepo);
   git('config user.name "Local Dev"', localRepo);
+  git("config core.autocrlf false", localRepo);
   // Create initial commit (subdir is created later by pull/local commits)
   fs.writeFileSync(path.join(localRepo, "mono.txt"), "mono-repo root\n");
   fs.mkdirSync(path.join(localRepo, subdir), { recursive: true });
@@ -89,6 +91,7 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
   git('config user.email "team@test.com"', remoteWorking);
   git('config user.name "Team Member"', remoteWorking);
+  git("config core.autocrlf false", remoteWorking);
   fs.writeFileSync(path.join(remoteWorking, "README.md"), `# ${remoteName}\n`);
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
