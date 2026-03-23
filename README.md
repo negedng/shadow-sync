@@ -79,6 +79,20 @@ export const REMOTES: RemoteConfig[] = [
 export const SYNC_SINCE: string | undefined = "2024-11-01";
 ```
 
+## Tests
+
+Run all tests (creates isolated temporary repos, nothing touches real remotes):
+
+```bash
+npx tsx shadow-tests/run-all.ts
+```
+
+Run a single test:
+
+```bash
+npx tsx shadow-tests/test-pull-conflict.ts
+```
+
 ## Files
 
 | File | Purpose |
