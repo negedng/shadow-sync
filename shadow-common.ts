@@ -101,6 +101,9 @@ export function run(args: string[], cwd?: string): string {
     maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (result.error) {
+    throw new Error(`Failed to spawn git: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     const stderr = (result.stderr ?? "").trim();
     throw new Error(`git ${args[0]} failed (exit ${result.status}): ${stderr}`);
@@ -116,6 +119,14 @@ export function runSafe(args: string[], cwd?: string) {
     maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (result.error) {
+    return {
+      stdout:  "",
+      stderr:  `Failed to spawn git: ${result.error.message}`,
+      status:  1,
+      ok:      false,
+    };
+  }
   return {
     stdout:  (result.stdout ?? "").trim(),
     stderr:  (result.stderr ?? "").trim(),
@@ -182,6 +193,7 @@ export function applyPatch(patch: string, subdir: string): ApplyResult {
       maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
     if (result.status === 0) return "applied";
 
     // 2) Fall back to 3-way merge, same as git merge/rebase would.
@@ -190,6 +202,7 @@ export function applyPatch(patch: string, subdir: string): ApplyResult {
       maxBuffer: MAX_BUFFER,
       stdio: "inherit",
     });
+    if (threeWay.error) throw new Error(`Failed to spawn git: ${threeWay.error.message}`);
     if (threeWay.status === 0) return "applied";
 
     // --3way exits non-zero when there are merge conflicts.
@@ -202,7 +215,9 @@ export function applyPatch(patch: string, subdir: string): ApplyResult {
 
     return "failed";
   } finally {
-    try { fs.unlinkSync(tmpPatch); } catch {}
+    try { fs.unlinkSync(tmpPatch); } catch (e: any) {
+      if (e.code !== "ENOENT") console.warn(`Warning: failed to delete temp patch: ${e.message}`);
+    }
   }
 }
 
@@ -227,6 +242,7 @@ export function diffForCommit(meta: CommitMeta): string {
       maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
     return result.stdout ?? "";
   }
   const parentRef = parentCount > 1 ? `${hash}^1` : `${hash}^`;
@@ -236,6 +252,7 @@ export function diffForCommit(meta: CommitMeta): string {
     maxBuffer: MAX_BUFFER,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
   return result.stdout ?? "";
 }
 
@@ -259,6 +276,7 @@ export function commitWithMeta(
   };
   const args = [...GIT_CONFIG_OVERRIDES, "commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message];
   const result = spawnSync("git", args, { env, encoding: "utf8", stdio: "inherit" });
+  if (result.error) die(`Failed to spawn git: ${result.error.message}`);
   if (result.status !== 0) die("git commit failed.");
 }
 
@@ -291,13 +309,18 @@ export function extractPatchFiles(patch: string, subdir: string): string[] {
     // Match "diff --git a/foo b/bar"
     const m = line.match(/^diff --git a\/.+ b\/(.+)$/);
     if (m) {
-      files.push(`${subdir}/${m[1]}`);
+      const rel = m[1];
+      // Reject paths that attempt directory traversal or are absolute
+      if (rel.includes("..") || rel.startsWith("/")) continue;
+      files.push(`${subdir}/${rel}`);
       continue;
     }
     // Also catch deleted files from "--- a/foo" when "+++ /dev/null"
     const del = line.match(/^--- a\/(.+)$/);
     if (del && del[1] !== "/dev/null") {
-      const candidate = `${subdir}/${del[1]}`;
+      const rel = del[1];
+      if (rel.includes("..") || rel.startsWith("/")) continue;
+      const candidate = `${subdir}/${rel}`;
       if (!files.includes(candidate)) files.push(candidate);
     }
   }
@@ -386,20 +409,25 @@ export function acquireLock(scriptDir: string, name: string): () => void {
   if (fs.existsSync(lock)) {
     const existingPid = fs.readFileSync(lock, "utf8").trim();
     let alive = false;
-    if (process.platform === "win32") {
-      const r = spawnSync("tasklist", ["/FI", `PID eq ${existingPid}`, "/NH"], {
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      alive = (r.stdout ?? "").includes(existingPid);
-    } else {
-      const r = spawnSync("kill", ["-0", existingPid], {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      alive = r.status === 0;
+    // Validate PID is numeric before using in process checks
+    if (/^\d+$/.test(existingPid)) {
+      if (process.platform === "win32") {
+        const r = spawnSync("tasklist", ["/FI", `PID eq ${existingPid}`, "/NH"], {
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        alive = (r.stdout ?? "").includes(existingPid);
+      } else {
+        const r = spawnSync("kill", ["-0", existingPid], {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        alive = r.status === 0;
+      }
     }
     if (alive) die(`Another ${name} is already running (PID ${existingPid}).`);
-    fs.unlinkSync(lock);
+    try { fs.unlinkSync(lock); } catch (e: any) {
+      if (e.code !== "ENOENT") throw e; // OK if already deleted by another process
+    }
   }
 
   // Use O_EXCL for atomic creation — prevents TOCTOU race between
@@ -413,9 +441,16 @@ export function acquireLock(scriptDir: string, name: string): () => void {
     throw e;
   }
 
+  let released = false;
   const release = () => {
-    if (fs.existsSync(lock) && fs.readFileSync(lock, "utf8").trim() === myPid) {
-      fs.unlinkSync(lock);
+    if (released) return;
+    released = true;
+    try {
+      if (fs.existsSync(lock) && fs.readFileSync(lock, "utf8").trim() === myPid) {
+        fs.unlinkSync(lock);
+      }
+    } catch (e: any) {
+      if (e.code !== "ENOENT") console.warn(`Warning: failed to release lock: ${e.message}`);
     }
   };
 
@@ -447,15 +482,24 @@ export function loadConflictState(scriptDir: string): ConflictState | null {
   const p = conflictStatePath(scriptDir);
   if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    const loaded = JSON.parse(fs.readFileSync(p, "utf8"));
+    // Validate required fields exist and are strings
+    if (typeof loaded.hash !== "string" || typeof loaded.remote !== "string" || typeof loaded.dir !== "string") {
+      console.warn("Warning: invalid conflict state file, ignoring.");
+      return null;
+    }
+    return loaded as ConflictState;
   } catch {
+    console.warn("Warning: corrupt conflict state file, ignoring.");
     return null;
   }
 }
 
 export function clearConflictState(scriptDir: string): void {
   const p = conflictStatePath(scriptDir);
-  try { fs.unlinkSync(p); } catch {}
+  try { fs.unlinkSync(p); } catch (e: any) {
+    if (e.code !== "ENOENT") console.warn(`Warning: failed to clear conflict state: ${e.message}`);
+  }
 }
 
 // ── Pre-flight checks ─────────────────────────────────────────────────────────

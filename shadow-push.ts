@@ -161,6 +161,7 @@ for (const filePath of trackedFiles) {
     maxBuffer: 50 * 1024 * 1024,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (result.error) die(`Failed to spawn git: ${result.error.message}`);
   if (result.status !== 0) die(`Failed to extract ${gitPath} from HEAD`);
   fs.writeFileSync(destPath, result.stdout);
 }
@@ -192,13 +193,21 @@ function syncDirs(src: string, dest: string, ignorePatterns: string[]) {
   }
 }
 
-function listAllFiles(dir: string, prefix = ""): string[] {
+const MAX_DIR_DEPTH = 100;
+
+function listAllFiles(dir: string, prefix = "", depth = 0): string[] {
+  if (depth > MAX_DIR_DEPTH) {
+    console.warn(`Warning: skipping directory at depth ${depth}: ${dir}`);
+    return [];
+  }
   const results: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // Skip symlinks to prevent traversal outside the target directory and infinite loops
+    if (entry.isSymbolicLink()) continue;
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
       if (entry.name === ".git") continue;
-      results.push(...listAllFiles(path.join(dir, entry.name), rel));
+      results.push(...listAllFiles(path.join(dir, entry.name), rel, depth + 1));
     } else {
       results.push(rel);
     }
@@ -274,6 +283,7 @@ const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-
   encoding: "utf8",
   stdio: "inherit",
 });
+if (commitResult.error) die(`Failed to spawn git: ${commitResult.error.message}`);
 if (commitResult.status !== 0) die("git commit failed in worktree.");
 
 console.log(`Pushing to ${remote}/${teamBranch}...`);
