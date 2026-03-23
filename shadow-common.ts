@@ -26,6 +26,7 @@ export const REMOTES: RemoteConfig[] = [
 
 export const SYNC_TRAILER   = "Shadow-synced-from";
 export const PUSH_TRAILER   = "Shadow-pushed-from";
+export const SEED_TRAILER   = "Shadow-seed";
 export const EMPTY_TREE     = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /** Only mirror commits after this date. Set this to the date you stopped
@@ -402,14 +403,56 @@ export function buildAlreadySyncedSetFor(dir: string): Set<string> {
 }
 
 /**
+ * Find a seed hash for a given subdirectory.
+ * Seed commits are empty commits with a `Shadow-seed: <dir> <hash>` trailer
+ * created by `shadow-pull --seed` to establish a sync baseline.
+ */
+const SEED_HASH_RE = /^Shadow-seed:\s*(\S+)\s+([0-9a-f]{7,40})/;
+
+export function findSeedHash(dir: string): string | null {
+  const log = runSafe(["log", `--grep=^${SEED_TRAILER}:`, "--format=%B"]);
+  if (!log.ok || !log.stdout) return null;
+  for (const line of log.stdout.split("\n")) {
+    const match = line.match(SEED_HASH_RE);
+    if (match && match[1] === dir) return match[2];
+  }
+  return null;
+}
+
+/**
+ * Find the default branch (main or master) on a remote.
+ * Returns the branch name or null if neither exists.
+ */
+export function findRemoteDefaultBranch(remote: string): string | null {
+  for (const name of ["main", "master"]) {
+    if (refExists(`${remote}/${name}`)) return name;
+  }
+  return null;
+}
+
+/**
  * Collect all commits on a ref that are candidates for mirroring.
  * Applies SYNC_SINCE as an --after filter so the entire pre-submodule
  * history is skipped before the trailer dedup pass runs.
+ *
+ * Options:
+ *   seedHash — exclude all commits at or before this hash (from --seed)
+ *   baseRef  — exclude commits reachable from this ref (for feature branch ranges)
  */
-export function collectTeamCommits(teamRef: string): string[] {
+export function collectTeamCommits(
+  teamRef: string,
+  opts?: { seedHash?: string; baseRef?: string },
+): string[] {
   const args = ["log", "--reverse", "--format=%H"];
   if (SYNC_SINCE) args.push(`--after=${SYNC_SINCE}`);
-  args.push(teamRef);
+  // Seed takes priority over baseRef (more specific exclusion)
+  if (opts?.seedHash) {
+    args.push(`${opts.seedHash}..${teamRef}`);
+  } else if (opts?.baseRef) {
+    args.push(`${opts.baseRef}..${teamRef}`);
+  } else {
+    args.push(teamRef);
+  }
   const commits = runSafe(args);
   if (!commits.ok || !commits.stdout) return [];
   return commits.stdout.split("\n").filter(Boolean);

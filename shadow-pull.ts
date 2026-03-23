@@ -7,7 +7,8 @@ import {
   run, runSafe, refExists, listTeamBranches,
   getCurrentBranch, getCommitMeta, diffForCommit,
   applyPatch, extractPatchFiles, commitWithMeta, appendTrailer,
-  buildAlreadySyncedSetFor, collectTeamCommits,
+  buildAlreadySyncedSetFor, collectTeamCommits, findSeedHash, findRemoteDefaultBranch,
+  SEED_TRAILER,
   acquireLock, validateName, die, setSyncSince,
   saveConflictState, loadConflictState, clearConflictState,
   preflightChecks, handlePreflightResults,
@@ -21,6 +22,7 @@ const { values } = parseArgs({
     dir:     { type: "string",  short: "d" },
     branch:  { type: "string",  short: "b" },
     since:   { type: "string",  short: "s" },
+    seed:    { type: "boolean" },
     "dry-run": { type: "boolean", short: "n" },
     help:    { type: "boolean", short: "h" },
   },
@@ -28,12 +30,13 @@ const { values } = parseArgs({
 });
 
 if (values.help) {
-  console.log("Usage: shadow-pull.ts [-r remote] [-d dir] [-b team-branch] [-s date] [-n]");
-  console.log("  -r  Remote name to pull from         (default: first entry in REMOTES)");
-  console.log("  -d  Local subdirectory to sync into  (default: same as remote name)");
-  console.log("  -b  Team branch to mirror            (default: your current branch)");
-  console.log("  -s  Only sync commits after date     (default: SYNC_SINCE in config)");
-  console.log("  -n  Dry run — show what would be synced without applying");
+  console.log("Usage: shadow-pull.ts [-r remote] [-d dir] [-b team-branch] [-s date] [-n] [--seed]");
+  console.log("  -r      Remote name to pull from         (default: first entry in REMOTES)");
+  console.log("  -d      Local subdirectory to sync into  (default: same as remote name)");
+  console.log("  -b      Team branch to mirror            (default: your current branch)");
+  console.log("  -s      Only sync commits after date     (default: SYNC_SINCE in config)");
+  console.log("  -n      Dry run — show what would be synced without applying");
+  console.log("  --seed  Record current remote HEAD as sync baseline (skip all existing history)");
   process.exit(0);
 }
 
@@ -89,6 +92,10 @@ console.log(`Remote        : ${remote}`);
 console.log(`Local dir     : ${dir}/`);
 console.log(`Local branch  : ${localBranch}`);
 console.log(`Team branch   : ${teamBranch}`);
+if (teamBranch !== localBranch) {
+  console.warn(`⚠ Pulling remote branch '${teamBranch}' while on local branch '${localBranch}'.`);
+  console.warn(`  Consider: git checkout -b ${teamBranch}`);
+}
 console.log();
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -109,13 +116,39 @@ if (!handlePreflightResults(warnings)) {
   process.exit(1);
 }
 
+// ── Seed mode ─────────────────────────────────────────────────────────────────
+
+if (values.seed) {
+  const tipHash = run(["rev-parse", teamRef]);
+  const msg = appendTrailer(
+    `Seed shadow-sync for ${dir}/ from ${teamRef}`,
+    `${SEED_TRAILER}: ${dir} ${tipHash}`,
+  );
+  run(["commit", "--allow-empty", "-m", msg]);
+  console.log(`✓ Seeded: future pulls for '${dir}/' will start after ${tipHash.slice(0, 10)}.`);
+  process.exit(0);
+}
+
 // ── Determine which commits to apply ─────────────────────────────────────────
 
 console.log("Scanning local history for already-mirrored commits...");
 const alreadySynced = buildAlreadySyncedSetFor(dir);
 console.log(`Found ${alreadySynced.size} previously mirrored commit(s).`);
 
-const allTeamCommits = collectTeamCommits(teamRef);
+const seedHash = findSeedHash(dir);
+if (seedHash) {
+  console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
+}
+
+// For feature branches, use range syntax to only collect branch-specific commits
+const defaultBranch = findRemoteDefaultBranch(remote);
+const isFeatureBranch = defaultBranch != null && teamBranch !== defaultBranch;
+const baseRef = isFeatureBranch ? `${remote}/${defaultBranch}` : undefined;
+if (baseRef) {
+  console.log(`Feature branch detected: collecting only commits in ${baseRef}..${teamRef}`);
+}
+
+const allTeamCommits = collectTeamCommits(teamRef, { seedHash: seedHash ?? undefined, baseRef });
 
 const newCommits: string[] = [];
 let   skippedOurs = 0;

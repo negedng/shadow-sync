@@ -27,6 +27,8 @@ npx tsx shadow-pull.ts -r backend -b feature/auth
 - Falls back to 3-way merge when patches don't apply cleanly
 - On merge conflicts: leaves standard git conflict markers (`<<<<<<<`/`>>>>>>>`), saves state, and exits. After resolving and staging, re-running the command resumes where it left off
 - Skips commits that originated from `shadow-push` (detected via trailer) to prevent round-trip duplication
+- Automatically detects feature branches and only mirrors branch-specific commits (uses `main..feature` range)
+- Warns when the remote branch name differs from your local branch
 
 ## shadow-push
 
@@ -45,15 +47,26 @@ npx tsx shadow-push.ts -r frontend -b feature/new-page -m "Add new page"
 
 ## Options
 
-Both scripts accept:
+**shadow-pull:**
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-r` | Remote name | First entry in `REMOTES` |
 | `-d` | Local subdirectory | Inferred from remote config |
 | `-b` | Branch on the remote | Current local branch |
+| `-s` | Only sync commits after this date | `SYNC_SINCE` in config |
+| `-n` | Dry run — show what would be synced | |
+| `--seed` | Record remote HEAD as sync baseline | |
 
-`shadow-push` additionally requires `-m "commit message"`.
+**shadow-push:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-r` | Remote name | First entry in `REMOTES` |
+| `-d` | Local subdirectory | Inferred from remote config |
+| `-b` | Branch on the remote | Current local branch |
+| `-m` | Commit message (required) | |
+| `-n` | Dry run — show what would be pushed | |
 
 ## Setup
 
@@ -77,6 +90,45 @@ export const REMOTES: RemoteConfig[] = [
 
 ```typescript
 export const SYNC_SINCE: string | undefined = "2024-11-01";
+```
+
+## Initial bootstrap
+
+When setting up the monorepo for the first time, copy the current state of each remote's main branch into the matching subdirectory, then use `--seed` to mark the sync baseline:
+
+```bash
+# 1. Copy files from each team repo into your monorepo subdirectories
+cp -r /path/to/backend-repo/* backend/
+cp -r /path/to/frontend-repo/* frontend/
+git add -A && git commit -m "Bootstrap monorepo from team repos"
+
+# 2. Seed each remote so future pulls skip the existing history
+npx tsx shadow-pull.ts -r backend --seed
+npx tsx shadow-pull.ts -r frontend --seed
+
+# 3. From now on, regular pull/push works
+npx tsx shadow-pull.ts -r backend
+npx tsx shadow-push.ts -r frontend -m "My changes"
+```
+
+Without `--seed`, the first pull would attempt to replay every remote commit (after `SYNC_SINCE`) on top of files you already copied, causing conflicts.
+
+## Pulling feature branches
+
+To pull a feature branch from a remote, create a matching local branch first:
+
+```bash
+git checkout -b feature/auth
+npx tsx shadow-pull.ts -r backend -b feature/auth
+```
+
+Shadow-pull automatically detects that `feature/auth` is not the default branch and uses range syntax (`main..feature/auth`) to only mirror the branch-specific commits — not the entire main history.
+
+If you forget to switch branches, shadow-pull will warn you:
+
+```
+⚠ Pulling remote branch 'feature/auth' while on local branch 'main'.
+  Consider: git checkout -b feature/auth
 ```
 
 ## Tests
