@@ -156,18 +156,30 @@ export function listTeamBranches(remote: string): string[] {
 }
 
 export function getCommitMeta(hash: string): CommitMeta {
-  const fmt = (f: string) => run(["log", "-1", `--format=${f}`, hash]);
+  // Use a single git spawn with a delimiter to avoid 9 separate processes per commit.
+  const SEP = "---SHADOW-SEP---";
+  const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%B", "%h: %s", "%P"]
+    .join(SEP);
+  const raw = run(["log", "-1", `--format=${format}`, hash]);
+  // %B (message body) may contain newlines, so split from both ends.
+  // Fields before %B: an, ae, aD, cn, ce, cD (6 fields)
+  // Fields after %B: short, parents (2 fields)
+  const parts = raw.split(SEP);
+  // First 6 and last 2 are single-line; everything in between is the message body.
+  const head = parts.slice(0, 6);
+  const tail = parts.slice(-2);
+  const message = parts.slice(6, -2).join(SEP);
   return {
     hash,
-    authorName:     fmt("%an"),
-    authorEmail:    fmt("%ae"),
-    authorDate:     fmt("%aD"),
-    committerName:  fmt("%cn"),
-    committerEmail: fmt("%ce"),
-    committerDate:  fmt("%cD"),
-    message:        fmt("%B"),
-    short:          fmt("%h: %s"),
-    parentCount:    fmt("%P").split(/\s+/).filter(Boolean).length,
+    authorName:     head[0],
+    authorEmail:    head[1],
+    authorDate:     head[2],
+    committerName:  head[3],
+    committerEmail: head[4],
+    committerDate:  head[5],
+    message,
+    short:          tail[0],
+    parentCount:    tail[1].split(/\s+/).filter(Boolean).length,
   };
 }
 
@@ -290,7 +302,7 @@ export function appendTrailer(message: string, trailer: string): string {
     [...GIT_CONFIG_OVERRIDES, "interpret-trailers", "--trailer", trailer],
     { input: message, encoding: "utf8", maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"] },
   );
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const trimmed = message.trimEnd();
     return `${trimmed}\n\n${trailer}\n`;
   }
@@ -304,7 +316,10 @@ export function appendTrailer(message: string, trailer: string): string {
  * Also returns deleted paths (where b/ side is /dev/null).
  */
 export function extractPatchFiles(patch: string, subdir: string): string[] {
+  const seen = new Set<string>();
   const files: string[] = [];
+  const add = (p: string) => { if (!seen.has(p)) { seen.add(p); files.push(p); } };
+
   for (const line of patch.split("\n")) {
     // Match "diff --git a/foo b/bar"
     const m = line.match(/^diff --git a\/.+ b\/(.+)$/);
@@ -312,7 +327,7 @@ export function extractPatchFiles(patch: string, subdir: string): string[] {
       const rel = m[1];
       // Reject paths that attempt directory traversal or are absolute
       if (rel.includes("..") || rel.startsWith("/")) continue;
-      files.push(`${subdir}/${rel}`);
+      add(`${subdir}/${rel}`);
       continue;
     }
     // Also catch deleted files from "--- a/foo" when "+++ /dev/null"
@@ -320,8 +335,7 @@ export function extractPatchFiles(patch: string, subdir: string): string[] {
     if (del && del[1] !== "/dev/null") {
       const rel = del[1];
       if (rel.includes("..") || rel.startsWith("/")) continue;
-      const candidate = `${subdir}/${rel}`;
-      if (!files.includes(candidate)) files.push(candidate);
+      add(`${subdir}/${rel}`);
     }
   }
   return files;
@@ -356,13 +370,15 @@ export function parseShadowIgnore(scriptDir: string): ShadowIgnore {
  * identified by Shadow-synced-from trailers.
  * Uses --grep so git pre-filters rather than scanning every commit body.
  */
+const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
+
 export function buildAlreadySyncedSet(): Set<string> {
   const synced = new Set<string>();
   const log = runSafe(["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B"]);
   if (!log.ok || !log.stdout) return synced;
 
   for (const line of log.stdout.split("\n")) {
-    const match = line.match(new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`));
+    const match = line.match(SYNCED_HASH_RE);
     if (match) synced.add(match[1]);
   }
   return synced;
@@ -379,7 +395,7 @@ export function buildAlreadySyncedSetFor(dir: string): Set<string> {
   if (!log.ok || !log.stdout) return synced;
 
   for (const line of log.stdout.split("\n")) {
-    const match = line.match(new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`));
+    const match = line.match(SYNCED_HASH_RE);
     if (match) synced.add(match[1]);
   }
   return synced;
@@ -618,6 +634,14 @@ export function handlePreflightResults(warnings: PreflightWarning[]): boolean {
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
+
+/** Validate that a dir/remote name is safe for use in git commands and path construction. */
+export function validateName(value: string, label: string): void {
+  if (!value) die(`${label} must not be empty.`);
+  if (value.includes("..")) die(`${label} must not contain '..'.`);
+  if (value.startsWith("/") || value.startsWith("\\")) die(`${label} must not be an absolute path.`);
+  if (value.startsWith("-")) die(`${label} must not start with '-'.`);
+}
 
 export function die(msg: string): never {
   console.error(`✘ ${msg}`);

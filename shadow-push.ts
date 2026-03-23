@@ -8,7 +8,7 @@ import {
   REMOTES, PUSH_TRAILER,
   run, runSafe, refExists, listTeamBranches,
   getCurrentBranch, appendTrailer,
-  parseShadowIgnore, acquireLock, die,
+  parseShadowIgnore, acquireLock, validateName, die,
   preflightChecks, handlePreflightResults,
 } from "./shadow-common";
 
@@ -63,6 +63,8 @@ if (values.remote && !remoteEntry) {
 const remote     = values.remote ?? remoteEntry!.remote;
 const dir        = values.dir    ?? remoteEntry!.dir;
 const teamBranch = values.branch ?? localBranch;
+validateName(remote, "Remote name");
+validateName(dir, "Directory");
 const teamRef    = `${remote}/${teamBranch}`;
 const localHead  = run(["rev-parse", "HEAD"]);
 
@@ -75,6 +77,8 @@ if (dirtyStaged || dirtyUnstaged) {
   console.error(`\nCommit or stash them before running shadow-push.`);
   process.exit(1);
 }
+
+acquireLock(SCRIPT_DIR, "shadow-push");
 
 console.log(`Remote        : ${remote}`);
 console.log(`Local dir     : ${dir}/`);
@@ -290,13 +294,9 @@ console.log(`Pushing to ${remote}/${teamBranch}...`);
 
 // Retry on non-fast-forward: someone may have pushed between our fetch and push.
 const MAX_RETRIES = 3;
-let pushed = false;
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
   const pushResult = runSafe(["push", remote, `HEAD:${teamBranch}`], worktreeDir);
-  if (pushResult.ok) {
-    pushed = true;
-    break;
-  }
+  if (pushResult.ok) break;
   const isNonFF = pushResult.stderr.includes("non-fast-forward")
     || pushResult.stderr.includes("rejected")
     || pushResult.stderr.includes("fetch first");

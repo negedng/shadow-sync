@@ -8,7 +8,7 @@ import {
   getCurrentBranch, getCommitMeta, diffForCommit,
   applyPatch, extractPatchFiles, commitWithMeta, appendTrailer,
   buildAlreadySyncedSetFor, collectTeamCommits,
-  acquireLock, die, setSyncSince,
+  acquireLock, validateName, die, setSyncSince,
   saveConflictState, loadConflictState, clearConflictState,
   preflightChecks, handlePreflightResults,
 } from "./shadow-common";
@@ -63,6 +63,8 @@ if (values.remote && !remoteEntry) {
 const remote     = values.remote ?? remoteEntry!.remote;
 const dir        = values.dir    ?? remoteEntry!.dir;
 const teamBranch = values.branch ?? localBranch;
+validateName(remote, "Remote name");
+validateName(dir, "Directory");
 const teamRef    = `${remote}/${teamBranch}`;
 
 // Refuse to pull if the local dir has uncommitted changes — applying patches
