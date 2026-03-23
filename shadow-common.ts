@@ -34,6 +34,8 @@ export const EMPTY_TREE     = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  *  Set to undefined to walk the full history (not recommended on mature repos). */
 export const SYNC_SINCE: string | undefined = "2024-11-01";
 
+export type ApplyResult = "applied" | "conflict" | "failed";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface CommitMeta {
@@ -113,30 +115,40 @@ export function getCommitMeta(hash: string): CommitMeta {
 
 /**
  * Apply a patch (raw diff string) under subdir using `git apply`.
- * Returns true on success, false on failure.
- * On failure re-applies with --reject so .rej files are created for manual resolution.
+ * Returns "applied" on clean apply, "conflict" if 3-way merge left
+ * conflict markers, or "failed" if the patch couldn't be applied at all.
  */
-export function applyPatch(patch: string, subdir: string): boolean {
-  const applyArgs = ["apply", "--directory", subdir, "--ignore-whitespace"];
+export function applyPatch(patch: string, subdir: string): ApplyResult {
+  const baseArgs = ["apply", "--directory", subdir, "--ignore-whitespace"];
 
   // Write patch to a temp file to avoid Windows spawnSync stdin deadlocks
   const tmpPatch = path.join(os.tmpdir(), `shadow-patch-${process.pid}.patch`);
   fs.writeFileSync(tmpPatch, patch);
 
   try {
-    const result = spawnSync("git", [...applyArgs, tmpPatch], {
+    // 1) Try exact apply
+    const result = spawnSync("git", [...baseArgs, tmpPatch], {
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (result.status === 0) return "applied";
 
-    if (result.status === 0) return true;
-
-    spawnSync("git", [...applyArgs, "--reject", tmpPatch], {
+    // 2) Fall back to 3-way merge, same as git merge/rebase would.
+    const threeWay = spawnSync("git", [...baseArgs, "--3way", tmpPatch], {
       encoding: "utf8",
       stdio: "inherit",
     });
+    if (threeWay.status === 0) return "applied";
 
-    return false;
+    // --3way exits non-zero when there are merge conflicts.
+    // Check whether it produced conflict markers (unmerged entries)
+    // vs failing entirely (e.g. missing blobs).
+    const unmerged = runSafe("git diff --name-only --diff-filter=U");
+    if (unmerged.ok && unmerged.stdout) {
+      return "conflict";
+    }
+
+    return "failed";
   } finally {
     try { fs.unlinkSync(tmpPatch); } catch {}
   }
@@ -308,6 +320,38 @@ export function acquireLock(scriptDir: string, name: string): () => void {
   process.on("SIGTERM", () => { release(); process.exit(143); });
 
   return release;
+}
+
+// ── Conflict state ────────────────────────────────────────────────────────────
+
+interface ConflictState {
+  hash: string;
+  remote: string;
+  dir: string;
+}
+
+function conflictStatePath(scriptDir: string): string {
+  const key = crypto.createHash("md5").update(scriptDir).digest("hex").slice(0, 8);
+  return path.join(os.tmpdir(), `shadow-pull-conflict-${key}.json`);
+}
+
+export function saveConflictState(scriptDir: string, state: ConflictState): void {
+  fs.writeFileSync(conflictStatePath(scriptDir), JSON.stringify(state));
+}
+
+export function loadConflictState(scriptDir: string): ConflictState | null {
+  const p = conflictStatePath(scriptDir);
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function clearConflictState(scriptDir: string): void {
+  const p = conflictStatePath(scriptDir);
+  try { fs.unlinkSync(p); } catch {}
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────

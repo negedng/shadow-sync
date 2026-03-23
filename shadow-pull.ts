@@ -8,6 +8,7 @@ import {
   applyPatch, commitWithMeta, appendTrailer,
   buildAlreadySyncedSetFor, collectTeamCommits,
   acquireLock, die,
+  saveConflictState, loadConflictState, clearConflictState,
 } from "./shadow-common";
 
 // ── Args ──────────────────────────────────────────────────────────────────────
@@ -109,9 +110,43 @@ if (newCommits.length === 0) {
 console.log(`Found ${newCommits.length} new commit(s) to mirror.`);
 console.log();
 
+// ── Resume after conflict resolution ──────────────────────────────────────────
+
+const pendingConflict = loadConflictState(SCRIPT_DIR);
+if (pendingConflict && pendingConflict.remote === remote && pendingConflict.dir === dir) {
+  const unmerged = runSafe("git diff --name-only --diff-filter=U");
+  if (unmerged.ok && unmerged.stdout) {
+    console.error("✘ There are still unresolved conflicts. Resolve them and stage before re-running.");
+    process.exit(1);
+  }
+
+  const hash = pendingConflict.hash;
+  const meta = getCommitMeta(hash);
+  console.log(`  Resuming ${meta.short} (conflict resolved)...`);
+
+  run(`git add ${dir}/`);
+
+  const hasStagedChanges = !runSafe("git diff --cached --quiet").ok;
+  const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
+
+  if (!hasStagedChanges) {
+    console.log("    (no changes after resolution — recording as synced)");
+    commitWithMeta(meta, syncedMessage, /* allowEmpty */ true);
+    console.log("  ✓ Recorded (empty).");
+  } else {
+    commitWithMeta(meta, syncedMessage);
+    console.log("  ✓ Mirrored (conflict resolved).");
+  }
+
+  clearConflictState(SCRIPT_DIR);
+  alreadySynced.add(hash);
+}
+
 // ── Apply commits ─────────────────────────────────────────────────────────────
 
 for (const hash of newCommits) {
+  if (alreadySynced.has(hash)) continue;
+
   const meta = getCommitMeta(hash);
 
   const label = meta.parentCount > 1
@@ -124,9 +159,18 @@ for (const hash of newCommits) {
 
   const patch = diffForCommit(meta);
 
-  if (!applyPatch(patch, dir)) {
-    console.error(`\n  ✘ Patch did not apply cleanly for ${meta.short}`);
-    console.error(`    Fix the .rej files, stage your changes, then re-run.`);
+  const result = applyPatch(patch, dir);
+
+  if (result === "conflict") {
+    saveConflictState(SCRIPT_DIR, { hash, remote, dir });
+    console.error(`\n  ✘ Merge conflict while applying ${meta.short}`);
+    console.error(`    Resolve the conflicts, stage your changes, then re-run.`);
+    process.exit(1);
+  }
+
+  if (result === "failed") {
+    console.error(`\n  ✘ Could not apply patch for ${meta.short}`);
+    console.error(`    The 3-way merge could not be attempted (missing blob objects?).`);
     process.exit(1);
   }
 
