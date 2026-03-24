@@ -1,0 +1,47 @@
+import * as fs from "fs";
+import * as path from "path";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { assertEqual } from "./assert";
+
+// Verify that ** glob patterns in .shadowignore exclude files at any depth.
+// E.g. "**\/CLAUDE.md" should exclude CLAUDE.md in root and nested dirs.
+export default function run() {
+  const env = createTestEnv("push-ignore-deep");
+  try {
+    // Sync initial state
+    commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
+    const r1 = runPull(env);
+    assertEqual(r1.status, 0, "initial pull should succeed");
+
+    // Create .shadowignore with a ** pattern to exclude CLAUDE.md everywhere
+    fs.writeFileSync(path.join(env.localRepo, ".shadowignore"), "**/CLAUDE.md\n");
+
+    // Add files at various depths, including CLAUDE.md at root and nested
+    commitOnLocal(env, {
+      "app.ts": "export const app = true;\n",
+      "CLAUDE.md": "# root claude\n",
+      "src/CLAUDE.md": "# nested claude\n",
+      "src/deep/CLAUDE.md": "# deeply nested claude\n",
+      "src/deep/real.ts": "export const real = 1;\n",
+    }, "Add files with CLAUDE.md at multiple depths");
+
+    // Push
+    const r2 = runPush(env, "Push with deep shadowignore");
+    assertEqual(r2.status, 0, "push should succeed");
+
+    // Verify remote
+    pullRemoteWorking(env);
+    assertEqual(readRemoteFile(env, "app.ts"), "export const app = true;\n", "app.ts should be on remote");
+    assertEqual(readRemoteFile(env, "src/deep/real.ts"), "export const real = 1;\n", "real.ts should be on remote");
+    assertEqual(readRemoteFile(env, "CLAUDE.md"), null, "root CLAUDE.md should NOT be on remote");
+    assertEqual(readRemoteFile(env, "src/CLAUDE.md"), null, "nested CLAUDE.md should NOT be on remote");
+    assertEqual(readRemoteFile(env, "src/deep/CLAUDE.md"), null, "deeply nested CLAUDE.md should NOT be on remote");
+  } finally {
+    env.cleanup();
+  }
+}
+
+if (require.main === module) {
+  run();
+  console.log("PASS  test-push-shadowignore-deep");
+}
