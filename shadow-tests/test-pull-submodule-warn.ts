@@ -1,4 +1,4 @@
-import { createTestEnv, runPull } from "./harness";
+import { createTestEnv, runCiSync } from "./harness";
 import { assertIncludes } from "./assert";
 import { execSync, spawnSync } from "child_process";
 import * as fs from "fs";
@@ -28,7 +28,7 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should warn about the submodule
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertIncludes(r.stderr, "SUBMODULE", "should warn about submodule");
     assertIncludes(r.stderr, "vendor/lib", "should mention the submodule path");
   } finally {

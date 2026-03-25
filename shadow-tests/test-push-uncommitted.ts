@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes, assertExitCode } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -15,7 +15,8 @@ export default function run() {
   try {
     // ── Setup: sync initial state ────────────────────────────────────
     commitOnRemote(env, { "base.txt": "base content\n" }, "Add base.txt");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Add a committed file so there's something to push

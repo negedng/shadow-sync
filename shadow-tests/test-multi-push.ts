@@ -1,4 +1,4 @@
-import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 /** Test: push to two independent remotes from separate subdirs. */
@@ -9,8 +9,10 @@ export default function run() {
     // Sync initial state from both remotes
     commitOnRemote(env, { "base.txt": "frontend base\n" }, "Frontend base");
     commitOnRemote(env, { "base.txt": "backend base\n" }, "Backend base", backend);
-    assertEqual(runPull(env).status, 0, "frontend pull");
-    assertEqual(runPull(env, [], backend).status, 0, "backend pull");
+    const r0 = runCiSync(env);
+    assertEqual(r0.status, 0, "ci-sync should succeed");
+    mergeShadow(env);
+    mergeShadow(env, backend);
 
     // Make local changes to both subdirs
     commitOnLocal(env, { "new.tsx": "// frontend code\n" }, "Add frontend file");

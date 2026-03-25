@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -6,7 +6,8 @@ export default function run() {
   try {
     // Sync initial state with two files
     commitOnRemote(env, { "keep.txt": "keep\n", "remove.txt": "remove\n" }, "Add two files");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Delete one file locally

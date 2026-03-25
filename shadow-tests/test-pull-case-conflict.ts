@@ -1,4 +1,4 @@
-import { createTestEnv, runPull } from "./harness";
+import { createTestEnv, runCiSync } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 import { execSync, spawnSync } from "child_process";
 import * as fs from "fs";
@@ -43,7 +43,7 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should refuse with CASE_CONFLICT error
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertEqual(r.status, 1, "pull should fail on case conflict");
     assertIncludes(r.stderr, "CASE_CONFLICT", "should mention case conflict");
     assertIncludes(r.stderr, "README.md", "should mention the conflicting file");

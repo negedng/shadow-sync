@@ -61,7 +61,6 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   git('config user.email "local@test.com"', localRepo);
   git('config user.name "Local Dev"', localRepo);
   git("config core.autocrlf false", localRepo);
-  // Create initial commit (subdir is created later by pull/local commits)
   fs.writeFileSync(path.join(localRepo, "mono.txt"), "mono-repo root\n");
   fs.mkdirSync(path.join(localRepo, subdir), { recursive: true });
   git("add -A", localRepo);
@@ -72,9 +71,21 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   git(`remote add origin "${originBare}"`, localRepo);
   git("push origin main", localRepo);
 
+  // Create shadow branch on origin for export tests
+  const shadowBranch = `shadow/${subdir}/main`;
+  git(`checkout --orphan ${shadowBranch}`, localRepo);
+  git("reset --hard", localRepo);
+  git('commit --allow-empty -m "Initialize shadow branch"', localRepo);
+  git(`push origin HEAD:${shadowBranch}`, localRepo);
+  git("checkout main", localRepo);
+
   // Copy shadow scripts and config into local repo so they run from there
   const scriptDir = path.resolve(__dirname, "..");
-  for (const f of ["shadow-common.ts", "shadow-pull.ts", "shadow-export.ts", "shadow-config.json"]) {
+  const scripts = [
+    "shadow-common.ts", "shadow-ci-sync.ts", "shadow-ci-forward.ts",
+    "shadow-export.ts", "shadow-config.json",
+  ];
+  for (const f of scripts) {
     fs.copyFileSync(path.join(scriptDir, f), path.join(localRepo, f));
   }
 
@@ -110,6 +121,14 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   git(`remote add ${remoteName} "${remoteBare}"`, env.localRepo);
   git(`fetch ${remoteName}`, env.localRepo);
   fs.mkdirSync(path.join(env.localRepo, subdir), { recursive: true });
+
+  // Create shadow branch for this remote too
+  const shadowBranch = `shadow/${subdir}/main`;
+  git(`checkout --orphan ${shadowBranch}`, env.localRepo);
+  git("reset --hard", env.localRepo);
+  git('commit --allow-empty -m "Initialize shadow branch"', env.localRepo);
+  git(`push origin HEAD:${shadowBranch}`, env.localRepo);
+  git("checkout main", env.localRepo);
 
   const info: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking };
   env.remotes.push(info);
@@ -198,24 +217,7 @@ export function getLocalLogFull(env: TestEnv, n = 20): string {
   return git(`log --format="%B" -${n}`, env.localRepo);
 }
 
-/** Build env vars for running shadow scripts in test mode. */
-function testEnv(env: TestEnv): Record<string, string> {
-  const base: Record<string, string> = {
-    ...process.env as Record<string, string>,
-    SHADOW_TEST_SINCE: "",  // no date filter in tests
-    SHADOW_PUSH_ORIGIN: "origin",  // push targets origin bare in test env
-  };
-  if (env.remotes.length > 1) {
-    // Multi-remote: pass full REMOTES array as JSON
-    base.SHADOW_TEST_REMOTES = JSON.stringify(
-      env.remotes.map(r => ({ remote: r.remoteName, dir: r.subdir }))
-    );
-  } else {
-    base.SHADOW_TEST_REMOTE = env.remoteName;
-    base.SHADOW_TEST_DIR = env.subdir;
-  }
-  return base;
-}
+// ── Script runners ────────────────────────────────────────────────────────────
 
 export interface RunResult {
   status: number | null;
@@ -228,20 +230,59 @@ function shellQuote(s: string): string {
   return `"${s.replace(/"/g, '\\"')}"`;
 }
 
+/** Build env vars for CI sync script — provides remote URLs and config overrides. */
+function ciEnv(env: TestEnv): Record<string, string> {
+  const base: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    SHADOW_TEST_SINCE: "",
+    SHADOW_PUSH_ORIGIN: "origin",
+  };
+  // Provide remote URLs via env vars (like GitHub secrets)
+  for (const r of env.remotes) {
+    const key = `SHADOW_REMOTE_${r.remoteName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_URL`;
+    base[key] = r.remoteBare;
+  }
+  // Override REMOTES config
+  if (env.remotes.length > 1) {
+    base.SHADOW_TEST_REMOTES = JSON.stringify(
+      env.remotes.map(r => ({ remote: r.remoteName, dir: r.subdir }))
+    );
+  } else {
+    base.SHADOW_TEST_REMOTE = env.remoteName;
+    base.SHADOW_TEST_DIR = env.subdir;
+  }
+  return base;
+}
+
+/** Build env vars for local scripts (export). */
+function localEnv(env: TestEnv): Record<string, string> {
+  const base: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    SHADOW_TEST_SINCE: "",
+    SHADOW_PUSH_ORIGIN: "origin",
+  };
+  if (env.remotes.length > 1) {
+    base.SHADOW_TEST_REMOTES = JSON.stringify(
+      env.remotes.map(r => ({ remote: r.remoteName, dir: r.subdir }))
+    );
+  } else {
+    base.SHADOW_TEST_REMOTE = env.remoteName;
+    base.SHADOW_TEST_DIR = env.subdir;
+  }
+  return base;
+}
+
 /**
  * Run a shadow script in the test env.
- * Uses the node binary + tsx loader from the current process to avoid
- * npx resolution issues when cwd is a temp directory.
  */
-function runScript(env: TestEnv, script: string, args: string[]): RunResult {
+function runScript(env: TestEnv, script: string, args: string[], envVars: Record<string, string>): RunResult {
   const scriptPath = path.join(env.localRepo, script).replace(/\\/g, "/");
   const parts = [shellQuote(scriptPath), ...args.map(shellQuote)];
-  // Use npx tsx with the original project dir in PATH so npx can find tsx
   const projectDir = path.resolve(__dirname, "..").replace(/\\/g, "/");
   const cmd = `npx --prefix ${shellQuote(projectDir)} tsx ${parts.join(" ")}`;
   const result = spawnSync(cmd, {
     cwd: env.localRepo,
-    env: testEnv(env),
+    env: envVars,
     encoding: "utf8",
     shell: true,
     timeout: 30000,
@@ -253,19 +294,38 @@ function runScript(env: TestEnv, script: string, args: string[]): RunResult {
   };
 }
 
-/** Run shadow-pull.ts in the test env. Optionally target a specific remote. */
-export function runPull(env: TestEnv, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
-  const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-pull.ts", ["-r", name, ...extraArgs]);
+/**
+ * Run shadow-ci-sync.ts — simulates the CI pull workflow.
+ * Replays external remote commits into shadow branches on origin.
+ * After running, checks out main so the local repo is in a clean state.
+ */
+export function runCiSync(env: TestEnv): RunResult {
+  const result = runScript(env, "shadow-ci-sync.ts", [], ciEnv(env));
+  // CI sync switches branches; restore main for subsequent operations
+  try { git("checkout main", env.localRepo); } catch { /* may already be on main */ }
+  return result;
 }
 
-/** Run shadow-export.ts in the test env. Optionally target a specific remote. */
+/**
+ * Run shadow-ci-forward.ts — simulates the CI forward workflow.
+ * Forwards shadow branch content to the external remote.
+ */
+export function runCiForward(env: TestEnv, remote?: RemoteInfo): RunResult {
+  const subdir = remote?.subdir ?? env.subdir;
+  const envVars = {
+    ...ciEnv(env),
+    GITHUB_REF_NAME: `shadow/${subdir}/main`,
+  };
+  return runScript(env, "shadow-ci-forward.ts", [], envVars);
+}
+
+/** Run shadow-export.ts — local filtered export to shadow branch. */
 export function runExport(env: TestEnv, message: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
   const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, ...extraArgs]);
+  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, ...extraArgs], localEnv(env));
 }
 
-/** @deprecated Alias for runExport — kept for test compatibility. */
+/** Alias for runExport. */
 export const runPush = runExport;
 
 /** Pull latest from bare remote into the remote working copy. */
@@ -281,12 +341,10 @@ export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
 export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const subdir = remote?.subdir ?? env.subdir;
   const shadowBranch = `shadow/${subdir}/main`;
-  // Fetch latest from origin bare
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
-    // Use execSync directly (not git() helper) to avoid .trim() stripping trailing newlines
     const content = execSync(`git show origin/${shadowBranch}:${subdir}/${rel}`, {
-      cwd: env.localRepo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+      cwd: env.localRepo, encoding: "utf8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
     });
     return normalizeLF(content);
   } catch {
@@ -318,3 +376,13 @@ export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): str
   }
 }
 
+/**
+ * Merge the shadow branch into the local working branch.
+ * Simulates what a user does to pull team changes locally.
+ */
+export function mergeShadow(env: TestEnv, remote?: RemoteInfo): void {
+  const subdir = remote?.subdir ?? env.subdir;
+  const shadowBranch = `shadow/${subdir}/main`;
+  git(`fetch origin ${shadowBranch}`, env.localRepo);
+  git(`merge origin/${shadowBranch} --no-edit --allow-unrelated-histories`, env.localRepo);
+}

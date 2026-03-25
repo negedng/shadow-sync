@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -6,7 +6,8 @@ export default function run() {
   try {
     // Sync state
     commitOnRemote(env, { "file.txt": "content\n" }, "Add file");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "pull should succeed");
 
     // First push creates the shadow branch with current content

@@ -91,16 +91,13 @@ Triggers on push to `shadow/**` branches. Takes a snapshot of the `{dir}/` conte
 | `-m` | Commit message (required) | |
 | `-n` | Dry run — show what would change | |
 
-**shadow-pull (local fallback):**
+**shadow-setup (initial bootstrap):**
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-r` | Remote name | First entry in `REMOTES` |
 | `-d` | Local subdirectory | Inferred from remote config |
-| `-b` | Branch on the remote | Current local branch |
-| `-s` | Only sync commits after this date | `SYNC_SINCE` in config |
-| `-n` | Dry run — show what would be synced | |
-| `--seed` | Record remote HEAD as sync baseline | |
+| `-b` | Branch to set up | Current local branch |
 
 ## Setup
 
@@ -118,7 +115,7 @@ Triggers on push to `shadow/**` branches. Takes a snapshot of the `{dir}/` conte
 
 2. Add GitHub Secrets for external repo URLs (see [Required secrets](#required-secrets)).
 
-3. For local pull (optional fallback), add git remotes:
+3. Add git remotes for each external repo:
 
 ```bash
 git remote add backend   git@their-server.com:backend.git
@@ -128,20 +125,18 @@ git remote add frontend  git@their-server.com:frontend.git
 ## Initial bootstrap
 
 ```bash
-# 1. Copy files from each team repo into your monorepo subdirectories
-cp -r /path/to/backend-repo/* backend/
-cp -r /path/to/frontend-repo/* frontend/
-git add -A && git commit -m "Bootstrap monorepo from team repos"
+# 1. Run setup for each remote (creates shadow branch + seed baseline)
+npm run setup -- -r backend
+npm run setup -- -r frontend
 
-# 2. Seed each remote so future pulls skip the existing history
-npx tsx shadow-pull.ts -r backend --seed
-npx tsx shadow-pull.ts -r frontend --seed
+# 2. Push the seed commits
+git push
 
-# 3. From now on, CI handles pull. To push local changes:
+# 3. From now on, CI handles sync. To push local changes:
 npm run export -- -m "My changes"
 ```
 
-Without `--seed`, the first pull would attempt to replay every remote commit (after `SYNC_SINCE`) on top of files you already copied, causing conflicts.
+The setup script creates the shadow branch on origin and records a seed commit so CI sync skips existing history.
 
 ## Branch layout
 
@@ -166,7 +161,7 @@ npx tsx shadow-tests/test-pull-basic.ts   # Run a single test
 |------|---------|
 | `shadow-config.json` | Remotes, sync date, trailers, and other settings |
 | `shadow-common.ts` | Shared config, git helpers, patch application, replay engine |
-| `shadow-pull.ts` | Mirrors remote commits into a local subdirectory (local fallback) |
+| `shadow-setup.ts` | Bootstrap: creates shadow branch and seed baseline |
 | `shadow-export.ts` | Exports local subdirectory to shadow branch (with `.shadowignore` filtering) |
 | `shadow-sync-all.ts` | Syncs all remote branches into local shadow branches |
 | `shadow-ci-sync.ts` | CI: replays remote commits to shadow branches |

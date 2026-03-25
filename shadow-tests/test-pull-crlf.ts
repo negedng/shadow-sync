@@ -1,4 +1,4 @@
-import { createTestEnv, runPull, readLocalFile } from "./harness";
+import { createTestEnv, runCiSync, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -24,11 +24,11 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should succeed regardless of local autocrlf setting
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertEqual(r.status, 0, `pull of CRLF file should succeed: ${r.stderr.slice(0, 300)}`);
 
     // Verify the file exists locally
-    const localContent = readLocalFile(env, "crlf-file.txt");
+    const localContent = readShadowFile(env, "crlf-file.txt");
     assertEqual(localContent !== null, true, "CRLF file should exist locally");
 
     // Now test: remote modifies the CRLF file
@@ -39,7 +39,7 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull the modification — this is where CRLF patches often fail
-    const r2 = runPull(env);
+    const r2 = runCiSync(env);
     assertEqual(r2.status, 0, `pull of modified CRLF file should succeed: ${r2.stderr.slice(0, 300)}`);
   } finally {
     env.cleanup();

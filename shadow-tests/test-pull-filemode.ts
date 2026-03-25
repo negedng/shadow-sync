@@ -1,4 +1,4 @@
-import { createTestEnv, runPull, readLocalFile } from "./harness";
+import { createTestEnv, runCiSync, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -23,9 +23,9 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull the initial file
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
-    assertEqual(readLocalFile(env, "script.sh"), "#!/bin/bash\necho hello\n", "script content");
+    assertEqual(readShadowFile(env, "script.sh"), "#!/bin/bash\necho hello\n", "script content");
 
     // Now change the mode to executable using update-index
     git("update-index --chmod=+x script.sh", env.remoteWorking);
@@ -33,11 +33,11 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull the mode change — should not fail even on Windows
-    const r2 = runPull(env);
+    const r2 = runCiSync(env);
     assertEqual(r2.status, 0, `pull of mode change should succeed: ${r2.stderr.slice(0, 300)}`);
 
     // Content should be unchanged
-    assertEqual(readLocalFile(env, "script.sh"), "#!/bin/bash\necho hello\n", "content after mode change");
+    assertEqual(readShadowFile(env, "script.sh"), "#!/bin/bash\necho hello\n", "content after mode change");
 
     // Now modify content AND mode simultaneously
     fs.writeFileSync(path.join(env.remoteWorking, "script.sh"), "#!/bin/bash\necho hello world\n");
@@ -45,9 +45,9 @@ export default function run() {
     git('commit -m "Update script content"', env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
-    const r3 = runPull(env);
+    const r3 = runCiSync(env);
     assertEqual(r3.status, 0, `pull of content+mode should succeed: ${r3.stderr.slice(0, 300)}`);
-    assertEqual(readLocalFile(env, "script.sh"), "#!/bin/bash\necho hello world\n", "updated content");
+    assertEqual(readShadowFile(env, "script.sh"), "#!/bin/bash\necho hello world\n", "updated content");
   } finally {
     env.cleanup();
   }

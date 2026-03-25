@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -14,7 +14,8 @@ export default function run() {
   try {
     // Initial sync
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Add a file locally under custom-dir

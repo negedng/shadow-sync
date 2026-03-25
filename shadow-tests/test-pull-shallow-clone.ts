@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -25,14 +25,14 @@ export default function run() {
     assertEqual(isShallow, "true", "repo should be shallow");
 
     // Pull should refuse
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertEqual(r.status, 1, "pull should fail on shallow clone");
     assertIncludes(r.stderr, "SHALLOW_CLONE", "should mention shallow clone");
     assertIncludes(r.stderr, "unshallow", "should suggest fix");
 
     // Clean up the shallow file and pull should work
     fs.unlinkSync(path.join(env.localRepo, ".git", "shallow"));
-    const r2 = runPull(env);
+    const r2 = runCiSync(env);
     assertEqual(r2.status, 0, "pull should succeed after unshallowing");
   } finally {
     env.cleanup();

@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile, getShadowLog } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile, getShadowLog } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 function git(cmd: string, cwd: string): string {
@@ -12,7 +12,8 @@ export default function run() {
   try {
     // Sync initial state
     commitOnRemote(env, { "base.txt": "base content\n" }, "Add base");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Create a feature branch

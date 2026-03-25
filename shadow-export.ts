@@ -105,23 +105,8 @@ const ignore = parseShadowIgnore(SCRIPT_DIR);
 console.log(`Fetching latest from ${pushOrigin}...`);
 run(["fetch", pushOrigin]);
 
-let resolvedShadowRef = shadowRef;
-let isNewShadowBranch = false;
-
 if (!refExists(shadowRef)) {
-  console.log(`Shadow branch '${shadowRef}' does not exist yet on ${pushOrigin}.`);
-
-  const base = ["main", "master"]
-    .map(c => `${pushOrigin}/${shadowBranchName(dir, c)}`)
-    .find(ref => refExists(ref));
-
-  if (base) {
-    resolvedShadowRef = base;
-    console.log(`Branching from ${resolvedShadowRef}...`);
-  } else {
-    isNewShadowBranch = true;
-    console.log(`Creating new shadow branch.`);
-  }
+  die(`Shadow branch '${shadowRef}' does not exist. Run shadow-setup.ts first.`);
 }
 
 // ── Worktree ──────────────────────────────────────────────────────────────────
@@ -167,14 +152,7 @@ for (const filePath of trackedFiles) {
   fs.writeFileSync(destPath, result.stdout);
 }
 
-if (isNewShadowBranch) {
-  run(["worktree", "add", "--orphan", "-b", tempBranch, worktreeDir]);
-  spawnSync("git", ["-c", "core.autocrlf=false", "commit", "--allow-empty", "-m", "Initialize shadow branch"], {
-    cwd: worktreeDir, encoding: "utf8", stdio: "inherit",
-  });
-} else {
-  run(["worktree", "add", "-b", tempBranch, worktreeDir, resolvedShadowRef]);
-}
+run(["worktree", "add", "-b", tempBranch, worktreeDir, shadowRef]);
 
 console.log(`Syncing into temporary worktree...`);
 

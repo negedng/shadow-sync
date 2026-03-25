@@ -1,4 +1,4 @@
-import { createTestEnv, runPull } from "./harness";
+import { createTestEnv, runCiSync } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 import { execSync, spawnSync } from "child_process";
 import * as fs from "fs";
@@ -32,7 +32,7 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should warn about symlink
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertIncludes(r.stderr, "SYMLINK", "should warn about symlink");
     assertIncludes(r.stderr, "config-link", "should mention the symlink path");
   } finally {

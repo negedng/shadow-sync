@@ -1,4 +1,4 @@
-import { createTestEnv, runPull, readLocalFile } from "./harness";
+import { createTestEnv, runCiSync, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -28,10 +28,10 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should succeed and produce the complete file
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertEqual(r.status, 0, `pull should succeed, stderr: ${r.stderr.slice(0, 500)}`);
 
-    const localContent = readLocalFile(env, "large-file.txt");
+    const localContent = readShadowFile(env, "large-file.txt");
     assertEqual(localContent !== null, true, "large file should exist locally");
     assertEqual(
       localContent!.length,

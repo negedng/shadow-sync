@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -14,7 +14,8 @@ export default function run() {
   try {
     // Initial sync
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
-    runPull(env);
+    runCiSync(env);
+    mergeShadow(env);
 
     // Create a binary file locally
     const binaryContent = Buffer.from([

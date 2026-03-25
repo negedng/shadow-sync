@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 /** Test: --dry-run shows changes without pushing. */
@@ -7,7 +7,8 @@ export default function run() {
   try {
     // Sync initial state
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Add file locally

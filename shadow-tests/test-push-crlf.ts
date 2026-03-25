@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -15,7 +15,8 @@ export default function run() {
   try {
     // Initial sync
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
-    runPull(env);
+    runCiSync(env);
+    mergeShadow(env);
 
     // Disable autocrlf so CRLF is stored as-is in the object store
     git("config core.autocrlf false", env.localRepo);

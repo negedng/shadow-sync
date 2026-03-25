@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, getLocalLogFull } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, getShadowLogFull } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 /** Test: pulling a remote commit that produces no net change locally still gets
@@ -10,7 +10,7 @@ export default function run() {
     commitOnRemote(env, { "file.txt": "hello\n" }, "Add file");
 
     // Pull it
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
     assertEqual(r1.status, 0, "first pull should succeed");
 
     // Teammate makes a commit that changes and then reverts the file, producing
@@ -20,11 +20,11 @@ export default function run() {
 
     // This commit has a non-empty diff on the remote side (from its parent),
     // but after applying to our already-up-to-date subdir, it should be empty.
-    const r2 = runPull(env);
+    const r2 = runCiSync(env);
     assertEqual(r2.status, 0, "pull of redundant commit should succeed");
 
     // Should record it as synced (empty)
-    const log = getLocalLogFull(env);
+    const log = getShadowLogFull(env);
     assertIncludes(log, "Shadow-synced-from:", "should still track the commit");
   } finally {
     env.cleanup();

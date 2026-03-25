@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 // Verify that ** glob patterns in .shadowignore exclude files at any depth.
@@ -10,7 +10,8 @@ export default function run() {
   try {
     // Sync initial state
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base");
-    const r1 = runPull(env);
+    const r1 = runCiSync(env);
+    mergeShadow(env);
     assertEqual(r1.status, 0, "initial pull should succeed");
 
     // Create .shadowignore with a ** pattern to exclude CLAUDE.md everywhere

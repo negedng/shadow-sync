@@ -1,4 +1,4 @@
-import { createTestEnv, runPull } from "./harness";
+import { createTestEnv, runCiSync } from "./harness";
 import { assertIncludes } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -20,7 +20,7 @@ export default function run() {
     git("push origin main", env.remoteWorking);
 
     // Pull — should warn about LFS
-    const r = runPull(env);
+    const r = runCiSync(env);
     assertIncludes(r.stderr, "GIT_LFS", "should warn about LFS");
     assertIncludes(r.stderr, "pointer", "should mention pointer files");
   } finally {
