@@ -395,35 +395,22 @@ function getCommitMeta(hash: string): CommitMeta {
   };
 }
 
-function applyPatch(patch: string, subdir: string): "applied" | "conflict" | "failed" {
-  const baseArgs = [...GIT_CONFIG_OVERRIDES, "apply", "--directory", subdir,
-    "--ignore-whitespace"];
-
+function applyPatch(patch: string, subdir: string): boolean {
   const normalizedPatch = patch.replace(/\r\n/g, "\n");
   const tmpPatch = path.join(os.tmpdir(), `shadow-patch-${process.pid}.patch`);
   fs.writeFileSync(tmpPatch, normalizedPatch);
 
   try {
-    const result = spawnSync("git", [...baseArgs, tmpPatch], {
+    const result = spawnSync("git", [
+      ...GIT_CONFIG_OVERRIDES, "apply", "--directory", subdir,
+      "--ignore-whitespace", tmpPatch,
+    ], {
       encoding: "utf8",
       maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
     if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
-    if (result.status === 0) return "applied";
-
-    const threeWay = spawnSync("git", [...baseArgs, "--3way", tmpPatch], {
-      encoding: "utf8",
-      maxBuffer: MAX_BUFFER,
-      stdio: "inherit",
-    });
-    if (threeWay.error) throw new Error(`Failed to spawn git: ${threeWay.error.message}`);
-    if (threeWay.status === 0) return "applied";
-
-    const unmerged = runSafe(["diff", "--name-only", "--diff-filter=U"]);
-    if (unmerged.ok && unmerged.stdout) return "conflict";
-
-    return "failed";
+    return result.status === 0;
   } finally {
     try { fs.unlinkSync(tmpPatch); } catch (e: any) {
       if (e.code !== "ENOENT") console.warn(`Warning: failed to delete temp patch: ${e.message}`);
@@ -610,7 +597,7 @@ export function replayCommits(opts: {
     const patch = diffForCommit(meta);
     const result = applyPatch(patch, dir);
 
-    if (result !== "applied") {
+    if (!result) {
       throw new Error(`Could not apply patch for ${meta.short}. Shadow branch may be out of sync.`);
     }
 
