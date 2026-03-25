@@ -1,7 +1,7 @@
 {
   "remotes": [
-    { "remote": "backend",  "dir": "backend",  "url": "https://github.com/org/backend.git"  },
-    { "remote": "frontend", "dir": "frontend", "url": "https://github.com/org/frontend.git" }
+    { "remote": "backend",  "dir": "backend",  "url": "https://github.com/negedng/test-backend.git"  },
+    { "remote": "frontend", "dir": "frontend", "url": "https://github.com/negedng/test-frontend.git" }
   ],
 
   "trailers": {
