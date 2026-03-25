@@ -509,22 +509,13 @@ function findSeedHash(dir: string): string | null {
   return null;
 }
 
-function findRemoteDefaultBranch(remote: string): string | null {
-  for (const name of ["main", "master"]) {
-    if (refExists(`${remote}/${name}`)) return name;
-  }
-  return null;
-}
-
 function collectExternalCommits(
   externalRef: string,
-  opts?: { seedHash?: string; baseRef?: string },
+  seedHash?: string,
 ): string[] {
   const args = ["log", "--reverse", "--format=%H"];
-  if (opts?.seedHash) {
-    args.push(`${opts.seedHash}..${externalRef}`);
-  } else if (opts?.baseRef) {
-    args.push(`${opts.baseRef}..${externalRef}`);
+  if (seedHash) {
+    args.push(`${seedHash}..${externalRef}`);
   } else {
     args.push(externalRef);
   }
@@ -559,14 +550,7 @@ export function replayCommits(opts: {
     console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
   }
 
-  const defaultBranch = findRemoteDefaultBranch(remote);
-  const isFeatureBranch = defaultBranch != null && externalBranch !== defaultBranch;
-  const baseRef = isFeatureBranch ? `${remote}/${defaultBranch}` : undefined;
-  if (baseRef) {
-    console.log(`Feature branch detected: collecting only commits in ${baseRef}..${externalRef}`);
-  }
-
-  const allExternalCommits = collectExternalCommits(externalRef, { seedHash: seedHash ?? undefined, baseRef });
+  const allExternalCommits = collectExternalCommits(externalRef, seedHash ?? undefined);
 
   const newCommits: string[] = [];
   for (const hash of allExternalCommits) {
