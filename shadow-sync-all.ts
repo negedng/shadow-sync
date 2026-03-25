@@ -4,7 +4,7 @@ import { spawnSync } from "child_process";
 import * as path from "path";
 import {
   REMOTES, run, runSafe, listTeamBranches,
-  getCurrentBranch, die,
+  getCurrentBranch, die, shadowBranchName,
 } from "./shadow-common";
 
 const { values } = parseArgs({
@@ -42,7 +42,7 @@ for (const { remote, dir } of remotes) {
   run(["fetch", remote]);
 
   for (const branch of listTeamBranches(remote)) {
-    const shadowBranch = `${dir}/shadow-${branch}`;
+    const shadowBranch = shadowBranchName(dir, branch);
     console.log(`\n── ${remote}/${branch} → ${shadowBranch} ──`);
 
     if (!runSafe(["rev-parse", "--verify", shadowBranch]).ok) {

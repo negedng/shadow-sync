@@ -2,14 +2,12 @@
 import { parseArgs } from "util";
 import * as path from "path";
 import {
-  REMOTES, SYNC_TRAILER, PUSH_TRAILER,
-  run, runSafe, refExists, listTeamBranches,
-  getCurrentBranch, getCommitMeta, diffForCommit,
-  applyPatch, extractPatchFiles, commitWithMeta, appendTrailer,
-  buildAlreadySyncedSetFor, collectTeamCommits, findSeedHash, findRemoteDefaultBranch,
-  SEED_TRAILER,
+  REMOTES, SEED_TRAILER,
+  run, refExists, listTeamBranches,
+  getCurrentBranch, appendTrailer,
   acquireLock, validateName, die, setSyncSince,
   preflightChecks, handlePreflightResults,
+  replayCommits,
 } from "./shadow-common";
 
 // ── Args ──────────────────────────────────────────────────────────────────────
@@ -98,106 +96,13 @@ if (values.seed) {
   process.exit(0);
 }
 
-// ── Determine which commits to apply ─────────────────────────────────────────
+// ── Replay commits ───────────────────────────────────────────────────────────
 
-console.log("Scanning local history for already-mirrored commits...");
-const alreadySynced = buildAlreadySyncedSetFor(dir);
-console.log(`Found ${alreadySynced.size} previously mirrored commit(s).`);
-
-const seedHash = findSeedHash(dir);
-if (seedHash) {
-  console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
-}
-
-const defaultBranch = findRemoteDefaultBranch(remote);
-const isFeatureBranch = defaultBranch != null && teamBranch !== defaultBranch;
-const baseRef = isFeatureBranch ? `${remote}/${defaultBranch}` : undefined;
-if (baseRef) {
-  console.log(`Feature branch detected: collecting only commits in ${baseRef}..${teamRef}`);
-}
-
-const allTeamCommits = collectTeamCommits(teamRef, { seedHash: seedHash ?? undefined, baseRef });
-
-const newCommits: string[] = [];
-let   skippedOurs = 0;
-
-for (const hash of allTeamCommits) {
-  if (alreadySynced.has(hash)) continue;
-
-  const body = run(["log", "-1", "--format=%B", hash]);
-  if (body.includes(`${PUSH_TRAILER}:`)) {
-    skippedOurs++;
-    continue;
+try {
+  const result = replayCommits({ remote, dir, teamBranch, dryRun });
+  if (result.upToDate || dryRun) {
+    process.exit(0);
   }
-
-  newCommits.push(hash);
+} catch (err: any) {
+  die(err.message);
 }
-
-if (skippedOurs > 0) {
-  console.log(`Skipped ${skippedOurs} commit(s) that originated from you (shadow-push).`);
-}
-
-if (newCommits.length === 0) {
-  console.log("Already up to date. Nothing to mirror.");
-  process.exit(0);
-}
-
-console.log(`Found ${newCommits.length} new commit(s) to mirror.`);
-
-if (dryRun) {
-  console.log("\n[DRY RUN] The following commits would be mirrored:\n");
-  for (const hash of newCommits) {
-    const meta = getCommitMeta(hash);
-    console.log(`  ${meta.short}`);
-  }
-  console.log("\nNo changes were made.");
-  process.exit(0);
-}
-
-console.log();
-
-// ── Apply commits ─────────────────────────────────────────────────────────────
-
-for (const hash of newCommits) {
-  if (alreadySynced.has(hash)) continue;
-
-  const meta = getCommitMeta(hash);
-
-  const label = meta.parentCount > 1
-    ? `merge commit ${meta.short} (diffing against first parent)`
-    : meta.parentCount === 0
-      ? `root commit ${meta.short}`
-      : meta.short;
-
-  console.log(`  Applying ${label}...`);
-
-  const patch = diffForCommit(meta);
-  const result = applyPatch(patch, dir);
-
-  if (result !== "applied") {
-    die(`Could not apply patch for ${meta.short}. Shadow branch may be out of sync.`);
-  }
-
-  const patchFiles = extractPatchFiles(patch, dir);
-  if (patchFiles.length > 0) {
-    run(["add", "--", ...patchFiles]);
-  }
-
-  const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"]).ok;
-  const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
-
-  if (!hasStagedChanges) {
-    console.log("    (no changes after apply — recording as synced)");
-    commitWithMeta(meta, syncedMessage, /* allowEmpty */ true);
-    console.log("  ✓ Recorded (empty).");
-    continue;
-  }
-
-  commitWithMeta(meta, syncedMessage);
-  console.log("  ✓ Mirrored.");
-}
-
-console.log();
-console.log(
-  `Done. ${newCommits.length} commit(s) from '${remote}/${teamBranch}' mirrored into '${dir}/' on '${localBranch}'.`
-);

@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -24,10 +24,9 @@ export default function run() {
     const r2 = runPush(env, "Push with shadowignore");
     assertEqual(r2.status, 0, "push should succeed");
 
-    // Verify remote
-    pullRemoteWorking(env);
-    assertEqual(readRemoteFile(env, "app.ts"), "export const app = true;\n", "app.ts should be on remote");
-    assertEqual(readRemoteFile(env, "config.local"), null, "config.local should NOT be on remote");
+    // Verify shadow branch
+    assertEqual(readShadowFile(env, "app.ts"), "export const app = true;\n", "app.ts should be on shadow branch");
+    assertEqual(readShadowFile(env, "config.local"), null, "config.local should NOT be on shadow branch");
   } finally {
     env.cleanup();
   }

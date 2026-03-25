@@ -5,47 +5,93 @@ Mirror files between a mono-repo and external team repositories using git. Each 
 ## How it works
 
 ```
-┌──────────────────┐     shadow-pull      ┌──────────────────┐
-│  Team repos      │  <─────────────────  │                  │
-│  (git remotes)   │                      │  backend/        │
-│  backend         │  ─────────────────>  │  frontend/       │
-│  frontend        │     shadow-push      │                  │
-└──────────────────┘                      └──────────────────┘
+  external/backend/main ←── CI (identical) ──→ shadow/backend/main ←── filtered ──→ origin (your branch)
+                                                                       .shadowignore
 ```
 
-## shadow-pull
+Three copies of the code:
 
-Fetches from a remote and replays each new commit as a patch into the matching subdirectory.
+| Name | Where | What |
+|------|-------|------|
+| **external** | Team's repo (e.g. `github.com/org/backend`) | The team's source of truth |
+| **shadow** | `shadow/backend/main` branch on your origin | Mirror of external, stays in sync via CI |
+| **origin** | Your working branch (`main`, `feature/...`) | Your monorepo with all subdirs |
+
+**CI keeps external ↔ shadow in sync** (per-commit replay, no filtering).
+
+**You merge between shadow ↔ origin locally:**
+- `git merge origin/shadow/backend/main` — pull team changes (no filtering)
+- `npm run export -m "msg"` — push your changes (`.shadowignore` strips AI files etc.)
+
+## Local workflow
+
+### Pulling team changes
 
 ```bash
-npx tsx shadow-pull.ts -r frontend
-npx tsx shadow-pull.ts -r backend -b feature/auth
+git fetch origin
+git merge origin/shadow/backend/main
 ```
 
-- Preserves original author, committer, and timestamps
-- Tracks mirrored commits via `Shadow-synced-from: <hash>` trailers to prevent duplicates
-- Falls back to 3-way merge when patches don't apply cleanly
-- Skips commits that originated from `shadow-push` (detected via trailer) to prevent round-trip duplication
-- Automatically detects feature branches and only mirrors branch-specific commits (uses `main..feature` range)
+Standard git merge. Shadow branches are updated automatically by CI every 15 minutes.
 
-## shadow-push
-
-Snapshots the current subdirectory, diffs it against the remote branch, and pushes the result as a single commit.
+### Pushing your changes
 
 ```bash
-npx tsx shadow-push.ts -r frontend -m "Add login page"
-npx tsx shadow-push.ts -r frontend -b feature/new-page -m "Add new page"
+npm run export -- -m "Add login page"
+npm run export -- -r backend -m "Fix API bug"
+npm run export -- -r frontend -b feature/new-page -m "Add new page"
 ```
 
-- Multiple local commits and branch merges are squashed into one remote commit
-- Marks commits with `Shadow-pushed-from: <hash>` trailer so `shadow-pull` can skip them
-- Respects `.shadowignore` patterns (glob, one per line) to exclude files from being pushed
-- Auto-creates new remote branches when `-b` is explicitly passed
-- Refuses to push if the subdirectory has uncommitted changes
+This runs `shadow-export.ts` which:
+1. Extracts your `backend/` subdirectory content
+2. Filters out files matching `.shadowignore` patterns
+3. Commits to `shadow/backend/main` on origin
+4. CI automatically forwards the change to the external remote
+
+### `.shadowignore`
+
+Glob patterns (one per line) for files that should not reach the external remote. Applied during export, so these files never appear on the shadow branch or external remote.
+
+```
+# Example .shadowignore
+CLAUDE.md
+**/*.local
+.cursor/
+```
+
+## GitHub Actions
+
+### Shadow Sync — `.github/workflows/shadow-sync.yml`
+
+Runs every 15 minutes (and on manual dispatch). For each configured remote:
+1. Fetches from the external repo
+2. Replays new commits into `shadow/{dir}/{branch}` branches (per-commit, preserving authorship)
+3. Pushes shadow branches to origin
+
+### Shadow Forward — `.github/workflows/shadow-forward.yml`
+
+Triggers on push to `shadow/**` branches. Takes a snapshot of the `{dir}/` content (stripping the subdirectory prefix) and pushes to the external remote.
+
+### Required secrets
+
+| Secret | Description |
+|--------|-------------|
+| `BACKEND_REPO_URL` | Authenticated URL for the backend repo (e.g. `https://x-access-token:TOKEN@github.com/org/backend.git`) |
+| `FRONTEND_REPO_URL` | Authenticated URL for the frontend repo |
 
 ## Options
 
-**shadow-pull:**
+**shadow-export:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-r` | Remote name (selects config entry) | First entry in `REMOTES` |
+| `-d` | Local subdirectory to export from | Inferred from remote config |
+| `-b` | Target branch | Current local branch |
+| `-m` | Commit message (required) | |
+| `-n` | Dry run — show what would change | |
+
+**shadow-pull (local fallback):**
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -56,26 +102,9 @@ npx tsx shadow-push.ts -r frontend -b feature/new-page -m "Add new page"
 | `-n` | Dry run — show what would be synced | |
 | `--seed` | Record remote HEAD as sync baseline | |
 
-**shadow-push:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-r` | Remote name | First entry in `REMOTES` |
-| `-d` | Local subdirectory | Inferred from remote config |
-| `-b` | Branch on the remote | Current local branch |
-| `-m` | Commit message (required) | |
-| `-n` | Dry run — show what would be pushed | |
-
 ## Setup
 
-1. Add git remotes:
-
-```bash
-git remote add backend   git@their-server.com:backend.git
-git remote add frontend  git@their-server.com:frontend.git
-```
-
-2. Edit `shadow-config.json`:
+1. Edit `shadow-config.json`:
 
 ```json
 {
@@ -87,9 +116,16 @@ git remote add frontend  git@their-server.com:frontend.git
 }
 ```
 
-## Initial bootstrap
+2. Add GitHub Secrets for external repo URLs (see [Required secrets](#required-secrets)).
 
-When setting up the monorepo for the first time, copy the current state of each remote's main branch into the matching subdirectory, then use `--seed` to mark the sync baseline:
+3. For local pull (optional fallback), add git remotes:
+
+```bash
+git remote add backend   git@their-server.com:backend.git
+git remote add frontend  git@their-server.com:frontend.git
+```
+
+## Initial bootstrap
 
 ```bash
 # 1. Copy files from each team repo into your monorepo subdirectories
@@ -101,68 +137,27 @@ git add -A && git commit -m "Bootstrap monorepo from team repos"
 npx tsx shadow-pull.ts -r backend --seed
 npx tsx shadow-pull.ts -r frontend --seed
 
-# 3. From now on, regular pull/push works
-npx tsx shadow-pull.ts -r backend
-npx tsx shadow-push.ts -r frontend -m "My changes"
+# 3. From now on, CI handles pull. To push local changes:
+npm run export -- -m "My changes"
 ```
 
 Without `--seed`, the first pull would attempt to replay every remote commit (after `SYNC_SINCE`) on top of files you already copied, causing conflicts.
 
-## shadow-sync-all
-
-Syncs all branches from all remotes into local shadow branches. Each remote branch `<branch>` becomes a local branch `<dir>/shadow-<branch>`.
-
-```bash
-npx tsx shadow-sync-all.ts
-npx tsx shadow-sync-all.ts -r frontend
-npx tsx shadow-sync-all.ts -n
-```
-
-Shadow branches are pure mirrors — only `shadow-sync-all` (via `shadow-pull`) writes to them. To incorporate remote changes, merge the shadow branch into your working branch:
-
-```bash
-git merge frontend/shadow-main
-```
-
-**shadow-sync-all options:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-r` | Sync only this remote | All remotes in config |
-| `-n` | Dry run | |
-
-### Branch layout
+## Branch layout
 
 ```
-remote frontend/main          → frontend/shadow-main       (auto-synced)
-remote frontend/feature-auth  → frontend/shadow-feature-auth (auto-synced)
+external/backend/main ←── CI sync ──→ shadow/backend/main ←── shadow-export ──→ your branch
+                          (identical)                          (.shadowignore)
 
-frontend/shadow-main ──merge──→ frontend/main ──shadow-push──→ remote frontend/main
+                                       shadow/backend/main ──── git merge ────→ your branch
+                                                                (all files)
 ```
-
-## Pulling feature branches
-
-To pull a single feature branch manually:
-
-```bash
-git checkout -b frontend/feature-auth
-npx tsx shadow-pull.ts -r frontend -b feature/auth
-```
-
-Shadow-pull automatically detects that `feature/auth` is not the default branch and uses range syntax (`main..feature/auth`) to only mirror the branch-specific commits — not the entire main history.
 
 ## Tests
 
-Run all tests (creates isolated temporary repos, nothing touches real remotes):
-
 ```bash
-npx tsx shadow-tests/run-all.ts
-```
-
-Run a single test:
-
-```bash
-npx tsx shadow-tests/test-pull-basic.ts
+npm test                                  # Run all tests
+npx tsx shadow-tests/test-pull-basic.ts   # Run a single test
 ```
 
 ## Files
@@ -170,9 +165,13 @@ npx tsx shadow-tests/test-pull-basic.ts
 | File | Purpose |
 |------|---------|
 | `shadow-config.json` | Remotes, sync date, trailers, and other settings |
-| `shadow-common.ts` | Shared config, git helpers, patch application |
-| `shadow-pull.ts` | Mirrors remote commits into a local subdirectory |
-| `shadow-push.ts` | Pushes local subdirectory state to a remote as a single commit |
+| `shadow-common.ts` | Shared config, git helpers, patch application, replay engine |
+| `shadow-pull.ts` | Mirrors remote commits into a local subdirectory (local fallback) |
+| `shadow-export.ts` | Exports local subdirectory to shadow branch (with `.shadowignore` filtering) |
 | `shadow-sync-all.ts` | Syncs all remote branches into local shadow branches |
-| `.shadowignore` | Glob patterns for files to exclude from push (optional) |
-| `shadow-tests/` | Automated test suite (`npx tsx shadow-tests/run-all.ts`) |
+| `shadow-ci-sync.ts` | CI: replays remote commits to shadow branches |
+| `shadow-ci-forward.ts` | CI: forwards shadow branch content to external remotes |
+| `.github/workflows/shadow-sync.yml` | CI pull workflow (cron every 15 min) |
+| `.github/workflows/shadow-forward.yml` | CI forward workflow (on push to shadow/**) |
+| `.shadowignore` | Glob patterns for files to exclude from export (optional) |
+| `shadow-tests/` | Automated test suite |

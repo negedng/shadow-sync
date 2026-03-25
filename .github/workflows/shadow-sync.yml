@@ -1,0 +1,33 @@
+name: Shadow Sync (Pull)
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # Every 15 minutes
+  workflow_dispatch:          # Manual trigger
+
+concurrency:
+  group: shadow-sync
+  cancel-in-progress: false   # Let running syncs complete
+
+permissions:
+  contents: write             # Needed to push shadow branches
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # Full history required for trailer-based dedup
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      - name: Run shadow sync
+        env:
+          SHADOW_REMOTE_BACKEND_URL: ${{ secrets.BACKEND_REPO_URL }}
+          SHADOW_REMOTE_FRONTEND_URL: ${{ secrets.FRONTEND_REPO_URL }}
+        run: npx tsx shadow-ci-sync.ts

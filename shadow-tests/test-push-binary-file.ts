@@ -1,5 +1,5 @@
-import { createTestEnv, commitOnRemote, runPull, runPush, pullRemoteWorking } from "./harness";
-import { assertEqual, assertFileExists } from "./assert";
+import { createTestEnv, commitOnRemote, runPull, runPush } from "./harness";
+import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
@@ -33,15 +33,15 @@ export default function run() {
     const r = runPush(env, "Push binary file");
     assertEqual(r.status, 0, "push with binary file should succeed");
 
-    // Verify on remote
-    pullRemoteWorking(env);
-    const remoteBin = path.join(env.remoteWorking, "image.png");
-    assertFileExists(remoteBin, "binary file should exist on remote");
-
-    const remoteContent = fs.readFileSync(remoteBin);
-    assertEqual(remoteContent.length, binaryContent.length, "binary file size should match");
+    // Verify on shadow branch by extracting the file via git show
+    git("fetch origin shadow/frontend/main", env.localRepo);
+    const result = execSync(
+      `git show origin/shadow/frontend/main:frontend/image.png`,
+      { cwd: env.localRepo, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assertEqual(result.length, binaryContent.length, "binary file size should match");
     assertEqual(
-      Buffer.compare(remoteContent, binaryContent) === 0,
+      Buffer.compare(result, binaryContent) === 0,
       true,
       "binary content should match exactly",
     );

@@ -1,4 +1,4 @@
-import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runPull, runPush, readLocalFile, readRemoteFile, pullRemoteWorking, getLocalLogFull } from "./harness";
+import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runPull, runPush, readLocalFile, readShadowFile, getLocalLogFull } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 /** Test: changes to one remote don't affect the other (isolation). */
@@ -17,10 +17,8 @@ export default function run() {
     const r1 = runPush(env, "Update frontend HTML");
     assertEqual(r1.status, 0, "frontend push");
 
-    // Backend remote should be unaffected
-    pullRemoteWorking(env, backend);
-    assertEqual(readRemoteFile(env, "main.go", backend), "package main\n", "backend untouched");
-    assertEqual(readRemoteFile(env, "index.html", backend), null, "frontend file not on backend");
+    // Backend shadow should be unaffected
+    assertEqual(readShadowFile(env, "main.go", backend), null, "backend shadow should not have main.go yet (no backend push)");
 
     // Modify backend on remote, pull only backend
     commitOnRemote(env, { "main.go": "package main\n\nfunc main() {}\n" }, "Update backend", backend);

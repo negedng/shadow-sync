@@ -8,7 +8,6 @@
 
   "trailers": {
     "sync": "Shadow-synced-from",
-    "push": "Shadow-pushed-from",
     "seed": "Shadow-seed"
   },
 

@@ -1,7 +1,7 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
-/** Test: push syncs deeply nested directory structures to remote. */
+/** Test: push syncs deeply nested directory structures to shadow branch. */
 export default function run() {
   const env = createTestEnv("push-deep-dirs");
   try {
@@ -19,16 +19,15 @@ export default function run() {
     const r2 = runPush(env, "Push nested structure");
     assertEqual(r2.status, 0, "push should succeed");
 
-    pullRemoteWorking(env);
     assertEqual(
-      readRemoteFile(env, "src/components/Button.tsx"),
+      readShadowFile(env, "src/components/Button.tsx"),
       "export const Button = () => {};\n",
-      "nested tsx file on remote",
+      "nested tsx file on shadow branch",
     );
     assertEqual(
-      readRemoteFile(env, "src/utils/helpers/format.ts"),
+      readShadowFile(env, "src/utils/helpers/format.ts"),
       "export function format() {}\n",
-      "triple nested file on remote",
+      "triple nested file on shadow branch",
     );
   } finally {
     env.cleanup();

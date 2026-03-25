@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes, assertExitCode } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -27,20 +27,19 @@ export default function run() {
     fs.writeFileSync(untrackedPath, "my personal notes\n");
 
     // Push should succeed (untracked files don't block push)
-    // but the untracked file must NOT appear on the remote
+    // but the untracked file must NOT appear on the shadow branch
     const r2 = runPush(env, "Push with untracked file present");
     assertEqual(r2.status, 0, "push should succeed even with untracked file in subdir");
 
-    pullRemoteWorking(env);
     assertEqual(
-      readRemoteFile(env, "feature.ts"),
+      readShadowFile(env, "feature.ts"),
       "export const x = 1;\n",
-      "committed file should appear on remote",
+      "committed file should appear on shadow branch",
     );
     assertEqual(
-      readRemoteFile(env, "local-notes.txt"),
+      readShadowFile(env, "local-notes.txt"),
       null,
-      "untracked file must NOT appear on remote",
+      "untracked file must NOT appear on shadow branch",
     );
 
     // ── Scenario 2: unstaged changes to a tracked file ───────────────
@@ -57,10 +56,9 @@ export default function run() {
       "error should mention uncommitted changes",
     );
 
-    // Verify the WIP content did NOT reach the remote
-    pullRemoteWorking(env);
-    const remoteBase = readRemoteFile(env, "base.txt");
-    assertEqual(remoteBase, "base content\n", "remote base.txt should not have WIP edits");
+    // Verify the WIP content did NOT reach the shadow branch
+    const shadowBase = readShadowFile(env, "base.txt");
+    assertEqual(shadowBase, "base content\n", "shadow base.txt should not have WIP edits");
 
     // ── Scenario 3: staged but uncommitted changes ───────────────────
     // Stage the modification but don't commit
@@ -82,12 +80,11 @@ export default function run() {
     const r5 = runPush(env, "Push after committing");
     assertEqual(r5.status, 0, "push should succeed after committing changes");
 
-    pullRemoteWorking(env);
-    const finalBase = readRemoteFile(env, "base.txt");
+    const finalBase = readShadowFile(env, "base.txt");
     assertEqual(
       finalBase,
       "base content\nlocal WIP modification\n",
-      "remote should have the committed WIP edit now",
+      "shadow branch should have the committed WIP edit now",
     );
   } finally {
     env.cleanup();

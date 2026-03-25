@@ -1,0 +1,33 @@
+name: Shadow Forward
+
+on:
+  push:
+    branches:
+      - 'shadow/**'
+
+concurrency:
+  group: shadow-forward-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      - name: Forward to external remote
+        env:
+          SHADOW_REMOTE_BACKEND_URL: ${{ secrets.BACKEND_REPO_URL }}
+          SHADOW_REMOTE_FRONTEND_URL: ${{ secrets.FRONTEND_REPO_URL }}
+        run: npx tsx shadow-ci-forward.ts

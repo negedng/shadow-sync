@@ -11,16 +11,19 @@ export interface RemoteConfig {
   remote: string;
   /** Local subdirectory in your repo that maps to the root of that remote */
   dir: string;
+  /** Optional URL for the remote (can be overridden via SHADOW_REMOTE_{NAME}_URL env var) */
+  url?: string;
 }
 
 interface ShadowSyncConfig {
   remotes: RemoteConfig[];
   syncSince?: string | null;
-  trailers: { sync: string; push: string; seed: string };
+  trailers: { sync: string; seed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
   maxDirDepth: number;
   maxPushRetries: number;
+  shadowBranchPrefix: string;
 }
 
 const CONFIG_PATH = path.join(__dirname, "shadow-config.json");
@@ -33,13 +36,13 @@ function loadConfig(): ShadowSyncConfig {
     syncSince:         doc.syncSince === null ? undefined : (doc.syncSince as string | undefined),
     trailers: {
       sync: ((doc.trailers as Record<string, string>)?.sync) ?? "Shadow-synced-from",
-      push: ((doc.trailers as Record<string, string>)?.push) ?? "Shadow-pushed-from",
       seed: ((doc.trailers as Record<string, string>)?.seed) ?? "Shadow-seed",
     },
     gitConfigOverrides: (doc.gitConfigOverrides as Record<string, string>) ?? {},
     maxBuffer:          (doc.maxBuffer as number) ?? 50 * 1024 * 1024,
     maxDirDepth:        (doc.maxDirDepth as number) ?? 100,
     maxPushRetries:     (doc.maxPushRetries as number) ?? 3,
+    shadowBranchPrefix: (doc.shadowBranchPrefix as string) ?? "shadow",
   };
 }
 
@@ -47,11 +50,11 @@ const config = loadConfig();
 
 export const REMOTES: RemoteConfig[] = [...config.remotes];
 export const SYNC_TRAILER   = config.trailers.sync;
-export const PUSH_TRAILER   = config.trailers.push;
 export const SEED_TRAILER   = config.trailers.seed;
 export const EMPTY_TREE     = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIR_DEPTH  = config.maxDirDepth;
 export const MAX_PUSH_RETRIES = config.maxPushRetries;
+export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
 export let SYNC_SINCE: string | undefined = config.syncSince ?? undefined;
 
@@ -698,4 +701,138 @@ export function validateName(value: string, label: string): void {
 export function die(msg: string): never {
   console.error(`✘ ${msg}`);
   process.exit(1);
+}
+
+// ── Shadow branch helpers ────────────────────────────────────────────────────
+
+/** Build the canonical shadow branch name: shadow/{dir}/{branch} */
+export function shadowBranchName(dir: string, branch: string): string {
+  return `${SHADOW_BRANCH_PREFIX}/${dir}/${branch}`;
+}
+
+/** Resolve the URL for a remote from env var SHADOW_REMOTE_{NAME}_URL, falling back to config url. */
+export function resolveRemoteUrl(remoteName: string, configUrl?: string): string | null {
+  const envKey = `SHADOW_REMOTE_${remoteName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_URL`;
+  const envUrl = process.env[envKey];
+  if (envUrl) return envUrl;
+  if (configUrl) return configUrl;
+  return null;
+}
+
+// ── Replay engine ─────────────────────────────────────────────────────────────
+
+export interface ReplayOptions {
+  remote: string;
+  dir: string;
+  teamBranch: string;
+  dryRun?: boolean;
+}
+
+export interface ReplayResult {
+  mirrored: number;
+  upToDate: boolean;
+}
+
+/**
+ * Replay new commits from a remote ref into a local subdirectory.
+ *
+ * Assumes the caller has already:
+ *   1. Fetched the remote
+ *   2. Checked out the correct local branch
+ *
+ * Throws on unrecoverable errors instead of calling process.exit().
+ */
+export function replayCommits(opts: ReplayOptions): ReplayResult {
+  const { remote, dir, teamBranch, dryRun = false } = opts;
+  const teamRef = `${remote}/${teamBranch}`;
+
+  console.log("Scanning local history for already-mirrored commits...");
+  const alreadySynced = buildAlreadySyncedSetFor(dir);
+  console.log(`Found ${alreadySynced.size} previously mirrored commit(s).`);
+
+  const seedHash = findSeedHash(dir);
+  if (seedHash) {
+    console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
+  }
+
+  const defaultBranch = findRemoteDefaultBranch(remote);
+  const isFeatureBranch = defaultBranch != null && teamBranch !== defaultBranch;
+  const baseRef = isFeatureBranch ? `${remote}/${defaultBranch}` : undefined;
+  if (baseRef) {
+    console.log(`Feature branch detected: collecting only commits in ${baseRef}..${teamRef}`);
+  }
+
+  const allTeamCommits = collectTeamCommits(teamRef, { seedHash: seedHash ?? undefined, baseRef });
+
+  const newCommits: string[] = [];
+
+  for (const hash of allTeamCommits) {
+    if (alreadySynced.has(hash)) continue;
+    newCommits.push(hash);
+  }
+
+  if (newCommits.length === 0) {
+    console.log("Already up to date. Nothing to mirror.");
+    return { mirrored: 0, upToDate: true };
+  }
+
+  console.log(`Found ${newCommits.length} new commit(s) to mirror.`);
+
+  if (dryRun) {
+    console.log("\n[DRY RUN] The following commits would be mirrored:\n");
+    for (const hash of newCommits) {
+      const meta = getCommitMeta(hash);
+      console.log(`  ${meta.short}`);
+    }
+    console.log("\nNo changes were made.");
+    return { mirrored: 0, upToDate: false };
+  }
+
+  console.log();
+
+  for (const hash of newCommits) {
+    if (alreadySynced.has(hash)) continue;
+
+    const meta = getCommitMeta(hash);
+
+    const label = meta.parentCount > 1
+      ? `merge commit ${meta.short} (diffing against first parent)`
+      : meta.parentCount === 0
+        ? `root commit ${meta.short}`
+        : meta.short;
+
+    console.log(`  Applying ${label}...`);
+
+    const patch = diffForCommit(meta);
+    const result = applyPatch(patch, dir);
+
+    if (result !== "applied") {
+      throw new Error(`Could not apply patch for ${meta.short}. Shadow branch may be out of sync.`);
+    }
+
+    const patchFiles = extractPatchFiles(patch, dir);
+    if (patchFiles.length > 0) {
+      run(["add", "--", ...patchFiles]);
+    }
+
+    const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"]).ok;
+    const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
+
+    if (!hasStagedChanges) {
+      console.log("    (no changes after apply — recording as synced)");
+      commitWithMeta(meta, syncedMessage, /* allowEmpty */ true);
+      console.log("  ✓ Recorded (empty).");
+      continue;
+    }
+
+    commitWithMeta(meta, syncedMessage);
+    console.log("  ✓ Mirrored.");
+  }
+
+  console.log();
+  console.log(
+    `Done. ${newCommits.length} commit(s) from '${remote}/${teamBranch}' mirrored into '${dir}/' on current branch.`
+  );
+
+  return { mirrored: newCommits.length, upToDate: false };
 }

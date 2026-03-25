@@ -1,4 +1,4 @@
-import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 /** Test: push to two independent remotes from separate subdirs. */
@@ -24,15 +24,12 @@ export default function run() {
     const r2 = runPush(env, "Push backend changes", [], backend);
     assertEqual(r2.status, 0, "backend push should succeed");
 
-    // Verify each remote only got its own files
-    pullRemoteWorking(env);
-    pullRemoteWorking(env, backend);
+    // Verify each shadow branch only got its own files
+    assertEqual(readShadowFile(env, "new.tsx"), "// frontend code\n", "frontend file on frontend shadow");
+    assertEqual(readShadowFile(env, "new.ts"), null, "backend file should NOT be on frontend shadow");
 
-    assertEqual(readRemoteFile(env, "new.tsx"), "// frontend code\n", "frontend file on frontend remote");
-    assertEqual(readRemoteFile(env, "new.ts"), null, "backend file should NOT be on frontend remote");
-
-    assertEqual(readRemoteFile(env, "new.ts", backend), "// backend code\n", "backend file on backend remote");
-    assertEqual(readRemoteFile(env, "new.tsx", backend), null, "frontend file should NOT be on backend remote");
+    assertEqual(readShadowFile(env, "new.ts", backend), "// backend code\n", "backend file on backend shadow");
+    assertEqual(readShadowFile(env, "new.tsx", backend), null, "frontend file should NOT be on backend shadow");
   } finally {
     env.cleanup();
   }

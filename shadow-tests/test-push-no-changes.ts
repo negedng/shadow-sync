@@ -9,10 +9,14 @@ export default function run() {
     const r1 = runPull(env);
     assertEqual(r1.status, 0, "pull should succeed");
 
-    // Push without any local changes
-    const r2 = runPush(env, "Nothing changed");
-    assertEqual(r2.status, 0, "push should exit cleanly");
-    assertIncludes(r2.stdout, "No changes to push", "should report no changes");
+    // First push creates the shadow branch with current content
+    const r2 = runPush(env, "Initial push");
+    assertEqual(r2.status, 0, "initial push should succeed");
+
+    // Second push without any new local changes — should report no changes
+    const r3 = runPush(env, "Nothing changed");
+    assertEqual(r3.status, 0, "push should exit cleanly");
+    assertIncludes(r3.stdout, "No changes to export", "should report no changes");
   } finally {
     env.cleanup();
   }

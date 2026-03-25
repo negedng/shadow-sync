@@ -15,6 +15,8 @@ export interface TestEnv {
   localRepo: string;
   remoteWorking: string;
   remoteBare: string;
+  /** Bare repo acting as "origin" for shadow branches. */
+  originBare: string;
   subdir: string;
   remoteName: string;
   /** All remotes registered in this env (including the primary one). */
@@ -31,10 +33,11 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `shadow-test-${name}-`));
   const remoteBare = path.join(tmpDir, "remote-bare").replace(/\\/g, "/");
   const remoteWorking = path.join(tmpDir, "remote-working").replace(/\\/g, "/");
+  const originBare = path.join(tmpDir, "origin-bare").replace(/\\/g, "/");
   const localRepo = path.join(tmpDir, "local").replace(/\\/g, "/");
   const remoteName = "team";
 
-  // 1) Bare remote
+  // 1) Bare remote (external team repo)
   fs.mkdirSync(remoteBare);
   git("init --bare", remoteBare);
 
@@ -48,7 +51,11 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   git('commit -m "Initial commit"', remoteWorking);
   git("push origin main", remoteWorking);
 
-  // 3) Local mono-repo
+  // 3) Bare "origin" (monorepo on GitHub — target for shadow branches)
+  fs.mkdirSync(originBare);
+  git("init --bare", originBare);
+
+  // 4) Local mono-repo
   fs.mkdirSync(localRepo);
   git("init", localRepo);
   git('config user.email "local@test.com"', localRepo);
@@ -59,13 +66,15 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   fs.mkdirSync(path.join(localRepo, subdir), { recursive: true });
   git("add -A", localRepo);
   git('commit -m "Initial mono-repo commit"', localRepo);
-  // Add remote
+  // Add remotes
   git(`remote add ${remoteName} "${remoteBare}"`, localRepo);
   git(`fetch ${remoteName}`, localRepo);
+  git(`remote add origin "${originBare}"`, localRepo);
+  git("push origin main", localRepo);
 
   // Copy shadow scripts and config into local repo so they run from there
   const scriptDir = path.resolve(__dirname, "..");
-  for (const f of ["shadow-common.ts", "shadow-pull.ts", "shadow-push.ts", "shadow-config.json"]) {
+  for (const f of ["shadow-common.ts", "shadow-pull.ts", "shadow-export.ts", "shadow-config.json"]) {
     fs.copyFileSync(path.join(scriptDir, f), path.join(localRepo, f));
   }
 
@@ -75,7 +84,7 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   };
 
-  return { tmpDir, localRepo, remoteWorking, remoteBare, subdir, remoteName, remotes: [primary], cleanup };
+  return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, remotes: [primary], cleanup };
 }
 
 /** Add an additional remote to an existing test env. Returns a RemoteInfo handle. */
@@ -194,6 +203,7 @@ function testEnv(env: TestEnv): Record<string, string> {
   const base: Record<string, string> = {
     ...process.env as Record<string, string>,
     SHADOW_TEST_SINCE: "",  // no date filter in tests
+    SHADOW_PUSH_ORIGIN: "origin",  // push targets origin bare in test env
   };
   if (env.remotes.length > 1) {
     // Multi-remote: pass full REMOTES array as JSON
@@ -249,15 +259,62 @@ export function runPull(env: TestEnv, extraArgs: string[] = [], remote?: RemoteI
   return runScript(env, "shadow-pull.ts", ["-r", name, ...extraArgs]);
 }
 
-/** Run shadow-push.ts in the test env. Optionally target a specific remote. */
-export function runPush(env: TestEnv, message: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
+/** Run shadow-export.ts in the test env. Optionally target a specific remote. */
+export function runExport(env: TestEnv, message: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
   const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-push.ts", ["-r", name, "-m", message, ...extraArgs]);
+  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, ...extraArgs]);
 }
+
+/** @deprecated Alias for runExport — kept for test compatibility. */
+export const runPush = runExport;
 
 /** Pull latest from bare remote into the remote working copy. */
 export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
   const workDir = remote?.remoteWorking ?? env.remoteWorking;
   git("pull origin main", workDir);
+}
+
+/**
+ * Read a file from the shadow branch on origin.
+ * Returns null if the file or branch doesn't exist.
+ */
+export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
+  const subdir = remote?.subdir ?? env.subdir;
+  const shadowBranch = `shadow/${subdir}/main`;
+  // Fetch latest from origin bare
+  try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return null; }
+  try {
+    // Use execSync directly (not git() helper) to avoid .trim() stripping trailing newlines
+    const content = execSync(`git show origin/${shadowBranch}:${subdir}/${rel}`, {
+      cwd: env.localRepo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+    });
+    return normalizeLF(content);
+  } catch {
+    return null;
+  }
+}
+
+/** Get the commit log from the shadow branch on origin. */
+export function getShadowLog(env: TestEnv, n = 20, remote?: RemoteInfo): string {
+  const subdir = remote?.subdir ?? env.subdir;
+  const shadowBranch = `shadow/${subdir}/main`;
+  try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
+  try {
+    return git(`log origin/${shadowBranch} --oneline -${n}`, env.localRepo);
+  } catch {
+    return "";
+  }
+}
+
+/** Get full commit messages from the shadow branch on origin. */
+export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
+  const subdir = remote?.subdir ?? env.subdir;
+  const shadowBranch = `shadow/${subdir}/main`;
+  try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
+  try {
+    return git(`log origin/${shadowBranch} --format="%B" -${n}`, env.localRepo);
+  } catch {
+    return "";
+  }
 }
 

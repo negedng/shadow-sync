@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -16,10 +16,9 @@ export default function run() {
     const r2 = runPush(env, "Remove remove.txt");
     assertEqual(r2.status, 0, "push should succeed");
 
-    // Verify remote
-    pullRemoteWorking(env);
-    assertEqual(readRemoteFile(env, "keep.txt"), "keep\n", "keep.txt should still exist");
-    assertEqual(readRemoteFile(env, "remove.txt"), null, "remove.txt should be gone on remote");
+    // Verify shadow branch
+    assertEqual(readShadowFile(env, "keep.txt"), "keep\n", "keep.txt should still exist");
+    assertEqual(readShadowFile(env, "remove.txt"), null, "remove.txt should be gone on shadow branch");
   } finally {
     env.cleanup();
   }

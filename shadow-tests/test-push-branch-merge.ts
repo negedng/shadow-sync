@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import { createTestEnv, commitOnRemote, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile, getShadowLog } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 function git(cmd: string, cwd: string): string {
@@ -35,23 +35,22 @@ export default function run() {
     git("checkout main", env.localRepo);
     git('merge feature/test-branch --no-ff -m "Merge feature/test-branch"', env.localRepo);
 
-    // Push — should produce a single commit on remote with all changes
+    // Push — should produce a single commit on shadow branch with all changes
     const r2 = runPush(env, "Add feature from branch merge");
     assertEqual(r2.status, 0, "push should succeed");
     assertIncludes(r2.stdout, "Done", "should report done");
 
-    // Verify remote has the merged content
-    pullRemoteWorking(env);
+    // Verify shadow branch has the merged content
     assertEqual(
-      readRemoteFile(env, "feature.ts"),
+      readShadowFile(env, "feature.ts"),
       "export const v1 = true;\nexport const v2 = true;\n",
-      "feature.ts should have final merged content on remote",
+      "feature.ts should have final merged content on shadow branch",
     );
 
-    // Verify it's a single commit (not two)
-    const remoteLog = git("log --oneline -5", env.remoteWorking);
-    const featureCommits = remoteLog.split("\n").filter(l => l.includes("feature"));
-    assertEqual(featureCommits.length, 1, "should be exactly one commit for the feature on remote");
+    // Verify it's a single commit (not two) on shadow branch
+    const shadowLog = getShadowLog(env);
+    const featureCommits = shadowLog.split("\n").filter(l => l.includes("feature"));
+    assertEqual(featureCommits.length, 1, "should be exactly one commit for the feature on shadow branch");
   } finally {
     env.cleanup();
   }

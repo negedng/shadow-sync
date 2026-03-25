@@ -5,10 +5,13 @@
   "private": true,
   "scripts": {
     "pull": "tsx shadow-pull.ts",
-    "push": "tsx shadow-push.ts",
+    "export": "tsx shadow-export.ts",
+    "ci-sync": "tsx shadow-ci-sync.ts",
+    "ci-forward": "tsx shadow-ci-forward.ts",
     "test": "tsx shadow-tests/run-all.ts"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }

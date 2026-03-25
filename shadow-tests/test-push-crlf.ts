@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -31,10 +31,9 @@ export default function run() {
     const r = runPush(env, "Push CRLF file");
     assertEqual(r.status, 0, `push of CRLF file should succeed: ${r.stderr.slice(0, 300)}`);
 
-    // Verify file exists on remote
-    pullRemoteWorking(env);
-    const remoteContent = readRemoteFile(env, "crlf-local.txt");
-    assertEqual(remoteContent !== null, true, "CRLF file should be on remote");
+    // Verify file exists on shadow branch
+    const shadowContent = readShadowFile(env, "crlf-local.txt");
+    assertEqual(shadowContent !== null, true, "CRLF file should be on shadow branch");
   } finally {
     env.cleanup();
   }

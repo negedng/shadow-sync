@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 /** Test: --dry-run shows changes without pushing. */
@@ -18,18 +18,16 @@ export default function run() {
     assertEqual(r2.status, 0, "dry-run push should succeed");
     assertIncludes(r2.stdout, "DRY RUN", "should mention dry run");
 
-    // File should NOT appear on remote
-    pullRemoteWorking(env);
-    assertEqual(readRemoteFile(env, "feature.ts"), null, "file should not be on remote after dry-run");
+    // File should NOT appear on shadow branch
+    assertEqual(readShadowFile(env, "feature.ts"), null, "file should not be on shadow branch after dry-run");
 
     // Real push should still work
     const r3 = runPush(env, "Real push");
     assertEqual(r3.status, 0, "real push should succeed");
-    pullRemoteWorking(env);
     assertEqual(
-      readRemoteFile(env, "feature.ts"),
+      readShadowFile(env, "feature.ts"),
       "export const x = 1;\n",
-      "file should appear on remote after real push",
+      "file should appear on shadow branch after real push",
     );
   } finally {
     env.cleanup();

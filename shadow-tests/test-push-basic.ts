@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readRemoteFile, pullRemoteWorking, getLocalLogFull } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runPull, runPush, readShadowFile, getShadowLogFull } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -12,26 +12,21 @@ export default function run() {
     // Add a file locally and commit
     commitOnLocal(env, { "new-feature.ts": "export function feat() {}\n" }, "Add new feature");
 
-    // Push to remote
+    // Export to shadow branch
     const r2 = runPush(env, "Add new feature from mono-repo");
-    assertEqual(r2.status, 0, "push should succeed");
+    assertEqual(r2.status, 0, "export should succeed");
     assertIncludes(r2.stdout, "Done", "should report done");
 
-    // Verify on the remote side
-    pullRemoteWorking(env);
+    // Verify on the shadow branch
     assertEqual(
-      readRemoteFile(env, "new-feature.ts"),
+      readShadowFile(env, "new-feature.ts"),
       "export function feat() {}\n",
-      "new-feature.ts should appear on remote",
+      "new-feature.ts should appear on shadow branch",
     );
 
-    // Remote commit should have push trailer
-    const { execSync } = require("child_process");
-    const remoteLog = execSync("git log -1 --format=%B", {
-      cwd: env.remoteWorking,
-      encoding: "utf8",
-    }).trim();
-    assertIncludes(remoteLog, "Shadow-pushed-from:", "remote commit should have push trailer");
+    // Shadow commit should have the commit message
+    const shadowLog = getShadowLogFull(env);
+    assertIncludes(shadowLog, "Add new feature from mono-repo", "shadow commit should have the message");
   } finally {
     env.cleanup();
   }

@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runPull, runPush, readRemoteFile, pullRemoteWorking } from "./harness";
+import { createTestEnv, commitOnRemote, runPull, runPush, readShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -28,12 +28,11 @@ export default function run() {
     const r2 = runPush(env, "Push with custom dir", ["-d", "custom-dir"]);
     assertEqual(r2.status, 0, "push with -d flag should succeed");
 
-    // Verify on remote
-    pullRemoteWorking(env);
+    // Verify on shadow branch
     assertEqual(
-      readRemoteFile(env, "local-file.ts"),
+      readShadowFile(env, "local-file.ts"),
       "export const local = true;\n",
-      "file should appear on remote",
+      "file should appear on shadow branch",
     );
   } finally {
     env.cleanup();
