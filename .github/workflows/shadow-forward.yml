@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Don't persist credentials — we use our own PAT for external pushes
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -26,15 +28,11 @@ jobs:
 
       - run: npm ci
 
-      - name: Configure git identity
+      - name: Configure git
         run: |
           git config --global user.name "Shadow Sync"
           git config --global user.email "shadow-sync@users.noreply.github.com"
-
-      # Rewrite external remote URLs to use the PAT for push access.
-      # The default GITHUB_TOKEN can only push to this repo, not external ones.
-      - name: Configure external remote auth
-        run: git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Forward to external remote
         run: npx tsx shadow-ci-forward.ts
