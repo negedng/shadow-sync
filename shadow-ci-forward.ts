@@ -18,7 +18,7 @@ import * as path from "path";
 import { spawnSync } from "child_process";
 import {
   REMOTES, SHADOW_BRANCH_PREFIX, MAX_DIR_DEPTH,
-  run, runSafe, refExists,
+  run, runSafe, refExists, appendTrailer,
   validateName, die,
 } from "./shadow-common";
 
@@ -144,8 +144,11 @@ if (!hasStagedChanges) {
   process.exit(0);
 }
 
-// Use the latest shadow branch commit message
-const message = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+// Use the latest shadow branch commit message, tagged with a trailer so
+// CI sync recognizes this as a forwarded commit and skips it on pull-back.
+const shadowHash = run(["rev-parse", `origin/${refName}`]);
+const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+const message = appendTrailer(rawMessage, `Shadow-forwarded-from: ${shadowHash}`);
 const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-m", message], {
   cwd: worktreeDir,
   encoding: "utf8",

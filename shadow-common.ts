@@ -483,6 +483,15 @@ export function replayCommits(opts: {
   for (const hash of newCommits) {
     const meta = getCommitMeta(hash);
 
+    // Skip commits that were forwarded by us — they'd create a round-trip duplicate.
+    if (meta.message.includes("Shadow-forwarded-from:")) {
+      console.log(`  Skipping ${meta.short} (forwarded by us).`);
+      alreadySynced.add(hash);
+      const syncedMessage = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
+      commitWithMeta(meta, syncedMessage, true);
+      continue;
+    }
+
     const label = meta.parentCount > 1
       ? `merge commit ${meta.short} (diffing against first parent)`
       : meta.parentCount === 0
