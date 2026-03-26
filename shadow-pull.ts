@@ -1,15 +1,16 @@
 #!/usr/bin/env ts-node
 /**
- * shadow-pull.ts — Safely merge shadow branch changes into your local branch.
+ * shadow-pull.ts — Sync external changes and merge them into your local branch.
  *
- * A plain `git merge origin/shadow/{dir}/main` would delete all non-dir/
- * files because the shadow branch's tree only contains dir/ files. This
- * script does the merge but restores non-dir/ files from HEAD afterward,
- * so only dir/ content is affected.
+ * 1. Triggers CI sync on GitHub (external → shadow) and waits for it.
+ *    Requires EXTERNAL_REPO_TOKEN env var. Skipped if not set.
+ * 2. Safely merges the shadow branch into your local branch, restoring
+ *    non-dir/ files so only dir/ content is affected.
  *
  * Usage:
  *   npx tsx shadow-pull.ts
  *   npx tsx shadow-pull.ts -r frontend
+ *   npx tsx shadow-pull.ts --no-sync
  */
 import { parseArgs } from "util";
 import {
@@ -21,19 +22,21 @@ import {
 
 const { values } = parseArgs({
   options: {
-    remote: { type: "string", short: "r" },
-    dir:    { type: "string", short: "d" },
-    branch: { type: "string", short: "b" },
-    help:   { type: "boolean", short: "h" },
+    remote:    { type: "string",  short: "r" },
+    dir:       { type: "string",  short: "d" },
+    branch:    { type: "string",  short: "b" },
+    "no-sync": { type: "boolean" },
+    help:      { type: "boolean", short: "h" },
   },
   strict: true,
 });
 
 if (values.help) {
-  console.log("Usage: shadow-pull.ts [-r remote] [-d dir] [-b branch]");
-  console.log("  -r  Remote name                          (default: first entry in REMOTES)");
-  console.log("  -d  Local subdirectory                   (default: inferred from remote config)");
-  console.log("  -b  Branch                               (default: your current branch)");
+  console.log("Usage: shadow-pull.ts [-r remote] [-d dir] [-b branch] [--no-sync]");
+  console.log("  -r         Remote name                          (default: first entry in REMOTES)");
+  console.log("  -d         Local subdirectory                   (default: inferred from remote config)");
+  console.log("  -b         Branch                               (default: your current branch)");
+  console.log("  --no-sync  Skip triggering CI sync");
   process.exit(0);
 }
 
@@ -61,6 +64,35 @@ if (!runSafe(["diff", "--quiet"]).ok || !runSafe(["diff", "--cached", "--quiet"]
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
+// ── Trigger CI sync ───────────────────────────────────────────────────────────
+
+if (!values["no-sync"]) {
+  const token = process.env.EXTERNAL_REPO_TOKEN;
+  if (token) {
+    const originUrl = run(["remote", "get-url", pushOrigin]);
+    const m = originUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+    if (m) {
+      console.log(`Triggering CI sync on ${m[1]}/${m[2]}...`);
+      const res = await fetch(
+        `https://api.github.com/repos/${m[1]}/${m[2]}/actions/workflows/shadow-sync.yml/dispatches`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+          body: JSON.stringify({ ref: "main" }),
+        },
+      );
+      if (res.status === 204) {
+        console.log("Waiting for sync to complete...");
+        await new Promise(r => setTimeout(r, 20000));
+      } else {
+        console.log(`Sync trigger failed (${res.status}), pulling current shadow state.`);
+      }
+    }
+  }
+}
+
+// ── Fetch and merge ───────────────────────────────────────────────────────────
+
 console.log(`Fetching latest from ${pushOrigin}...`);
 run(["fetch", pushOrigin]);
 
@@ -68,7 +100,6 @@ if (!refExists(shadowRef)) {
   die(`Shadow branch '${shadowRef}' does not exist.`);
 }
 
-// Check if shadow is already merged (nothing to do)
 if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
   console.log("Already up to date — shadow branch is fully merged into your local branch.");
   process.exit(0);
@@ -76,7 +107,6 @@ if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
 
 console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
-// Merge shadow, but don't commit yet — we need to restore non-dir/ files
 const mergeResult = runSafe(["merge", "--no-commit", "--no-ff", shadowRef]);
 
 if (!mergeResult.ok && !runSafe(["rev-parse", "MERGE_HEAD"]).ok) {
@@ -84,8 +114,6 @@ if (!mergeResult.ok && !runSafe(["rev-parse", "MERGE_HEAD"]).ok) {
   die("Merge failed.");
 }
 
-// The merge "deleted" all non-dir/ files because shadow's tree only has dir/.
-// Restore them from HEAD (which is still the pre-merge main).
 const headFiles = run(["ls-tree", "-r", "--name-only", "HEAD"])
   .split("\n").filter(Boolean);
 const nonDirFiles = headFiles.filter(f => !f.startsWith(`${dir}/`));
@@ -97,8 +125,6 @@ if (nonDirFiles.length > 0) {
   }
 }
 
-// Commit the merge — even if there are no content changes, the merge
-// ancestry must be recorded so the export pre-flight check passes.
 run(["commit", "--no-edit", "--allow-empty"]);
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
