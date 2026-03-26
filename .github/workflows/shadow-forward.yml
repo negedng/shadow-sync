@@ -1,0 +1,39 @@
+name: Shadow Forward
+
+on:
+  push:
+    branches:
+      - 'shadow/**'
+
+concurrency:
+  group: shadow-forward-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      # Rewrite external remote URLs to use the PAT for push access.
+      # The default GITHUB_TOKEN can only push to this repo, not external ones.
+      - name: Configure external remote auth
+        if: env.EXTERNAL_REPO_TOKEN != ''
+        env:
+          EXTERNAL_REPO_TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${EXTERNAL_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Forward to external remote
+        run: npx tsx shadow-ci-forward.ts
