@@ -319,18 +319,19 @@
 
 <pre><code>shadow/backend/main
 ├── .github/workflows/
-│   ├── shadow-forward.yml        &larr; CI forward workflow (must be on the branch to trigger)
+│   ├── shadow-forward.yml          &larr; CI forward workflow (must be on the branch to trigger)
 │   └── shadow-sync.yml
 ├── backend/
-│   ├── middleware.ts              &larr; your files live under backend/
+│   ├── middleware.ts                &larr; your files live under backend/
 │   ├── routes.ts
 │   ├── README.md
 │   └── server.ts
-├── package.json                   &larr; needed for npm ci in the forward workflow
-├── package-lock.json
-├── shadow-ci-forward.ts           &larr; the forward script itself
-├── shadow-common.ts               &larr; shared helpers
-└── shadow-config.json             &larr; remote/dir config</code></pre>
+├── shadow/
+│   ├── shadow-ci-forward.ts        &larr; the forward script itself
+│   ├── shadow-common.ts            &larr; shared helpers
+│   └── shadow-config.json          &larr; remote/dir config
+├── package.json                     &larr; needed for npm ci in the forward workflow
+└── package-lock.json</code></pre>
 
 <p>Everything else from your internal repo (other subdirectories, test files, export scripts, docs) is <strong>stripped during export</strong> and never appears on the shadow branch.</p>
 
@@ -1007,7 +1008,7 @@
   <ul>
     <li>No filtering happens here &mdash; <code>.shadowignore</code> was already applied during export</li>
     <li>The <code>Shadow-forwarded-from</code> trailer prevents round-trip duplicates: when CI sync pulls from external, it skips commits that originated from us</li>
-    <li>The export preserves CI dependencies on the shadow branch (<code>.github/workflows/</code>, <code>package.json</code>, <code>shadow-ci-forward.ts</code>, <code>shadow-common.ts</code>, <code>shadow-config.json</code>) so the forward workflow can run</li>
+    <li>The export preserves CI dependencies on the shadow branch (<code>.github/workflows/</code>, <code>package.json</code>, <code>shadow/shadow-ci-forward.ts</code>, <code>shadow/shadow-common.ts</code>, <code>shadow/shadow-config.json</code>) so the forward workflow can run</li>
   </ul>
 </div>
 
