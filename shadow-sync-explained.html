@@ -309,6 +309,58 @@
   <p><strong>Why shadow branches?</strong> They act as a "neutral zone" where the external repo's file structure (files at root level) is mapped to our internal repo's structure (files under <code>backend/</code>). Shadow branches live on our origin repository as branches named like <code>shadow/backend/main</code>.</p>
 </div>
 
+<h3>Demo: What It Looks Like in Practice</h3>
+
+<p>Here's a real example of one full cycle: a local developer adds <code>server.ts</code>, an external developer adds <code>routes.ts</code>, and the local developer adds <code>middleware.ts</code>.</p>
+
+<h4>Shadow branch file tree (<code>shadow/backend/main</code>)</h4>
+
+<p>The shadow branch contains the <code>backend/</code> files plus CI dependencies needed for the forward workflow to run:</p>
+
+<pre><code>shadow/backend/main
+├── .github/workflows/
+│   ├── shadow-forward.yml        &larr; CI forward workflow (must be on the branch to trigger)
+│   └── shadow-sync.yml
+├── backend/
+│   ├── middleware.ts              &larr; your files live under backend/
+│   ├── routes.ts
+│   ├── README.md
+│   └── server.ts
+├── package.json                   &larr; needed for npm ci in the forward workflow
+├── package-lock.json
+├── shadow-ci-forward.ts           &larr; the forward script itself
+├── shadow-common.ts               &larr; shared helpers
+└── shadow-config.json             &larr; remote/dir config</code></pre>
+
+<p>Everything else from your internal repo (other subdirectories, test files, export scripts, docs) is <strong>stripped during export</strong> and never appears on the shadow branch.</p>
+
+<h4>Commit history on the internal repo (<code>main</code>)</h4>
+
+<pre><code>* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes middleware.ts to shadow
+* Add auth middleware                              &larr; your commit
+* Merge remote-tracking branch 'origin/shadow/...' &larr; pull: brings routes.ts from shadow
+* Add API routes                                   &larr; synced from external (preserves author)
+|   Shadow-synced-from: ad827ff                    &larr; trailer: tracks which external commit this was
+* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes server.ts to shadow
+* Add backend API server                           &larr; your commit</code></pre>
+
+<p>Each change creates <strong>2 commits</strong>: the real commit + a merge commit (either from pull or export). The merge commits record ancestry between your branch and the shadow branch.</p>
+
+<h4>Commit history on the external repo (<code>test-backend</code>)</h4>
+
+<pre><code>* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains middleware.ts)
+|   Shadow-forwarded-from: 7cda1be           &larr; trailer: CI sync will skip this on pull-back
+* Add API routes                              &larr; external developer's commit
+* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains server.ts)
+|   Shadow-forwarded-from: c4c625c           &larr; trailer: prevents round-trip duplicate
+* Initial commit</code></pre>
+
+<p>Forwarded commits have a single <code>Shadow-forwarded-from</code> trailer. When CI sync sees this trailer, it skips the commit instead of trying to replay it back (which would fail since the content already exists on the shadow branch).</p>
+
+<div class="note">
+  The merge commits with auto-generated messages like <em>"Merge commit 'abc123' into shadow-export-..."</em> are created by the export and forward scripts. In steady-state usage, each real change produces exactly <strong>2 commits</strong> on each side: the content commit + the merge/forward commit.
+</div>
+
 <!-- ================================================================ -->
 <h2 id="key-concepts">3. Key Concepts (Git Basics You Need)</h2>
 
