@@ -144,11 +144,13 @@ if (!hasStagedChanges) {
   process.exit(0);
 }
 
-// Use the latest shadow branch commit message, tagged with a trailer so
-// CI sync recognizes this as a forwarded commit and skips it on pull-back.
+// Use the shadow branch commit message, stripped of any existing Shadow-*
+// trailers to prevent accumulation across round-trips. Then add our own
+// forwarded-from trailer so CI sync recognizes it and skips it on pull-back.
 const shadowHash = run(["rev-parse", `origin/${refName}`]);
 const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
-const message = appendTrailer(rawMessage, `Shadow-forwarded-from: ${shadowHash}`);
+const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
+const message = appendTrailer(cleanMessage, `Shadow-forwarded-from: ${shadowHash}`);
 const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-m", message], {
   cwd: worktreeDir,
   encoding: "utf8",
