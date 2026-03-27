@@ -199,6 +199,20 @@ if (dryRun) {
   process.exit(0);
 }
 
+// Generate a readable commit message if none provided.
+// Lists the subjects of commits since the last export that touched dir/.
+if (!commitMsg) {
+  const shadowTip = run(["rev-parse", shadowRef]);
+  const subjects = runSafe(["log", "--format=%s", `${shadowTip}..HEAD`, "--", `${dir}/`])
+    .stdout.split("\n").filter(Boolean);
+  const auto = subjects.length > 0
+    ? `Export ${dir}/ (${subjects.length} commit${subjects.length > 1 ? "s" : ""})\n\n${subjects.map(s => `- ${s}`).join("\n")}`
+    : `Export ${dir}/`;
+  // Write to MERGE_MSG so git commit picks it up without -m
+  const msgPath = run(["rev-parse", "--git-dir"], worktreeDir) + "/MERGE_MSG";
+  require("fs").writeFileSync(msgPath, auto + "\n");
+}
+
 const commitArgs = ["-c", "core.autocrlf=false", "commit", ...(commitMsg ? ["-m", commitMsg] : [])];
 const commitResult = spawnSync("git", commitArgs, {
   cwd: worktreeDir, encoding: "utf8", stdio: "inherit",
