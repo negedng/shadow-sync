@@ -337,29 +337,36 @@
 
 <h4>Commit history on the internal repo (<code>main</code>)</h4>
 
-<pre><code>* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes middleware.ts to shadow
-* Add auth middleware                              &larr; your commit
+<pre><code>* <span class="green">Export backend/ (2 commits)</span>                      &larr; export: pushes database.ts + logger.ts to shadow
+|   - Add logger utility                           &larr; auto-generated message lists each commit
+|   - Add database config
+* Add logger utility                               &larr; your commit
+* Add database config                              &larr; your commit
 * Merge remote-tracking branch 'origin/shadow/...' &larr; pull: brings routes.ts from shadow
 * Add API routes                                   &larr; synced from external (preserves author)
 |   Shadow-synced-from: ad827ff                    &larr; trailer: tracks which external commit this was
-* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes server.ts to shadow
+* <span class="green">Export backend/ (1 commit)</span>                       &larr; export: pushes server.ts to shadow
+|   - Add backend API server
 * Add backend API server                           &larr; your commit</code></pre>
 
-<p>Each change creates <strong>2 commits</strong>: the real commit + a merge commit (either from pull or export). The merge commits record ancestry between your branch and the shadow branch.</p>
+<p>Each change creates <strong>2 commits</strong>: the real commit + a merge commit (either from pull or export). The merge commits record ancestry between your branch and the shadow branch. Export messages auto-summarize the included commits; use <code>-m</code> to override.</p>
 
 <h4>Commit history on the external repo (<code>test-backend</code>)</h4>
 
-<pre><code>* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains middleware.ts)
-|   Shadow-forwarded-from: 7cda1be           &larr; trailer: CI sync will skip this on pull-back
-* Add API routes                              &larr; external developer's commit
-* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains server.ts)
-|   Shadow-forwarded-from: c4c625c           &larr; trailer: prevents round-trip duplicate
+<pre><code>* Export backend/ (2 commits)               &larr; forwarded from shadow (database.ts + logger.ts)
+|   - Add logger utility
+|   - Add database config
+|   Shadow-forwarded-from: 2435080          &larr; trailer: CI sync will skip this on pull-back
+* Add API routes                             &larr; external developer's commit
+* Export backend/ (1 commit)                 &larr; forwarded from shadow (server.ts)
+|   - Add backend API server
+|   Shadow-forwarded-from: c4c625c          &larr; trailer: prevents round-trip duplicate
 * Initial commit</code></pre>
 
 <p>Forwarded commits have a single <code>Shadow-forwarded-from</code> trailer. When CI sync sees this trailer, it skips the commit instead of trying to replay it back (which would fail since the content already exists on the shadow branch).</p>
 
 <div class="note">
-  The merge commits with auto-generated messages like <em>"Merge commit 'abc123' into shadow-export-..."</em> are created by the export and forward scripts. In steady-state usage, each real change produces exactly <strong>2 commits</strong> on each side: the content commit + the merge/forward commit.
+  In steady-state usage, each real change produces exactly <strong>2 commits</strong> on each side: the content commit + the export/forward merge commit.
 </div>
 
 <!-- ================================================================ -->
