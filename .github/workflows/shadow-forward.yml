@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      - run: npm --prefix shadow ci
 
       - name: Configure git
         run: |
@@ -35,4 +35,4 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Forward to external remote
-        run: npx tsx shadow-ci-forward.ts
+        run: npx --prefix shadow tsx shadow/shadow-ci-forward.ts
