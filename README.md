@@ -110,7 +110,7 @@ Requires an `EXTERNAL_REPO_TOKEN` secret (a fine-grained PAT with Contents: Read
 
 ## Setup
 
-1. Edit `shadow-config.json`:
+1. Edit `shadow/shadow-config.json`:
 
 ```json
 {
@@ -186,8 +186,7 @@ All shadow sync scripts live in the `shadow/` directory:
 | `shadow/shadow-ci-sync.ts` | CI: replays external commits into shadow branches |
 | `shadow/shadow-ci-forward.ts` | CI: forwards shadow branch content to external remotes |
 | `shadow/.shadowignore` | Glob patterns for files to exclude from export |
-| `shadow/shadow/shadow-sync-explained.html` | Detailed technical documentation |
+| `shadow/shadow-sync-explained.html` | Detailed technical documentation |
 | `shadow/shadow-tests/` | 34 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron schedule) |
 | `.github/workflows/shadow-forward.yml` | CI forward workflow (on push to `shadow/**`) |
-| `shadow-tests/` | 34 automated tests |
