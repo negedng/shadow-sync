@@ -263,7 +263,7 @@ function localEnv(env: TestEnv): Record<string, string> {
 function runScript(env: TestEnv, script: string, args: string[], envVars: Record<string, string>): RunResult {
   const scriptPath = path.join(env.localRepo, script).replace(/\\/g, "/");
   const parts = [shellQuote(scriptPath), ...args.map(shellQuote)];
-  const projectDir = path.resolve(__dirname, "..").replace(/\\/g, "/");
+  const projectDir = path.resolve(__dirname, "..", "..").replace(/\\/g, "/");
   const cmd = `npx --prefix ${shellQuote(projectDir)} tsx ${parts.join(" ")}`;
   const result = spawnSync(cmd, {
     cwd: env.localRepo,

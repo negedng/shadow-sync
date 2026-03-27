@@ -4,12 +4,12 @@
   "description": "Bi-directional git sync between internal and external team repositories",
   "private": true,
   "scripts": {
-    "setup": "tsx shadow-setup.ts",
-    "pull": "tsx shadow-pull.ts",
-    "export": "tsx shadow-export.ts",
-    "ci-sync": "tsx shadow-ci-sync.ts",
-    "ci-forward": "tsx shadow-ci-forward.ts",
-    "test": "tsx shadow-tests/run-all.ts"
+    "setup": "tsx shadow/shadow-setup.ts",
+    "pull": "tsx shadow/shadow-pull.ts",
+    "export": "tsx shadow/shadow-export.ts",
+    "ci-sync": "tsx shadow/shadow-ci-sync.ts",
+    "ci-forward": "tsx shadow/shadow-ci-forward.ts",
+    "test": "tsx shadow/shadow-tests/run-all.ts"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

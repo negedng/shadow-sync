@@ -2,7 +2,7 @@
 
 Mirror files between an internal repo and external repositories using git. Each external repo maps to a local subdirectory (e.g. `backend/`, `frontend/`). Commits are replayed individually to preserve authorship, timestamps, and history.
 
-For a detailed technical deep dive, see [`shadow-sync-explained.html`](shadow-sync-explained.html).
+For a detailed technical deep dive, see [`shadow/shadow-sync-explained.html`](shadow/shadow-sync-explained.html).
 
 ## How it works
 
@@ -77,7 +77,7 @@ Runs on a cron schedule (every 15 minutes requested, but GitHub may delay runs â
 
 Triggers on push to `shadow/**` branches. Takes a snapshot of the `{dir}/` content (stripping the subdirectory prefix) and pushes to the external remote.
 
-Requires an `EXTERNAL_REPO_TOKEN` secret (a fine-grained PAT with Contents: Read and write access to the external repos). See the [PAT setup section in the technical docs](shadow-sync-explained.html#pat-setup) for step-by-step instructions.
+Requires an `EXTERNAL_REPO_TOKEN` secret (a fine-grained PAT with Contents: Read and write access to the external repos). See the [PAT setup section in the technical docs](shadow/shadow-sync-explained.html#pat-setup) for step-by-step instructions.
 
 ## Options
 
@@ -128,7 +128,7 @@ git remote add backend   https://github.com/org/backend.git
 git remote add frontend  https://github.com/org/frontend.git
 ```
 
-3. Create two fine-grained PATs (see [PAT setup](shadow-sync-explained.html#pat-setup) for step-by-step):
+3. Create two fine-grained PATs (see [PAT setup](shadow/shadow-sync-explained.html#pat-setup) for step-by-step):
 
    **Token 1 â€” CI forward** (pushes to external repos):
    - Repos: the external repos only (`test-frontend`, `test-backend`)
@@ -169,22 +169,25 @@ npm run export -- -r backend
 
 ```bash
 npm test                                  # Run all 34 tests
-npx tsx shadow-tests/test-pull-basic.ts   # Run a single test
+npx tsx shadow/shadow-tests/test-pull-basic.ts   # Run a single test
 ```
 
 ## Files
 
+All shadow sync scripts live in the `shadow/` directory:
+
 | File | Purpose |
 |------|---------|
-| `shadow-config.json` | Remotes, trailers, git config overrides, limits |
-| `shadow-common.ts` | Shared config, git helpers, replay engine, lockfile |
-| `shadow-setup.ts` | Bootstrap: records seed so CI sync skips existing history |
-| `shadow-pull.ts` | Safely merges shadow branch into local (only `dir/` affected) |
-| `shadow-export.ts` | Merges local changes into shadow branch (with `.shadowignore` filtering) |
-| `shadow-ci-sync.ts` | CI: replays external commits into shadow branches |
-| `shadow-ci-forward.ts` | CI: forwards shadow branch content to external remotes |
+| `shadow/shadow-config.json` | Remotes, trailers, git config overrides, limits |
+| `shadow/shadow-common.ts` | Shared config, git helpers, replay engine, lockfile |
+| `shadow/shadow-setup.ts` | Bootstrap: records seed so CI sync skips existing history |
+| `shadow/shadow-pull.ts` | Safely merges shadow branch into local (only `dir/` affected) |
+| `shadow/shadow-export.ts` | Merges local changes into shadow branch (with `.shadowignore` filtering) |
+| `shadow/shadow-ci-sync.ts` | CI: replays external commits into shadow branches |
+| `shadow/shadow-ci-forward.ts` | CI: forwards shadow branch content to external remotes |
+| `shadow/.shadowignore` | Glob patterns for files to exclude from export |
+| `shadow/shadow/shadow-sync-explained.html` | Detailed technical documentation |
+| `shadow/shadow-tests/` | 34 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron schedule) |
 | `.github/workflows/shadow-forward.yml` | CI forward workflow (on push to `shadow/**`) |
-| `.shadowignore` | Glob patterns for files to exclude from export |
-| `shadow-sync-explained.html` | Detailed technical documentation |
 | `shadow-tests/` | 34 automated tests |

@@ -163,7 +163,7 @@ const allIndexed = run(["ls-files"], worktreeDir).split("\n").filter(Boolean);
 // workflow files from the pushed branch, and the forward job needs
 // package.json, the forward script, and shared modules to run.
 const ciKeep = [".github/", "package.json", "package-lock.json",
-  "shadow-ci-forward.ts", "shadow-common.ts", "shadow-config.json"];
+  "shadow/shadow-ci-forward.ts", "shadow/shadow-common.ts", "shadow/shadow-config.json"];
 const nonDirFiles = allIndexed.filter(f =>
   !f.startsWith(`${dir}/`) && !ciKeep.some(p => f.startsWith(p))
 );
