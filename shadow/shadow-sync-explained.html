@@ -1,0 +1,1311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shadow Sync &mdash; Technical Deep Dive</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --card: #ffffff;
+    --accent: #2563eb;
+    --accent-light: #dbeafe;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --code-bg: #f1f5f9;
+    --green: #16a34a;
+    --orange: #ea580c;
+    --red: #dc2626;
+    --purple: #7c3aed;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 2.2rem;
+    margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  h1 + p { color: var(--muted); margin-bottom: 2rem; font-size: 1.05rem; }
+
+  h2 {
+    font-size: 1.5rem;
+    margin: 2.5rem 0 1rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 2px solid var(--accent);
+    color: var(--accent);
+  }
+
+  h3 {
+    font-size: 1.15rem;
+    margin: 1.8rem 0 0.6rem;
+    color: var(--text);
+  }
+
+  h4 {
+    font-size: 1rem;
+    margin: 1.2rem 0 0.4rem;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  p, li { margin-bottom: 0.5rem; }
+
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a.src-link { font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem; }
+  a.src-link:hover { color: var(--accent); }
+
+  code {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+
+  pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 1.2rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+
+  .card-accent {
+    border-left: 4px solid var(--accent);
+  }
+
+  .card-green { border-left: 4px solid var(--green); }
+  .card-orange { border-left: 4px solid var(--orange); }
+  .card-purple { border-left: 4px solid var(--purple); }
+  .card-red { border-left: 4px solid var(--red); }
+
+  .diagram {
+    background: #1e293b;
+    color: #93c5fd;
+    padding: 1.5rem;
+    border-radius: 10px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.85rem;
+    line-height: 1.8;
+    overflow-x: auto;
+    margin: 1rem 0;
+    text-align: center;
+  }
+  .diagram .highlight { color: #fbbf24; font-weight: bold; }
+  .diagram .dim { color: #64748b; }
+  .diagram .green { color: #4ade80; }
+  .diagram .orange { color: #fb923c; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 0.95rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+    color: var(--muted);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tr:hover td { background: #f8fafc; }
+
+  .tag {
+    display: inline-block;
+    padding: 0.15em 0.5em;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .tag-blue { background: var(--accent-light); color: var(--accent); }
+  .tag-green { background: #dcfce7; color: var(--green); }
+  .tag-orange { background: #ffedd5; color: var(--orange); }
+  .tag-purple { background: #ede9fe; color: var(--purple); }
+  .tag-red { background: #fee2e2; color: var(--red); }
+
+  .fn-sig {
+    background: var(--code-bg);
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 0.9rem;
+    margin: 0.5rem 0;
+    border-left: 3px solid var(--accent);
+  }
+
+  .toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem 1.5rem 1rem;
+    margin: 1.5rem 0 2rem;
+  }
+  .toc h3 { margin-top: 0; }
+  .toc ol { margin-bottom: 0; }
+  .toc li { margin-bottom: 0.3rem; }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    body { padding: 1rem; }
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    margin: 0.8rem 0;
+  }
+  .flow-num {
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: var(--accent);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 0.9rem;
+  }
+
+  .note {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  .note::before { content: "Note: "; font-weight: 600; }
+
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2rem 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Shadow Sync</h1>
+<p>A complete guide to the codebase &mdash; what every file, function, and design decision does.</p>
+
+<!-- ================================================================ -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#problem">The Problem We're Solving</a></li>
+    <li><a href="#big-picture">Big Picture: How It All Fits Together</a></li>
+    <li><a href="#key-concepts">Key Concepts (Git Basics You Need)</a></li>
+    <li><a href="#architecture">Architecture &amp; Data Flow</a></li>
+    <li><a href="#files">File-by-File Breakdown</a></li>
+    <li><a href="#config">Configuration</a></li>
+    <li><a href="#workflows">GitHub Actions Workflows</a></li>
+    <li><a href="#functions">Every Function Explained</a></li>
+    <li><a href="#design">Design Decisions &amp; Why</a></li>
+    <li><a href="#testing">Test Suite</a></li>
+    <li><a href="#cli">Command-Line Options</a></li>
+    <li><a href="#pat-setup">Setting Up Cross-Repo Push Access (PAT)</a></li>
+    <li><a href="#security">Security Considerations</a></li>
+  </ol>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="problem">1. The Problem We're Solving</h2>
+
+<div class="card card-accent">
+  <p><strong>Situation:</strong> We have an <em>internal repo</em> (a repository with folders like <code>backend/</code> and <code>frontend/</code>). External teams have their own separate repositories for backend and frontend. We need to keep both sides in sync &mdash; when they push changes, we get them, and when we push changes, they get them.</p>
+  <p style="margin-top:0.8rem"><strong>Challenge:</strong> Git doesn't natively support syncing a <em>subdirectory</em> of one repo with the <em>root</em> of another repo while preserving commit history (who wrote what, when, and why).</p>
+  <p style="margin-top:0.8rem"><strong>Why not <code>git subtree</code>?</strong> Git has a built-in command called <code>git subtree</code> that maps a subdirectory to an external repo. However, it has serious limitations for our use case:</p>
+  <ul style="margin-top:0.5rem">
+    <li><strong>Lossy history:</strong> <code>git subtree push</code> rewrites commits &mdash; the original author, date, and commit message are replaced with a single squashed commit or synthetic commits. We lose <code>git blame</code> accuracy and the ability to trace changes back to the person who made them.</li>
+    <li><strong>No filtering:</strong> There's no built-in way to exclude files (like our <code>.shadowignore</code>). Every file in the subdirectory goes to the external repo, including AI prompts, IDE configs, and other internal-only files.</li>
+    <li><strong>Merge pain:</strong> <code>git subtree pull</code> creates noisy merge commits and frequently produces conflicts that are difficult to resolve, especially when both sides are actively changing files.</li>
+    <li><strong>No automation story:</strong> <code>git subtree</code> is designed as a manual, local-only command. There's no clean way to run it in CI on a schedule or trigger it automatically on push.</li>
+  </ul>
+  <p style="margin-top:0.8rem"><strong>Solution:</strong> Shadow Sync uses intermediate "shadow branches" as a staging area. It replays commits one-by-one to preserve authorship, supports <code>.shadowignore</code> filtering, and uses GitHub Actions to automate the process.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="big-picture">2. Big Picture: How It All Fits Together</h2>
+
+<p>There are <strong>three copies</strong> of the code at any time:</p>
+
+<table>
+  <tr><th>Name</th><th>Where</th><th>What</th></tr>
+  <tr>
+    <td><strong>External</strong></td>
+    <td>External repo (e.g. <code>github.com/org/backend</code>)</td>
+    <td>The external source of truth</td>
+  </tr>
+  <tr>
+    <td><strong>Shadow</strong></td>
+    <td><code>shadow/backend/main</code> branch on our origin</td>
+    <td>A mirror &mdash; kept in sync automatically by CI</td>
+  </tr>
+  <tr>
+    <td><strong>Origin</strong></td>
+    <td>Your working branch (<code>main</code>, <code>feature/...</code>)</td>
+    <td>Our internal repo with all subdirectories</td>
+  </tr>
+</table>
+
+<div class="diagram">
+<span class="dim">PULLING (external &rarr; us):</span>
+<br>
+<span class="orange">External Repo</span> &mdash;<span class="dim">[ CI sync every 15 min ]</span>&mdash;&rarr; <span class="highlight">Shadow Branch</span> &mdash;<span class="dim">[ git merge ]</span>&mdash;&rarr; <span class="green">Your Branch</span>
+<br><br>
+<span class="dim">PUSHING (us &rarr; external):</span>
+<br>
+<span class="green">Your Branch</span> &mdash;<span class="dim">[ shadow-export + .shadowignore ]</span>&mdash;&rarr; <span class="highlight">Shadow Branch</span> &mdash;<span class="dim">[ CI forward ]</span>&mdash;&rarr; <span class="orange">External Repo</span>
+</div>
+
+<div class="card card-green">
+  <p><strong>Why shadow branches?</strong> They act as a "neutral zone" where the external repo's file structure (files at root level) is mapped to our internal repo's structure (files under <code>backend/</code>). Shadow branches live on our origin repository as branches named like <code>shadow/backend/main</code>.</p>
+</div>
+
+<h3>Demo: What It Looks Like in Practice</h3>
+
+<p>Here's a real example of one full cycle: a local developer adds <code>server.ts</code>, an external developer adds <code>routes.ts</code>, and the local developer adds <code>middleware.ts</code>.</p>
+
+<h4>Shadow branch file tree (<code>shadow/backend/main</code>)</h4>
+
+<p>The shadow branch contains the <code>backend/</code> files plus CI dependencies needed for the forward workflow to run:</p>
+
+<pre><code>shadow/backend/main
+├── .github/workflows/
+│   ├── shadow-forward.yml          &larr; CI forward workflow (must be on the branch to trigger)
+│   └── shadow-sync.yml
+├── backend/
+│   ├── middleware.ts                &larr; your files live under backend/
+│   ├── routes.ts
+│   ├── README.md
+│   └── server.ts
+└── shadow/
+    ├── package.json                 &larr; needed for npm ci in the forward workflow
+    ├── package-lock.json
+    ├── shadow-ci-forward.ts         &larr; the forward script itself
+    ├── shadow-common.ts             &larr; shared helpers
+    └── shadow-config.json           &larr; remote/dir config</code></pre>
+
+<p>Everything else from your internal repo (other subdirectories, test files, export scripts, docs) is <strong>stripped during export</strong> and never appears on the shadow branch.</p>
+
+<h4>Commit history on the internal repo (<code>main</code>)</h4>
+
+<pre><code>* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes middleware.ts to shadow
+* Add auth middleware                              &larr; your commit
+* Merge remote-tracking branch 'origin/shadow/...' &larr; pull: brings routes.ts from shadow
+* Add API routes                                   &larr; synced from external (preserves author)
+|   Shadow-synced-from: ad827ff                    &larr; trailer: tracks which external commit this was
+* <span class="green">Merge commit '...' into shadow-export-...</span>  &larr; export: pushes server.ts to shadow
+* Add backend API server                           &larr; your commit</code></pre>
+
+<p>Each change creates <strong>2 commits</strong>: the real commit + a merge commit (either from pull or export). The merge commits record ancestry between your branch and the shadow branch.</p>
+
+<h4>Commit history on the external repo (<code>test-backend</code>)</h4>
+
+<pre><code>* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains middleware.ts)
+|   Shadow-forwarded-from: 7cda1be           &larr; trailer: CI sync will skip this on pull-back
+* Add API routes                              &larr; external developer's commit
+* Merge commit '...' into shadow-export-...  &larr; forwarded from shadow (contains server.ts)
+|   Shadow-forwarded-from: c4c625c           &larr; trailer: prevents round-trip duplicate
+* Initial commit</code></pre>
+
+<p>Forwarded commits have a single <code>Shadow-forwarded-from</code> trailer. When CI sync sees this trailer, it skips the commit instead of trying to replay it back (which would fail since the content already exists on the shadow branch).</p>
+
+<div class="note">
+  The merge commits with auto-generated messages like <em>"Merge commit 'abc123' into shadow-export-..."</em> are created by the export and forward scripts. In steady-state usage, each real change produces exactly <strong>2 commits</strong> on each side: the content commit + the merge/forward commit.
+</div>
+
+<!-- ================================================================ -->
+<h2 id="key-concepts">3. Key Concepts (Git Basics You Need)</h2>
+
+<div class="two-col">
+  <div class="card">
+    <h4>Repository (Repo)</h4>
+    <p>A folder tracked by git. It remembers every change ever made to every file, who made it, and when.</p>
+  </div>
+  <div class="card">
+    <h4>Branch</h4>
+    <p>A named line of development. Think of it as a bookmark pointing to the latest change. <code>main</code> is the default branch.</p>
+  </div>
+  <div class="card">
+    <h4>Commit</h4>
+    <p>A snapshot of changes with a message, author, and timestamp. Each commit has a unique hash (like <code>a1b2c3d</code>).</p>
+  </div>
+  <div class="card">
+    <h4>Remote</h4>
+    <p>A link to another copy of the repo. <code>origin</code> is your GitHub repo. We add external repos as additional remotes (e.g. <code>backend</code>).</p>
+  </div>
+  <div class="card">
+    <h4>Fetch &amp; Push</h4>
+    <p><strong>Fetch</strong> = download new commits from a remote. <strong>Push</strong> = upload your commits to a remote.</p>
+  </div>
+  <div class="card">
+    <h4>Merge</h4>
+    <p>Combine changes from one branch into another. If both sides edited the same line, you get a "conflict" to resolve manually.</p>
+  </div>
+  <div class="card">
+    <h4>Worktree</h4>
+    <p>A second working copy of the repo that shares the same git history. Like having two checkout folders at once &mdash; useful for making changes on a different branch without disturbing your current work.</p>
+  </div>
+  <div class="card">
+    <h4>Orphan Branch</h4>
+    <p>A branch with no parent commits &mdash; it starts completely fresh with no history. Shadow branches are created this way so they don't inherit our internal repo's unrelated history.</p>
+  </div>
+  <div class="card">
+    <h4>Trailer</h4>
+    <p>Metadata appended to a commit message, like <code>Shadow-synced-from: a1b2c3d</code>. Used by this system to track which external commits have already been synced.</p>
+  </div>
+  <div class="card">
+    <h4>GitHub Actions</h4>
+    <p>Automated scripts that run on GitHub's servers. Triggered by events (push, schedule, manual). Defined in <code>.github/workflows/</code> YAML files.</p>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="architecture">4. Architecture &amp; Data Flow</h2>
+
+<h3>Flow A: Pulling External Changes (External &rarr; Us)</h3>
+
+<div class="card card-green">
+  <div class="flow-step">
+    <div class="flow-num">1</div>
+    <div><strong>CI sync runs every 15 minutes</strong> (GitHub Actions cron). The workflow file <a href=".github/workflows/shadow-sync.yml"><code>shadow-sync.yml</code></a> triggers <a href="#fn-ci-sync"><code>shadow-ci-sync.ts</code></a>.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">2</div>
+    <div><strong>Fetch from external remote.</strong> The script gets the URL from <a href="#config"><code>shadow-config.json</code></a> and runs <code>git fetch</code>.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">3</div>
+    <div><strong>Discover branches.</strong> It lists all branches on the external remote (e.g. <code>main</code>, <code>feature/auth</code>).</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">4</div>
+    <div>
+      <strong>Replay commits.</strong> For each branch, it checks which external commits we've already copied over (by looking at trailers in our history) and skips those. Then, for each new commit:
+      <ol style="margin-top:0.5rem">
+        <li>Takes the changes that commit introduced (the diff)</li>
+        <li>Applies those changes inside the corresponding folder (e.g. <code>backend/</code> or <code>frontend/</code>) &mdash; so if the external commit changed <code>src/app.ts</code>, we change <code>backend/src/app.ts</code></li>
+        <li>Creates a matching commit on the shadow branch, keeping the original author name, email, date, and message &mdash; so it looks like the external developer made the change directly in our repo</li>
+      </ol>
+    </div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">5</div>
+    <div><strong>Push shadow branches.</strong> The updated <code>shadow/backend/main</code> branch is pushed to origin.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">6</div>
+    <div><strong>You pull locally.</strong> Run <code>npm run pull</code> (or <code>npm run pull -- -r backend</code>) to merge external changes into your working branch. This uses <a href="#fn-pull"><code>shadow-pull.ts</code></a> which merges the shadow branch but restores non-<code>dir/</code> files so only <code>backend/</code> is affected.
+    <p style="margin-top:0.5rem"><strong>Warning:</strong> Do <strong>not</strong> use a plain <code>git merge origin/shadow/backend/main</code> &mdash; the shadow branch's tree only contains <code>backend/</code> files, so a raw merge would delete all your other files (scripts, config, tests, etc.).</p></div>
+  </div>
+</div>
+
+<h3>Flow B: Pushing Our Changes (Us &rarr; External)</h3>
+
+<div class="card card-orange">
+  <div class="flow-step">
+    <div class="flow-num">1</div>
+    <div><strong>You run <code>npm run export -- -m "message"</code></strong> locally. This runs <a href="#fn-export"><code>shadow-export.ts</code></a>. (The <code>--</code> tells npm to pass everything after it to the script, rather than treating it as npm's own flags.)</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">2</div>
+    <div><strong>Create worktree &amp; merge.</strong> A temporary worktree is created from the shadow branch. Your current branch (HEAD) is merged into it with <code>git merge --no-commit</code>, so we can clean the index before committing. The merge uses <code>-X theirs</code> to prefer your local changes on conflict.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">3</div>
+    <div><strong>Clean the index.</strong> The merge brought in <em>all</em> files from HEAD (other directories, config files, scripts&hellip;). The script strips the index back to only files under <code>backend/</code>, then removes any files matching <code>.shadowignore</code> patterns. Because <code>MERGE_HEAD</code> is still present, the eventual commit will record both parents &mdash; giving us real merge ancestry with a clean tree.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">4</div>
+    <div><strong>Commit &amp; push.</strong> The result is a proper <strong>merge commit</strong> with two parents (shadow branch tip + your HEAD). Its tree only contains <code>backend/</code> files, minus anything in <code>.shadowignore</code>. Pushed to origin.</div>
+  </div>
+  <div class="flow-step">
+    <div class="flow-num">5</div>
+    <div><strong>CI forward triggers automatically.</strong> The push to <code>shadow/**</code> triggers <a href=".github/workflows/shadow-forward.yml"><code>shadow-forward.yml</code></a>, which runs <a href="#fn-ci-forward"><code>shadow-ci-forward.ts</code></a>. It strips the <code>backend/</code> prefix and pushes the files to the external remote.</div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="files">5. File-by-File Breakdown</h2>
+
+<table>
+  <tr><th>File</th><th>Purpose</th><th>Runs Where</th></tr>
+  <tr>
+    <td><a href="shadow-config.json"><code>shadow-config.json</code></a></td>
+    <td>Central configuration: which remotes to sync, git options, limits (<a href="#config">details</a>)</td>
+    <td>Read by all scripts</td>
+  </tr>
+  <tr>
+    <td><a href="shadow-common.ts"><code>shadow-common.ts</code></a></td>
+    <td>Shared library: config loading, git helpers, replay engine, lockfile, pre-flight checks (<a href="#fn-common">all functions</a>)</td>
+    <td>Imported by all scripts</td>
+  </tr>
+  <tr>
+    <td><a href="shadow-setup.ts"><code>shadow-setup.ts</code></a></td>
+    <td>One-time bootstrap: records a seed commit so CI sync skips existing history (<a href="#fn-setup">details</a>)</td>
+    <td><span class="tag tag-green">Local</span></td>
+  </tr>
+  <tr>
+    <td><a href="shadow-pull.ts"><code>shadow-pull.ts</code></a></td>
+    <td>Safely merges shadow branch into your local branch, only affecting <code>dir/</code> files (<a href="#fn-pull">details</a>)</td>
+    <td><span class="tag tag-green">Local</span></td>
+  </tr>
+  <tr>
+    <td><a href="shadow-export.ts"><code>shadow-export.ts</code></a></td>
+    <td>Exports your local changes to the shadow branch (with <code>.shadowignore</code> filtering) (<a href="#fn-export">details</a>)</td>
+    <td><span class="tag tag-green">Local</span></td>
+  </tr>
+  <tr>
+    <td><a href="shadow-ci-sync.ts"><code>shadow-ci-sync.ts</code></a></td>
+    <td>Replays external commits into shadow branches (the "pull" direction) (<a href="#fn-ci-sync">details</a>)</td>
+    <td><span class="tag tag-blue">GitHub Actions</span></td>
+  </tr>
+  <tr>
+    <td><a href="shadow-ci-forward.ts"><code>shadow-ci-forward.ts</code></a></td>
+    <td>Forwards shadow branch content to external remotes (the "push" direction) (<a href="#fn-ci-forward">details</a>)</td>
+    <td><span class="tag tag-blue">GitHub Actions</span></td>
+  </tr>
+  <tr>
+    <td><code>.shadowignore</code></td>
+    <td>Glob patterns for files to exclude when exporting (like <code>.gitignore</code> but for shadow sync) (<a href="#fn-parseShadowIgnore">parsed by <code>parseShadowIgnore</code></a>)</td>
+    <td>Read by <a href="shadow-export.ts"><code>shadow-export.ts</code></a></td>
+  </tr>
+  <tr>
+    <td><a href="package.json"><code>package.json</code></a></td>
+    <td>npm scripts: <code>setup</code>, <code>export</code>, <code>ci-sync</code>, <code>ci-forward</code>, <code>test</code></td>
+    <td>npm entry point</td>
+  </tr>
+  <tr>
+    <td><a href=".github/workflows/shadow-sync.yml"><code>.github/workflows/shadow-sync.yml</code></a></td>
+    <td>GitHub Actions workflow: runs CI sync every 15 minutes (<a href="#workflows">details</a>)</td>
+    <td><span class="tag tag-blue">GitHub Actions</span></td>
+  </tr>
+  <tr>
+    <td><a href=".github/workflows/shadow-forward.yml"><code>.github/workflows/shadow-forward.yml</code></a></td>
+    <td>GitHub Actions workflow: triggered on push to <code>shadow/**</code> branches (<a href="#workflows">details</a>)</td>
+    <td><span class="tag tag-blue">GitHub Actions</span></td>
+  </tr>
+  <tr>
+    <td><a href="shadow-tests/"><code>shadow-tests/</code></a></td>
+    <td>Automated test suite with 30+ tests covering pull, push, edge cases (<a href="#testing">details</a>)</td>
+    <td><span class="tag tag-purple">Development</span></td>
+  </tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="config">6. Configuration</h2>
+
+<h3>shadow-config.json</h3>
+
+<pre><code>{
+  "remotes": [
+    { "remote": "backend",  "dir": "backend",  "url": "https://github.com/org/backend.git"  },
+    { "remote": "frontend", "dir": "frontend", "url": "https://github.com/org/frontend.git" }
+  ],
+  "trailers": {
+    "sync": "Shadow-synced-from",
+    "seed": "Shadow-seed"
+  },
+  "gitConfigOverrides": {
+    "core.autocrlf": "false",
+    "core.safecrlf": "false",
+    "core.precomposeunicode": "true",
+    "core.quotepath": "false"
+  },
+  "maxBuffer": 52428800,
+  "maxDirDepth": 100,
+  "maxPushRetries": 3
+}</code></pre>
+
+<table>
+  <tr><th>Field</th><th>What It Does</th><th>Why It Exists</th></tr>
+  <tr>
+    <td><code>remotes</code></td>
+    <td>Array of remote configurations. <code>remote</code> is the git remote name, <code>dir</code> is the local subdirectory it maps to, and <code>url</code> is the git URL for the external repo.</td>
+    <td>Supports multiple external repos (backend + frontend)</td>
+  </tr>
+  <tr>
+    <td><code>trailers.sync</code></td>
+    <td>The trailer key appended to mirrored commit messages (e.g. <code>Shadow-synced-from: a1b2c3d</code>)</td>
+    <td>Used to detect which commits have already been synced, preventing duplicates</td>
+  </tr>
+  <tr>
+    <td><code>trailers.seed</code></td>
+    <td>The trailer key for seed commits (e.g. <code>Shadow-seed: backend a1b2c3d</code>)</td>
+    <td>Marks the starting point during bootstrap &mdash; "start syncing from this commit forward"</td>
+  </tr>
+  <tr>
+    <td><code>gitConfigOverrides</code></td>
+    <td>Git settings applied to every git command via <code>-c key=value</code></td>
+    <td>Ensures consistent behavior across Windows, macOS, and Linux (line endings, unicode, etc.)</td>
+  </tr>
+  <tr>
+    <td><code>maxBuffer</code></td>
+    <td>Maximum output buffer for git commands (50 MB)</td>
+    <td>Prevents crashes when diffing large files</td>
+  </tr>
+  <tr>
+    <td><code>maxDirDepth</code></td>
+    <td>Maximum directory recursion depth (100)</td>
+    <td>Safety limit to prevent infinite recursion from symlink loops</td>
+  </tr>
+  <tr>
+    <td><code>maxPushRetries</code></td>
+    <td>Number of push retry attempts (3)</td>
+    <td>Handles race conditions where someone else pushes to the shadow branch between our fetch and push</td>
+  </tr>
+</table>
+
+<h3>Environment Variables</h3>
+
+<table>
+  <tr><th>Variable</th><th>Purpose</th><th>Used By</th></tr>
+  <tr>
+    <td><code>SHADOW_PUSH_ORIGIN</code></td>
+    <td>Override the internal origin remote to push shadow branches to (default: <code>origin</code>). Only used in tests.</td>
+    <td>Test harness</td>
+  </tr>
+  <tr>
+    <td><code>GITHUB_REF_NAME</code></td>
+    <td>The branch that triggered the workflow (set automatically by GitHub Actions)</td>
+    <td>CI forward</td>
+  </tr>
+  <tr>
+    <td><code>SHADOW_TEST_REMOTES</code></td>
+    <td>JSON array of <code>RemoteConfig</code> objects to override config for testing. Lets tests inject their own temporary repos with URLs.</td>
+    <td>Test harness</td>
+  </tr>
+</table>
+
+
+<!-- ================================================================ -->
+<h2 id="workflows">7. GitHub Actions Workflows</h2>
+
+<div class="two-col">
+  <div class="card card-accent">
+    <h4>shadow-sync.yml &mdash; "Pull"</h4>
+    <p><strong>Trigger:</strong> Cron every 15 minutes + manual dispatch</p>
+    <p><strong>What it does:</strong></p>
+    <ol>
+      <li>Checks out repo with full history (<code>fetch-depth: 0</code>)</li>
+      <li>Installs Node.js 20 and runs <code>npm ci</code></li>
+      <li>Runs <code>shadow-ci-sync.ts</code> (reads remote URLs from <code>shadow-config.json</code>)</li>
+    </ol>
+    <p><strong>Concurrency:</strong> Group <code>shadow-sync</code>, won't cancel running syncs</p>
+    <p><strong>Permissions:</strong> <code>contents: write</code> (needs to push shadow branches)</p>
+  </div>
+  <div class="card card-orange">
+    <h4>shadow-forward.yml &mdash; "Push"</h4>
+    <p><strong>Trigger:</strong> Push to any <code>shadow/**</code> branch</p>
+    <p><strong>What it does:</strong></p>
+    <ol>
+      <li>Checks out repo with full history and <code>persist-credentials: false</code> (disables the default credential helper so the PAT is used instead)</li>
+      <li>Installs Node.js 20 and runs <code>npm ci</code></li>
+      <li>Configures git identity (<code>Shadow Sync</code>) and rewrites GitHub HTTPS URLs to use the PAT</li>
+      <li>Runs <code>shadow-ci-forward.ts</code> (reads remote URLs from <code>shadow-config.json</code>)</li>
+    </ol>
+    <p><strong>Concurrency:</strong> Per-ref group (each shadow branch gets its own queue)</p>
+    <p><strong>Permissions:</strong> <code>contents: read</code> (pushes to external, not origin). Requires an <code>EXTERNAL_REPO_TOKEN</code> secret for cross-repo push access &mdash; see <a href="#pat-setup">PAT setup</a>.</p>
+  </div>
+</div>
+
+<div class="note">
+  Both workflows require <code>fetch-depth: 0</code> (full clone). Shadow sync needs full history to scan for trailers that track which commits have been synced. A shallow clone would cause it to fail.
+</div>
+
+<div class="note">
+  The <code>*/15 * * * *</code> cron schedule is a request, not a guarantee. GitHub Actions delays scheduled runs during high load, especially on free-tier repos. In practice, intervals of 30&ndash;60+ minutes are common. This is normal GitHub behavior &mdash; shadow sync doesn't depend on precise timing, it just means external changes may take longer to appear on the shadow branch.
+</div>
+
+<!-- ================================================================ -->
+<h2 id="functions">8. Every Function Explained</h2>
+
+<h3 id="fn-common"><a href="shadow-common.ts">shadow-common.ts</a> &mdash; Shared Library</h3>
+
+<p>This is the core of the system. Every other script imports from here.</p>
+
+<h4>Configuration</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-loadConfig">loadConfig(): ShadowSyncConfig <a class="src-link" href="shadow-common.ts#L30">[source:30]</a></div>
+  <p>Reads <code>shadow-config.json</code> from the same directory as the script. Parses it and fills in default values for any missing fields. Called once at module load time &mdash; the result is cached in the <code>config</code> constant.</p>
+  <p><strong>Design decision:</strong> Defaults are hardcoded as fallbacks (e.g. <code>maxBuffer</code> defaults to 50 MB). This means the config file only needs the fields you want to customize.</p>
+</div>
+
+<h4>Git Helpers</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-run">run(args: string[], cwd?: string): string <a class="src-link" href="shadow-common.ts#L72">[source:72]</a></div>
+  <p>Runs a git command and returns its output. <strong>Throws an error</strong> if the command fails (non-zero exit code). Both <code>run</code> and <code>runSafe</code> share a private <code>git()</code> helper that prepends config overrides and sets buffer/encoding options.</p>
+  <p><strong>Use when:</strong> The command <em>must</em> succeed (failure is a bug).</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-runSafe">runSafe(args: string[], cwd?: string): { stdout, stderr, status, ok } <a class="src-link" href="shadow-common.ts#L78">[source:78]</a></div>
+  <p>Runs a git command but <strong>never throws</strong>. Returns an object with the output, error text, exit code, and a boolean <code>ok</code> flag. The caller decides how to handle failure.</p>
+  <p><strong>Use when:</strong> Failure is expected or you need to check the result (e.g. "does this branch exist?").</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-getCurrentBranch">getCurrentBranch(): string <a class="src-link" href="shadow-common.ts#L125">[source:125]</a></div>
+  <p>Returns the name of the currently checked-out branch (e.g. <code>"main"</code>). Calls <code>die()</code> if you're in a "detached HEAD" state (not on any branch), because shadow sync requires a named branch to work with.</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-refExists">refExists(ref: string): boolean <a class="src-link" href="shadow-common.ts#L133">[source:133]</a></div>
+  <p>Checks if a git reference (branch, tag, commit) exists. Uses <code>git rev-parse --verify</code>. Returns <code>true</code> or <code>false</code>.</p>
+  <p><strong>Example:</strong> <code>refExists("origin/shadow/backend/main")</code> &rarr; does this shadow branch exist on origin?</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-listExternalBranches">listExternalBranches(remote: string): string[] <a class="src-link" href="shadow-common.ts#L130">[source:130]</a></div>
+  <p>Lists all branches on a remote (e.g. <code>["main", "feature/auth"]</code>). Filters out HEAD pointer entries. Used by CI sync to discover all branches to process, and by setup to show available branches on error.</p>
+</div>
+
+<h4>.shadowignore</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-parseShadowIgnore">parseShadowIgnore(scriptDir: string): string[] <a class="src-link" href="shadow-common.ts#L136">[source:136]</a></div>
+  <p>Reads the <code>.shadowignore</code> file (if it exists) and returns an array of glob patterns. Returns an empty array if the file doesn't exist. Comments (lines starting with <code>#</code>) and blank lines are stripped. These patterns determine which files are excluded when exporting to the external repo.</p>
+  <p><strong>Example patterns:</strong> <code>CLAUDE.md</code>, <code>**/*.local</code>, <code>.cursor/</code></p>
+</div>
+
+<h4>Pre-flight Checks</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-preflightChecks">preflightChecks(externalRef): Warning[] <a class="src-link" href="shadow-common.ts#L162">[source:162]</a></div>
+  <p>Runs safety checks before syncing. Returns an array of warnings/errors. Checks for:</p>
+  <table>
+    <tr><th>Check</th><th>Level</th><th>Why</th></tr>
+    <tr>
+      <td>Shallow clone</td>
+      <td><span class="tag tag-red">Error</span></td>
+      <td>Shadow sync needs full history to track synced commits via trailers. A shallow clone is missing this history.</td>
+    </tr>
+    <tr>
+      <td>Submodules</td>
+      <td><span class="tag tag-orange">Warning</span></td>
+      <td>Git submodules (repos inside repos) can't be synced as patches. They're skipped.</td>
+    </tr>
+    <tr>
+      <td>Symlinks</td>
+      <td><span class="tag tag-orange">Warning</span></td>
+      <td>Symlink targets might point to wrong paths after being moved into a subdirectory.</td>
+    </tr>
+    <tr>
+      <td>Case conflicts</td>
+      <td><span class="tag tag-red">Error</span></td>
+      <td>Files like <code>Readme.md</code> and <code>README.md</code> collide on Windows/macOS (case-insensitive file systems). This causes data loss.</td>
+    </tr>
+    <tr>
+      <td>Git LFS</td>
+      <td><span class="tag tag-orange">Warning</span></td>
+      <td>If the remote uses Large File Storage, synced files will be pointer files unless LFS is also configured locally.</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-handlePreflightResults">handlePreflightResults(warnings): boolean <a class="src-link" href="shadow-common.ts#L249">[source:249]</a></div>
+  <p>Prints all warnings/errors to the console. Returns <code>false</code> if any errors were found (caller should abort). Warnings are printed but don't block execution.</p>
+</div>
+
+<h4>Utilities</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-validateName">validateName(value: string, label: string): void <a class="src-link" href="shadow-common.ts#L272">[source:272]</a></div>
+  <p>Security check for remote/directory names. Rejects empty strings, <code>..</code> (path traversal), absolute paths, and names starting with <code>-</code> (could be interpreted as git flags). Calls <code>die()</code> on failure.</p>
+  <p><strong>Why:</strong> These names are used in git commands and file paths. A malicious name like <code>--exec=rm -rf /</code> could be catastrophic.</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-die">die(msg: string): never <a class="src-link" href="shadow-common.ts#L279">[source:279]</a></div>
+  <p>Prints an error message with a &ldquo;&#10008;&rdquo; prefix and immediately exits the process with code 1. The <code>never</code> return type tells TypeScript this function never returns normally.</p>
+</div>
+
+<div class="card">
+  <div class="fn-sig" id="fn-appendTrailer">appendTrailer(message: string, trailer: string): string <a class="src-link" href="shadow-common.ts#L285">[source:285]</a></div>
+  <p>Adds a trailer line to a commit message (e.g. <code>Shadow-synced-from: a1b2c3d</code>). Uses <code>git interpret-trailers</code> for proper formatting. Falls back to manual string concatenation if the git command fails.</p>
+  <p><strong>Why use git's trailer command?</strong> It handles edge cases like existing trailers, blank line separation, etc.</p>
+</div>
+
+<h4>Shadow Branch Helpers</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-shadowBranchName">shadowBranchName(dir: string, branch: string): string <a class="src-link" href="shadow-common.ts#L301">[source:301]</a></div>
+  <p>Builds the canonical shadow branch name: <code>shadow/{dir}/{branch}</code>. For example, <code>shadowBranchName("backend", "main")</code> returns <code>"shadow/backend/main"</code>.</p>
+  <p>The prefix defaults to <code>"shadow"</code> but can be changed via <code>shadowBranchPrefix</code> in <a href="#config"><code>shadow-config.json</code></a>.</p>
+</div>
+
+<h4>Lockfile</h4>
+
+<div class="card">
+  <div class="fn-sig" id="fn-acquireLock">acquireLock(scriptDir: string, name: string): void <a class="src-link" href="shadow-common.ts#L289">[source:289]</a></div>
+  <p>Prevents two instances of the same script from running simultaneously. Creates a lock file in the temp directory containing the process ID (PID).</p>
+  <p><strong>How it works:</strong></p>
+  <ol>
+    <li>Check if a lock file exists</li>
+    <li>If yes, check if the process that created it is still alive (using <code>tasklist</code> on Windows, <code>kill -0</code> on Unix)</li>
+    <li>If the process is dead, delete the stale lock and proceed</li>
+    <li>If the process is alive, abort with an error</li>
+    <li>Create lock file using <code>wx</code> flag (exclusive create &mdash; atomic, prevents race conditions)</li>
+    <li>Register cleanup handlers for process exit, Ctrl+C (SIGINT), and kill (SIGTERM)</li>
+  </ol>
+  <p><strong>Why:</strong> Running two exports simultaneously would corrupt the shadow branch. The lock prevents this.</p>
+</div>
+
+<h4>Replay Engine (The Core)</h4>
+
+<p>These private functions power the commit-by-commit replay. They are not exported &mdash; only <code>replayCommits()</code> is public.</p>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-getCommitMeta"><span class="tag tag-purple">private</span> getCommitMeta(hash: string): CommitMeta <a class="src-link" href="shadow-common.ts#L380">[source:380]</a></div>
+  <p>Extracts all metadata from a commit: author name/email/date, committer name/email/date, full message, short description, and parent count. Uses a custom separator (<code>---SHADOW-SEP---</code>) in the git log format to safely split fields even when commit messages contain special characters.</p>
+  <p><strong>Why parent count?</strong> Merge commits have 2+ parents and need special diff handling (diff against first parent only).</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-diffForCommit"><span class="tag tag-purple">private</span> diffForCommit(meta: CommitMeta): string <a class="src-link" href="shadow-common.ts#L402">[source:402]</a></div>
+  <p>Generates a patch (diff) for a single commit. Handles two cases:</p>
+  <ul>
+    <li><strong>Root commit</strong> (no parents): diffs against the empty tree</li>
+    <li><strong>All other commits</strong> (including merges): diffs against the first parent</li>
+  </ul>
+  <p>Uses <code>--binary</code> to handle binary files, <code>-M</code> to detect renames, and disables file mode changes (<code>core.filemode=false</code>) for cross-platform consistency.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-applyPatch"><span class="tag tag-purple">private</span> applyPatch(patch: string, subdir: string): boolean <a class="src-link" href="shadow-common.ts#L398">[source:398]</a></div>
+  <p>Applies a patch (diff) to a subdirectory using <code>git apply --ignore-whitespace</code>. Returns <code>true</code> on success, <code>false</code> on failure. Since shadow sync replays commits sequentially onto a clean state, a failed patch means something is fundamentally out of sync &mdash; not a merge conflict to resolve.</p>
+  <p><strong>Design decision:</strong> Patches are written to a temp file (not piped via stdin) because Windows has issues with large stdin pipes. The temp file is always cleaned up in a <code>finally</code> block. CRLF line endings are normalized to LF before applying, since mixed line endings cause patch failures on Windows.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-commitWithMeta"><span class="tag tag-purple">private</span> commitWithMeta(meta: CommitMeta, message: string, allowEmpty?: boolean): void <a class="src-link" href="shadow-common.ts#L463">[source:463]</a></div>
+  <p>Creates a commit preserving the original author and committer information. Sets git environment variables (<code>GIT_AUTHOR_NAME</code>, etc.) so the commit appears as if it was made by the original author at the original time.</p>
+  <p><strong>Why preserve authorship?</strong> So <code>git blame</code> and <code>git log</code> show who actually wrote each line, not "shadow sync bot".</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-extractPatchFiles"><span class="tag tag-purple">private</span> extractPatchFiles(patch: string, subdir: string): string[] <a class="src-link" href="shadow-common.ts#L479">[source:479]</a></div>
+  <p>Parses a patch to find which files were modified. Used to <code>git add</code> only the affected files (not the entire repo). Validates paths to prevent directory traversal attacks (<code>..</code> or absolute paths).</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-buildAlreadySyncedSetFor"><span class="tag tag-purple">private</span> buildAlreadySyncedSetFor(dir: string): Set&lt;string&gt; <a class="src-link" href="shadow-common.ts#L504">[source:504]</a></div>
+  <p>Scans the local git history for commits that have a <code>Shadow-synced-from</code> trailer. Returns a set of external commit hashes that have already been synced. This is how the system avoids replaying the same commit twice.</p>
+  <p><strong>Design decision:</strong> Uses trailers in commit messages (not a separate state file) because trailers travel with the commits &mdash; they work across clones, branches, and CI environments without any external state.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-findSeedHash"><span class="tag tag-purple">private</span> findSeedHash(dir: string): string | null <a class="src-link" href="shadow-common.ts#L520">[source:520]</a></div>
+  <p>Finds the seed commit hash for a directory. The seed marks the starting point: "don't sync commits before this one." Set during <a href="#fn-setup"><code>shadow-setup.ts</code></a> bootstrap.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-collectExternalCommits"><span class="tag tag-purple">private</span> collectExternalCommits(externalRef, seedHash?): string[] <a class="src-link" href="shadow-common.ts#L517">[source:517]</a></div>
+  <p>Collects the list of commit hashes to replay, in chronological order (<code>--reverse</code>). If a <code>seedHash</code> is provided (set during <a href="#fn-setup">setup</a>), only collects commits after that point.</p>
+</div>
+
+<div class="card card-accent">
+  <div class="fn-sig" id="fn-replayCommits"><span class="tag tag-blue">exported</span> replayCommits(opts): { mirrored: number; upToDate: boolean } <a class="src-link" href="shadow-common.ts#L564">[source:564]</a></div>
+  <p><strong>This is the heart of the system.</strong> It orchestrates the entire replay process:</p>
+  <ol>
+    <li>Build the set of already-synced commits (via <a href="#fn-buildAlreadySyncedSetFor"><code>buildAlreadySyncedSetFor</code></a>)</li>
+    <li>Find the seed hash (via <a href="#fn-findSeedHash"><code>findSeedHash</code></a>)</li>
+    <li>Collect all external commits that need replaying (via <a href="#fn-collectExternalCommits"><code>collectExternalCommits</code></a>)</li>
+    <li>Filter out already-synced ones</li>
+    <li>For each new commit: <a href="#fn-diffForCommit">generate patch</a> &rarr; <a href="#fn-applyPatch">apply to subdirectory</a> &rarr; <a href="#fn-extractPatchFiles">stage files</a> &rarr; <a href="#fn-commitWithMeta">commit with original metadata</a> + sync trailer</li>
+    <li>Handle empty patches (the commit exists in the external repo but produces no changes in our context) by recording an empty commit</li>
+  </ol>
+  <p>Returns how many commits were mirrored and whether we were already up to date.</p>
+</div>
+
+<hr>
+
+<h3 id="fn-pull"><a href="shadow-pull.ts">shadow-pull.ts</a> &mdash; Local Pull Script</h3>
+
+<div class="card">
+  <p><strong>Purpose:</strong> Sync external changes and safely merge them into your local working branch. Triggers CI sync on GitHub first (if <code>EXTERNAL_REPO_TOKEN</code> is set), then merges the shadow branch so only <code>dir/</code> files are affected.</p>
+
+  <h4>How it works:</h4>
+  <ol>
+    <li><strong>Trigger CI sync</strong> &mdash; calls the GitHub API to dispatch the Shadow Sync workflow (external &rarr; shadow). Waits ~20 seconds for it to complete. Skipped if <code>EXTERNAL_REPO_TOKEN</code> is not set or <code>--no-sync</code> is passed.</li>
+    <li><strong>Fetch</strong> the latest shadow branch from origin</li>
+    <li><strong>Check if up to date</strong> &mdash; if shadow is already an ancestor of HEAD, nothing to do</li>
+    <li><strong>Merge with <code>--no-commit</code></strong> &mdash; merges the shadow branch but stops before committing, so we can fix the index</li>
+    <li><strong>Restore non-<code>dir/</code> files</strong> &mdash; checks out all files outside <code>dir/</code> from HEAD, undoing the "deletions" from the shadow tree</li>
+    <li><strong>Commit</strong> &mdash; the merge commit has correct ancestry and only <code>dir/</code> files were changed</li>
+  </ol>
+
+  <h4>Why not a plain <code>git merge</code>?</h4>
+  <p>The shadow branch's tree only contains <code>dir/</code> files (the export strips everything else). A plain <code>git merge origin/shadow/frontend/main</code> would tell git that all non-<code>dir/</code> files were "deleted" on the shadow side, causing git to delete your scripts, config, tests, and everything else outside <code>dir/</code>.</p>
+</div>
+
+<div class="card card-red">
+  <h4>Always use <code>npm run pull</code>, never raw <code>git merge</code></h4>
+  <p>This is critical. A raw <code>git merge origin/shadow/{dir}/main</code> <strong>will delete your files</strong>. The pull script exists specifically to prevent this. If you accidentally run a raw merge, restore with <code>git checkout origin/main -- .</code> and recommit.</p>
+</div>
+
+<hr>
+
+<h3 id="fn-export"><a href="shadow-export.ts">shadow-export.ts</a> &mdash; Local Export Script</h3>
+
+<div class="card">
+  <p><strong>Purpose:</strong> Export your local changes from an internal repo subdirectory to the shadow branch using a real git merge, filtering out files you don't want in the external repo.</p>
+
+  <h4>Step-by-step flow:</h4>
+  <ol>
+    <li><strong>Parse arguments</strong> &mdash; message (required), remote, dir, branch, dry-run</li>
+    <li><strong>Check for uncommitted changes</strong> &mdash; refuses to run if the subdirectory has unsaved work (prevents exporting partial/broken state)</li>
+    <li><strong>Acquire lock</strong> (<a href="#fn-acquireLock"><code>acquireLock</code></a>) &mdash; prevents concurrent exports</li>
+    <li><strong>Parse .shadowignore</strong> (<a href="#fn-parseShadowIgnore"><code>parseShadowIgnore</code></a>) &mdash; load exclusion patterns</li>
+    <li><strong>Fetch from origin</strong> &mdash; get latest shadow branch state</li>
+    <li><strong>Create worktree</strong> &mdash; temporary checkout of the shadow branch</li>
+    <li><strong>Merge HEAD</strong> &mdash; <code>git merge --no-commit --no-ff -X theirs --allow-unrelated-histories HEAD</code> merges your working branch into the shadow branch. The <code>--no-commit</code> flag stops before committing so we can clean the index. <code>-X theirs</code> prefers your local changes on content conflicts. <code>--allow-unrelated-histories</code> handles the case where the shadow branch has no common ancestor with your working branch.</li>
+    <li><strong>Clean the index</strong> &mdash; remove all files not under <code>dir/</code> (the merge brought in the entire repo), then remove files matching <code>.shadowignore</code> patterns. This is done via <code>git rm --cached</code>, which only affects the index, not the working tree. Because <code>MERGE_HEAD</code> is still set, the next commit will be a merge commit with two parents.</li>
+    <li><strong>Commit &amp; push</strong> &mdash; the commit has two parents (shadow tip + HEAD) but its tree only contains <code>dir/</code> files minus shadowignored ones. Retries on non-fast-forward (someone else pushed first).</li>
+    <li><strong>Cleanup</strong> &mdash; remove temporary worktree and branches</li>
+  </ol>
+</div>
+
+<div class="card card-green">
+  <h4>Why a merge instead of a snapshot?</h4>
+  <p>The previous approach extracted every file from HEAD, filtered through <code>.shadowignore</code>, wiped the shadow branch worktree, and copied everything back in. This was effectively a full snapshot/replace on every export &mdash; it threw away merge history, diffs looked like full replacements, and the shadow branch had no ancestry link back to your working branch.</p>
+  <p style="margin-top:0.8rem">The merge-based approach creates a proper merge commit with two parents. This means:</p>
+  <ul>
+    <li><strong>Real merge history</strong> &mdash; <code>git log --graph</code> shows the relationship between your branch and the shadow branch</li>
+    <li><strong>Incremental diffs</strong> &mdash; each export commit shows only what actually changed, not a full replacement</li>
+    <li><strong>Git handles renames/deletions naturally</strong> &mdash; no need for manual <code>rsync --delete</code> logic</li>
+  </ul>
+</div>
+
+<div class="card card-red">
+  <h4>How .shadowignore stays hidden from the external repo</h4>
+  <p>A naive merge would bring shadowignored files into the commit tree (even if deleted afterward, they'd exist in the merge parent's history). The export avoids this by cleaning the git <strong>index</strong> (staging area) <em>before</em> committing:</p>
+  <ol>
+    <li><code>git merge --no-commit</code> stages the merged result but does not commit</li>
+    <li>Files outside <code>dir/</code> and shadowignored files are removed from the index via <code>git rm --cached</code></li>
+    <li>The commit is then created &mdash; its <strong>tree</strong> (the snapshot of files) never contains the ignored files</li>
+  </ol>
+  <p>The merge commit does point to HEAD as a parent, but the external repo never receives HEAD's ref &mdash; it only gets the shadow branch. So the ignored files are <strong>never reachable</strong> from the external side.</p>
+</div>
+
+<div class="card">
+  <h4>Helper functions in shadow-export.ts:</h4>
+
+  <div class="fn-sig" id="fn-globToRegex">globToRegex(pattern: string): RegExp <a class="src-link" href="shadow-export.ts#L212">[source:212]</a></div>
+  <p>Converts a glob pattern (like <code>**/*.md</code>) to a regular expression using a replace chain. Supports <code>**</code>/<code>**/</code> (any path), <code>*</code> (any filename chars), <code>?</code> (single char), and <code>[...]</code> (character classes). Patterns are pre-compiled once and reused across all files for efficiency.</p>
+</div>
+
+<hr>
+
+<h3 id="fn-setup"><a href="shadow-setup.ts">shadow-setup.ts</a> &mdash; Bootstrap Script</h3>
+
+<div class="card">
+  <p><strong>Purpose:</strong> One-time initialization for each remote. Run once when you first start syncing with an external repo.</p>
+  <h4>What it does:</h4>
+  <ol>
+    <li>Fetches from the external remote</li>
+    <li>Runs <a href="#fn-preflightChecks">pre-flight checks</a> (shallow clone, submodules, etc.)</li>
+    <li>Records a seed commit on your current branch with the trailer <code>Shadow-seed: backend a1b2c3d</code>, telling CI sync "start after this commit." Without it, the first CI sync would try to replay the <em>entire history</em> of the external repo from the very beginning.</li>
+  </ol>
+  <p>The shadow branch itself is created automatically by <a href="#fn-ci-sync">CI sync</a> on its next run &mdash; setup only needs to record where to start.</p>
+</div>
+
+<hr>
+
+<h3 id="fn-ci-sync"><a href="shadow-ci-sync.ts">shadow-ci-sync.ts</a> &mdash; CI Pull Script</h3>
+
+<div class="card">
+  <p><strong>Purpose:</strong> Runs in GitHub Actions. Fetches from all external remotes and replays new commits into shadow branches.</p>
+  <h4>What it does:</h4>
+  <ol>
+    <li>Iterates over all configured remotes</li>
+    <li>Resolves the URL from <code>shadow-config.json</code> (or env var override)</li>
+    <li>Adds/updates the git remote</li>
+    <li>Fetches from the external remote</li>
+    <li>Lists all branches on the remote</li>
+    <li>For each branch, checks out the corresponding shadow branch and calls <a href="#fn-replayCommits"><code>replayCommits()</code></a></li>
+    <li>Pushes updated shadow branches to origin</li>
+    <li>Returns to detached HEAD between branches to avoid conflicts</li>
+  </ol>
+  <p><strong>Error handling:</strong> If one branch fails, it logs the error, resets any partial state, and continues with the next branch. Only fails at the end if any syncs failed.</p>
+  <p><strong>New branches:</strong> If a new branch appears on the external remote, CI sync automatically discovers it (via <a href="#fn-listExternalBranches"><code>listExternalBranches</code></a>) and creates a new shadow branch for it.</p>
+</div>
+
+<div class="card card-red">
+  <h4>CI only &mdash; do not run locally</h4>
+  <p>This script uses <code>git checkout</code> to switch between shadow branches in the working tree. In CI this is safe because the runner starts clean and is discarded afterward. <strong>Running it locally will switch your checkout away from your working branch</strong>, and any untracked or modified files that conflict with the shadow branch will cause errors or be overwritten. If you need to trigger a sync manually, use the GitHub Actions <em>workflow_dispatch</em> trigger (the "Run workflow" button in the Actions tab) rather than running the script directly.</p>
+</div>
+
+<hr>
+
+<h3 id="fn-ci-forward"><a href="shadow-ci-forward.ts">shadow-ci-forward.ts</a> &mdash; CI Push Script</h3>
+
+<div class="card">
+  <p><strong>Purpose:</strong> Runs in GitHub Actions when a shadow branch is pushed. Takes the content from the shadow branch and pushes it to the external remote.</p>
+  <h4>What it does:</h4>
+  <ol>
+    <li>Parses the branch name from <code>GITHUB_REF_NAME</code> (e.g. <code>shadow/backend/main</code> &rarr; dir=<code>backend</code>, branch=<code>main</code>)</li>
+    <li>Finds the matching remote config entry</li>
+    <li>Resolves the external remote URL from <a href="#config"><code>shadow-config.json</code></a></li>
+    <li>Extracts files under <code>{dir}/</code> from the shadow branch, <strong>stripping the directory prefix</strong> (e.g. <code>backend/src/app.ts</code> becomes <code>src/app.ts</code>)</li>
+    <li>Creates a worktree from the external remote's branch</li>
+    <li>Syncs files (adds new, removes deleted)</li>
+    <li>Commits using the shadow branch's message, tagged with a <code>Shadow-forwarded-from: {hash}</code> trailer so CI sync recognizes it as a round-trip commit and skips it on pull-back</li>
+    <li>Pushes to the external remote (requires <code>EXTERNAL_REPO_TOKEN</code> PAT)</li>
+  </ol>
+  <p><strong>Key details:</strong></p>
+  <ul>
+    <li>No filtering happens here &mdash; <code>.shadowignore</code> was already applied during export</li>
+    <li>The <code>Shadow-forwarded-from</code> trailer prevents round-trip duplicates: when CI sync pulls from external, it skips commits that originated from us</li>
+    <li>The export preserves CI dependencies on the shadow branch (<code>.github/workflows/</code>, <code>package.json</code>, <code>shadow/shadow-ci-forward.ts</code>, <code>shadow/shadow-common.ts</code>, <code>shadow/shadow-config.json</code>) so the forward workflow can run</li>
+  </ul>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="design">9. Design Decisions &amp; Why</h2>
+
+<div class="card card-accent">
+  <h4>Why per-commit replay instead of a single squashed diff?</h4>
+  <p>Replaying commits one-by-one preserves the full history: who made each change, when, and why. A squashed diff would lose all intermediate commits and show everything as one big change by "sync bot." Per-commit replay means <code>git blame</code> and <code>git log</code> remain useful.</p>
+</div>
+
+<div class="card card-green">
+  <h4>Why trailers instead of a database or state file?</h4>
+  <p>Trailers are embedded in commit messages, so they travel with the code. They work in CI, in clones, and across branches without any external state to manage. There's no database to corrupt, no file to lose, and no sync state to get out of date. The downside is that scanning the log gets slower as history grows, but in practice the seed hash limits how far back it needs to look.</p>
+</div>
+
+<div class="card card-orange">
+  <h4>Why shadow branches instead of direct push/pull?</h4>
+  <p>The external repo has files at root level (<code>src/app.ts</code>), but our internal repo has them in a subdirectory (<code>backend/src/app.ts</code>). Shadow branches act as a translation layer. They also decouple the timing: CI can sync on a schedule without affecting your working branch.</p>
+</div>
+
+<div class="card card-purple">
+  <h4>Why worktrees for export/forward?</h4>
+  <p>A worktree lets us check out the shadow branch and merge into it without disturbing your current checkout. Without worktrees, the export script would have to stash your changes, switch branches, do the merge, switch back, and unstash &mdash; error-prone and disruptive. Worktrees are isolated and temporary.</p>
+</div>
+
+<div class="card card-accent">
+  <h4>Why cross-platform git config overrides?</h4>
+  <p>Windows, macOS, and Linux handle line endings (<code>\r\n</code> vs <code>\n</code>), file permissions, and Unicode differently. The overrides (<code>core.autocrlf=false</code>, <code>core.safecrlf=false</code>, <code>core.precomposeunicode=true</code>, <code>core.quotepath=false</code>) ensure patches apply identically regardless of which OS creates or applies them.</p>
+</div>
+
+<div class="card card-green">
+  <h4>Why a lockfile?</h4>
+  <p>If two exports run simultaneously, they'd both modify the shadow branch and one would overwrite the other. The lockfile uses PID checking to detect stale locks (from crashed processes) and atomic file creation (<code>wx</code> flag) to prevent race conditions.</p>
+</div>
+
+<div class="card card-orange">
+  <h4>Why retry pushes?</h4>
+  <p>If someone else pushes to the shadow branch between our fetch and push, git rejects the push as "non-fast-forward." The export script handles this by fetching again, rebasing onto the updated branch, and retrying (up to 3 times).</p>
+</div>
+
+<div class="card card-purple">
+  <h4>Why merge-based export instead of snapshot?</h4>
+  <p>The export uses <code>git merge --no-commit</code> instead of extracting files and copying them. This creates a real merge commit with proper ancestry, produces clean incremental diffs, and lets git handle renames and deletions naturally. The index is cleaned before committing to strip out non-<code>dir/</code> files and <code>.shadowignore</code> matches, so the commit tree is always clean. The script also checks for uncommitted changes upfront and refuses to run if any exist.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="testing">10. Test Suite</h2>
+
+<div class="card">
+  <p>The test suite lives in <code>shadow-tests/</code> with 34 test files. Run with <code>npm test</code>.</p>
+
+  <h4>How tests work:</h4>
+  <ol>
+    <li>Each test creates an isolated environment with temporary git repos (using <code>createTestEnv()</code>)</li>
+    <li>The environment includes: a bare "external" repo, a working clone of it (simulates external developer), a bare "origin" repo, and a "local" internal repo clone</li>
+    <li>Tests simulate real workflows: committing on the remote, running sync, checking that files appear locally (and vice versa)</li>
+    <li>Everything runs in temp directories and is cleaned up after each test</li>
+  </ol>
+</div>
+
+<h4>Test categories:</h4>
+
+<div class="two-col">
+  <div class="card">
+    <h4>Pull tests (external &rarr; us)</h4>
+    <ul>
+      <li><code>test-pull-basic</code> &mdash; two external commits appear on the shadow branch with correct content and sync trailers; re-run is a no-op</li>
+      <li><code>test-pull-deletions</code> &mdash; a file added then deleted externally is gone on the shadow branch after both syncs</li>
+      <li><code>test-pull-crlf</code> &mdash; files with <code>\r\n</code> line endings survive the patch &rarr; apply cycle without corruption</li>
+      <li><code>test-pull-deep-dirs</code> &mdash; a file 5+ directories deep lands at the correct path under <code>dir/</code></li>
+      <li><code>test-pull-empty-patch</code> &mdash; a commit that produces no diff (e.g. merge commit) is recorded as synced so it isn't retried</li>
+      <li><code>test-pull-filemode</code> &mdash; executable permission bit (<code>chmod +x</code>) is preserved through replay</li>
+      <li><code>test-pull-large-file</code> &mdash; a file exceeding the default stdio buffer syncs without truncation</li>
+      <li><code>test-pull-binary-file</code> &mdash; a PNG image round-trips through the binary diff/apply path intact</li>
+      <li><code>test-pull-feature-branch</code> &mdash; a branch other than <code>main</code> on the external creates its own <code>shadow/{dir}/{branch}</code></li>
+      <li><code>test-pull-feature-range</code> &mdash; feature branch replay includes branch-specific commits, not just the overlap with main</li>
+      <li><code>test-pull-case-conflict</code> &mdash; two files differing only in case (<code>README.md</code> vs <code>readme.md</code>) abort sync with CASE_CONFLICT on Windows/macOS</li>
+      <li><code>test-pull-shallow-clone</code> &mdash; sync refuses on a shallow clone (missing history), succeeds after unshallowing</li>
+      <li><code>test-pull-lfs-warn</code> &mdash; a remote with <code>filter=lfs</code> in <code>.gitattributes</code> triggers a GIT_LFS warning on stderr</li>
+      <li><code>test-pull-submodule-warn</code> &mdash; a submodule entry (mode 160000) triggers a SUBMODULE warning</li>
+      <li><code>test-pull-symlink-warn</code> &mdash; a symlink entry (mode 120000) triggers a SYMLINK warning</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Push tests (us &rarr; external)</h4>
+    <ul>
+      <li><code>test-push-basic</code> &mdash; committed files under <code>dir/</code> appear on the shadow branch after export</li>
+      <li><code>test-push-deletions</code> &mdash; a file deleted locally is also deleted on the shadow branch</li>
+      <li><code>test-push-crlf</code> &mdash; files with <code>\r\n</code> line endings export without corruption</li>
+      <li><code>test-push-deep-dirs</code> &mdash; deeply nested files export at the correct paths</li>
+      <li><code>test-push-binary-file</code> &mdash; a binary file (PNG) round-trips through the merge export intact</li>
+      <li><code>test-push-shadowignore</code> &mdash; files matching <code>.shadowignore</code> patterns are excluded from the shadow branch</li>
+      <li><code>test-push-shadowignore-deep</code> &mdash; nested glob patterns (e.g. <code>**/*.local</code>) filter files in subdirectories</li>
+      <li><code>test-push-dry-run</code> &mdash; <code>-n</code> flag shows what would change but does not push</li>
+      <li><code>test-push-no-changes</code> &mdash; exporting when shadow is already up-to-date exits cleanly with no commit</li>
+      <li><code>test-push-uncommitted</code> &mdash; untracked files don't leak to shadow; unstaged or staged-but-uncommitted changes block export</li>
+      <li><code>test-push-dir-flag</code> &mdash; <code>-d</code> flag overrides which subdirectory is exported</li>
+      <li><code>test-push-branch-merge</code> &mdash; a feature branch merged with <code>--no-ff</code> produces a single export commit on shadow (first-parent lineage)</li>
+      <li><code>test-push-merge-ancestry</code> &mdash; the export commit has exactly 2 parents: the shadow branch tip and HEAD</li>
+      <li><code>test-push-merge-with-external-changes</code> &mdash; external changes survive export; export refuses when shadow has unmerged commits, succeeds after merging</li>
+      <li><code>test-push-shadowignore-not-in-tree</code> &mdash; walks every commit on the shadow branch and confirms ignored files never appear in any tree</li>
+      <li><code>test-push-merge-preserves-non-dir</code> &mdash; after export + CI sync + shadow pull, non-dir files (mono.txt, scripts, config) survive intact</li>
+    </ul>
+    <h4>Multi-remote tests</h4>
+    <ul>
+      <li><code>test-multi-pull</code> &mdash; two independent external repos sync into separate shadow branches without cross-contamination</li>
+      <li><code>test-multi-push</code> &mdash; exporting to two remotes produces independent shadow branch commits</li>
+      <li><code>test-multi-independent</code> &mdash; changes to one remote's subdirectory don't affect the other remote's shadow branch</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <h4>Test infrastructure files:</h4>
+  <table>
+    <tr><th>File</th><th>Purpose</th></tr>
+    <tr>
+      <td><a href="shadow-tests/harness.ts"><code>harness.ts</code></a></td>
+      <td>Creates isolated test environments, provides helpers for committing files, running scripts, and reading results</td>
+    </tr>
+    <tr>
+      <td><a href="shadow-tests/run-all.ts"><code>run-all.ts</code></a></td>
+      <td>Test runner: discovers test files, executes each one, reports pass/fail statistics</td>
+    </tr>
+    <tr>
+      <td><a href="shadow-tests/assert.ts"><code>assert.ts</code></a></td>
+      <td>Assertion functions: <code>assertEqual</code>, <code>assertIncludes</code>, <code>assertFileExists</code>, <code>assertExitCode</code>, etc.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="cli">11. Command-Line Options</h2>
+
+<h3>shadow-pull.ts</h3>
+<pre><code>npm run pull -- [-r remote] [-d dir] [-b branch] [--no-sync]</code></pre>
+<table>
+  <tr><th>Flag</th><th>Long</th><th>Description</th><th>Default</th></tr>
+  <tr><td><code>-r</code></td><td><code>--remote</code></td><td>Remote name (selects config entry)</td><td>First entry in config</td></tr>
+  <tr><td><code>-d</code></td><td><code>--dir</code></td><td>Local subdirectory</td><td>Inferred from remote config</td></tr>
+  <tr><td><code>-b</code></td><td><code>--branch</code></td><td>Branch</td><td>Your current local branch</td></tr>
+  <tr><td></td><td><code>--no-sync</code></td><td>Skip triggering CI sync (just pull current shadow state)</td><td>Off</td></tr>
+  <tr><td><code>-h</code></td><td><code>--help</code></td><td>Show usage help</td><td>&mdash;</td></tr>
+</table>
+
+<h3>shadow-export.ts</h3>
+<pre><code>npm run export -- [-m "commit message"] [-r remote] [-d dir] [-b branch] [-n]</code></pre>
+<table>
+  <tr><th>Flag</th><th>Long</th><th>Description</th><th>Default</th></tr>
+  <tr><td><code>-m</code></td><td><code>--message</code></td><td>Commit message for the merge commit</td><td>Git's default merge message</td></tr>
+  <tr><td><code>-r</code></td><td><code>--remote</code></td><td>Which remote to export to (selects config entry)</td><td>First entry in config</td></tr>
+  <tr><td><code>-d</code></td><td><code>--dir</code></td><td>Local subdirectory to export from</td><td>Inferred from remote config</td></tr>
+  <tr><td><code>-b</code></td><td><code>--branch</code></td><td>Target branch on the shadow/external side</td><td>Your current local branch</td></tr>
+  <tr><td><code>-n</code></td><td><code>--dry-run</code></td><td>Show what would change without actually pushing</td><td>Off</td></tr>
+  <tr><td><code>-h</code></td><td><code>--help</code></td><td>Show usage help</td><td>&mdash;</td></tr>
+</table>
+
+<h3>shadow-setup.ts</h3>
+<pre><code>npm run setup -- [-r remote] [-d dir] [-b branch]</code></pre>
+<table>
+  <tr><th>Flag</th><th>Long</th><th>Description</th><th>Default</th></tr>
+  <tr><td><code>-r</code></td><td><code>--remote</code></td><td>Remote name</td><td>First entry in config</td></tr>
+  <tr><td><code>-d</code></td><td><code>--dir</code></td><td>Local subdirectory</td><td>Inferred from remote config</td></tr>
+  <tr><td><code>-b</code></td><td><code>--branch</code></td><td>Branch to set up</td><td>Your current local branch</td></tr>
+  <tr><td><code>-h</code></td><td><code>--help</code></td><td>Show usage help</td><td>&mdash;</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="pat-setup">12. Setting Up Cross-Repo Push Access (PAT)</h2>
+
+<div class="card card-accent">
+  <p>Shadow Sync needs two types of API access that the default <code>GITHUB_TOKEN</code> doesn't provide:</p>
+  <ul>
+    <li><strong>CI forward</strong> needs to push to external repos (the default token can only push to the repo the workflow runs in)</li>
+    <li><strong><code>npm run pull</code></strong> needs to trigger the sync workflow via the GitHub API (requires Actions permission)</li>
+  </ul>
+  <p>We recommend <strong>two separate fine-grained PATs</strong> with minimal scope. If one leaks, the blast radius is limited. You can also use a single token with both permissions if you prefer.</p>
+</div>
+
+<h3>Token 1: CI Forward (pushes to external repos)</h3>
+
+<div class="card">
+  <h4>Create the token:</h4>
+  <ol>
+    <li>Go to <strong>GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Fine-grained tokens</strong></li>
+    <li>Click <strong>Generate new token</strong></li>
+    <li>Fill in:
+      <table>
+        <tr><th>Field</th><th>Value</th></tr>
+        <tr><td>Token name</td><td><code>shadow-sync-forward</code></td></tr>
+        <tr><td>Expiration</td><td>Your choice (90 days, 1 year, etc.)</td></tr>
+        <tr><td>Resource owner</td><td>Your GitHub account or organization</td></tr>
+        <tr><td>Repository access</td><td><strong>Only select repositories</strong> &rarr; select the <strong>external repos only</strong> (e.g. <code>test-frontend</code>, <code>test-backend</code>)</td></tr>
+      </table>
+    </li>
+    <li>Under <strong>Permissions &rarr; Repository permissions</strong>, set:
+      <table>
+        <tr><th>Permission</th><th>Level</th><th>Why</th></tr>
+        <tr><td>Contents</td><td><strong>Read and write</strong></td><td>Push commits to external repos</td></tr>
+      </table>
+      Leave everything else at "No access."
+    </li>
+    <li>Click <strong>Generate token</strong> and copy it.</li>
+  </ol>
+
+  <h4>Add as repository secret:</h4>
+  <ol>
+    <li>Go to your <strong>internal repo</strong> (e.g. <code>github.com/you/test-main</code>) &rarr; <strong>Settings &rarr; Secrets and variables &rarr; Actions</strong></li>
+    <li>Click <strong>New repository secret</strong></li>
+    <li>Name: <code>EXTERNAL_REPO_TOKEN</code>, Value: paste the token</li>
+    <li>Click <strong>Add secret</strong></li>
+  </ol>
+  <p>The forward workflow is already configured to use this secret.</p>
+</div>
+
+<h3>Token 2: Local Sync Trigger (triggers CI sync from <code>npm run pull</code>)</h3>
+
+<div class="card">
+  <h4>Create the token:</h4>
+  <ol>
+    <li>Same steps as above, but with different scope:
+      <table>
+        <tr><th>Field</th><th>Value</th></tr>
+        <tr><td>Token name</td><td><code>shadow-sync-trigger</code></td></tr>
+        <tr><td>Repository access</td><td><strong>Only select repositories</strong> &rarr; select the <strong>internal repo only</strong> (e.g. <code>test-main</code>)</td></tr>
+      </table>
+    </li>
+    <li>Under <strong>Permissions &rarr; Repository permissions</strong>, set:
+      <table>
+        <tr><th>Permission</th><th>Level</th><th>Why</th></tr>
+        <tr><td>Actions</td><td><strong>Read and write</strong></td><td>Trigger the sync workflow via API</td></tr>
+      </table>
+    </li>
+    <li>Click <strong>Generate token</strong> and copy it.</li>
+  </ol>
+
+  <h4>Set as local environment variable:</h4>
+  <pre><code># Linux/macOS (add to ~/.bashrc or ~/.zshrc)
+export EXTERNAL_REPO_TOKEN=github_pat_...
+
+# PowerShell (create $PROFILE if it doesn't exist, then add)
+$env:EXTERNAL_REPO_TOKEN = "github_pat_..."</code></pre>
+  <p>If not set, <code>npm run pull</code> still works &mdash; it just skips the sync trigger and pulls whatever the shadow branch currently has.</p>
+</div>
+
+<div class="card card-orange">
+  <h4>Single token alternative</h4>
+  <p>If you prefer one token, create it with all repos selected (<code>test-main</code> + external repos) and both permissions (Contents: Read and write + Actions: Read and write). Use it for both the repository secret and the local env var. The trade-off: if it leaks, the attacker can push to your external repos <em>and</em> trigger workflows.</p>
+</div>
+
+<div class="note">
+  Fine-grained tokens expire. When a token expires, either the forward workflow will fail (Token 1) or <code>npm run pull</code> will skip the sync trigger (Token 2). Generate new tokens and update the secret / env var. Consider setting a calendar reminder a few days before expiration.
+</div>
+
+<h3>Verify It Works</h3>
+
+<div class="card">
+  <ol>
+    <li>Run <code>npm run pull -- -r frontend</code> &mdash; should show "Triggering CI sync..." if the local token is set</li>
+    <li>Make a change under <code>frontend/</code>, commit, run <code>npm run export -- -r frontend</code></li>
+    <li>Check the <strong>Actions</strong> tab &mdash; the <strong>Shadow Forward</strong> workflow should trigger and push to the external repo</li>
+    <li>Verify the change appears on the external repo</li>
+  </ol>
+</div>
+
+<div class="note">
+  Fine-grained tokens expire. When your token expires, the forward workflow will start failing silently (the push step will error). Generate a new token and update the <code>EXTERNAL_REPO_TOKEN</code> secret. Consider setting a calendar reminder for a few days before expiration.
+</div>
+
+<div class="card card-orange">
+  <h4>Why not use a classic PAT?</h4>
+  <p>Classic PATs grant access to <strong>all repos</strong> in your account. Fine-grained tokens let you scope access to only the specific external repos that need it. This follows the principle of least privilege &mdash; if the token leaks, the blast radius is limited to those repos.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="security">13. Security Considerations</h2>
+
+<div class="card card-red">
+  <h4>Input validation</h4>
+  <p><a href="#fn-validateName"><code>validateName()</code></a> rejects remote/directory names that could be used for path traversal (<code>..</code>), absolute path injection (<code>/etc/passwd</code>), or git flag injection (<code>--exec=...</code>). This is critical because these names are interpolated into git commands and file paths.</p>
+</div>
+
+<div class="card card-red">
+  <h4>.shadowignore</h4>
+  <p>Prevents sensitive files (AI prompts, local configs, IDE settings) from leaking to external repos. Applied during export by removing matched files from the git index <em>before</em> committing. The resulting commit tree never contains ignored files, and since the external repo only receives the shadow branch (not your working branch), the ignored files are never reachable from the external side.</p>
+</div>
+
+<div class="card card-red">
+  <h4>Committed content only</h4>
+  <p>The export script merges committed state (HEAD), not the working directory. It also refuses to run if there are uncommitted changes in the target directory, preventing partial or broken state from being exported.</p>
+</div>
+
+<hr>
+<p style="color: var(--muted); text-align: center; margin-top: 2rem; font-size: 0.9rem;">
+  Shadow Sync Technical Documentation &mdash; Generated March 2026
+</p>
+
+</body>
+</html>

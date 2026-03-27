@@ -487,7 +487,8 @@ export function replayCommits(opts: {
     if (meta.message.includes("Shadow-forwarded-from:")) {
       console.log(`  Skipping ${meta.short} (forwarded by us).`);
       alreadySynced.add(hash);
-      const syncedMessage = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
+      const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
+      const syncedMessage = appendTrailer(cleanMsg, `${SYNC_TRAILER}: ${hash}`);
       commitWithMeta(meta, syncedMessage, true);
       continue;
     }
