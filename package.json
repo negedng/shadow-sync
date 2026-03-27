@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "setup": "tsx shadow-setup.ts",
+    "pull": "tsx shadow-pull.ts",
     "export": "tsx shadow-export.ts",
     "ci-sync": "tsx shadow-ci-sync.ts",
     "ci-forward": "tsx shadow-ci-forward.ts",

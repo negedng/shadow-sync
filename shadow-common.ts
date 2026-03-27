@@ -6,7 +6,7 @@ import * as os from "os";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-export interface RemoteConfig {
+interface RemoteConfig {
   /** Git remote name — must match `git remote add <name> <url>` */
   remote: string;
   /** Local subdirectory in your repo that maps to the root of that remote */
@@ -47,22 +47,16 @@ function loadConfig(): ShadowSyncConfig {
 const config = loadConfig();
 
 export const REMOTES: RemoteConfig[] = [...config.remotes];
-export const SYNC_TRAILER   = config.trailers.sync;
+const SYNC_TRAILER   = config.trailers.sync;
 export const SEED_TRAILER   = config.trailers.seed;
 export const MAX_DIR_DEPTH  = config.maxDirDepth;
 export const MAX_PUSH_RETRIES = config.maxPushRetries;
 export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
-// Allow tests to inject config via environment variables.
+// Allow tests to inject config via environment variable (JSON array of RemoteConfig).
 if (process.env.SHADOW_TEST_REMOTES) {
   REMOTES.length = 0;
   REMOTES.push(...JSON.parse(process.env.SHADOW_TEST_REMOTES));
-} else if (process.env.SHADOW_TEST_REMOTE) {
-  REMOTES.length = 0;
-  REMOTES.push({
-    remote: process.env.SHADOW_TEST_REMOTE,
-    dir: process.env.SHADOW_TEST_DIR ?? process.env.SHADOW_TEST_REMOTE,
-  });
 }
 
 // ── Git helpers ───────────────────────────────────────────────────────────────
@@ -75,45 +69,29 @@ const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
   ([key, value]) => ["-c", `${key}=${value}`],
 );
 
-/** Run a git command (pass args as an array), return trimmed stdout. Throws on non-zero exit. */
-export function run(args: string[], cwd?: string): string {
-  const result = spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
-    encoding: "utf8",
-    cwd,
-    maxBuffer: MAX_BUFFER,
-    stdio: ["pipe", "pipe", "pipe"],
+function git(args: string[], cwd?: string) {
+  return spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
+    encoding: "utf8", cwd, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
   });
-  if (result.error) {
-    throw new Error(`Failed to spawn git: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    const stderr = (result.stderr ?? "").trim();
-    throw new Error(`git ${args[0]} failed (exit ${result.status}): ${stderr}`);
-  }
-  return (result.stdout ?? "").trim();
 }
 
-/** Run a git command (pass args as an array), return { stdout, stderr, status } — never throws. */
+/** Run a git command, return trimmed stdout. Throws on non-zero exit. */
+export function run(args: string[], cwd?: string): string {
+  const r = git(args, cwd);
+  if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
+  return (r.stdout ?? "").trim();
+}
+
+/** Run a git command, return { stdout, stderr, status, ok } — never throws. */
 export function runSafe(args: string[], cwd?: string) {
-  const result = spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
-    encoding: "utf8",
-    cwd,
-    maxBuffer: MAX_BUFFER,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  if (result.error) {
-    return {
-      stdout:  "",
-      stderr:  `Failed to spawn git: ${result.error.message}`,
-      status:  1,
-      ok:      false,
-    };
-  }
+  const r = git(args, cwd);
+  if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
   return {
-    stdout:  (result.stdout ?? "").trim(),
-    stderr:  (result.stderr ?? "").trim(),
-    status:  result.status ?? 1,
-    ok:      result.status === 0,
+    stdout: (r.stdout ?? "").trim(),
+    stderr: (r.stderr ?? "").trim(),
+    status: r.status ?? 1,
+    ok:     r.status === 0,
   };
 }
 
@@ -139,20 +117,16 @@ export function listExternalBranches(remote: string): string[] {
 
 // ── .shadowignore ─────────────────────────────────────────────────────────────
 
-export function parseShadowIgnore(scriptDir: string): { patterns: string[] } {
+export function parseShadowIgnore(scriptDir: string): string[] {
   const ignoreFile = path.join(scriptDir, ".shadowignore");
-  const patterns: string[] = [];
+  if (!fs.existsSync(ignoreFile)) return [];
 
-  if (fs.existsSync(ignoreFile)) {
-    const lines = fs.readFileSync(ignoreFile, "utf8").split("\n");
-    for (const raw of lines) {
-      const line = raw.replace(/#.*$/, "").trim();
-      if (line) patterns.push(line);
-    }
-    console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
-  }
-
-  return { patterns };
+  const patterns = fs.readFileSync(ignoreFile, "utf8")
+    .split("\n")
+    .map(l => l.replace(/#.*$/, "").trim())
+    .filter(Boolean);
+  console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
+  return patterns;
 }
 
 // ── Pre-flight checks ─────────────────────────────────────────────────────────
@@ -162,76 +136,43 @@ export function parseShadowIgnore(scriptDir: string): { patterns: string[] } {
  * Returns an array of warnings/errors. Callers should abort on "error" level.
  */
 export function preflightChecks(externalRef: string): { level: "error" | "warn"; code: string; message: string }[] {
-  const warnings: { level: "error" | "warn"; code: string; message: string }[] = [];
+  type W = { level: "error" | "warn"; code: string; message: string };
+  const warnings: W[] = [];
+  const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
+  const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
 
-  // 1. Shallow clone detection
   const shallow = runSafe(["rev-parse", "--is-shallow-repository"]);
   if (shallow.ok && shallow.stdout === "true") {
-    warnings.push({
-      level: "error",
-      code: "SHALLOW_CLONE",
-      message: "This repository is a shallow clone. Shadow sync requires full history.\n"
-        + "  Run: git fetch --unshallow",
-    });
+    error("SHALLOW_CLONE", "This repository is a shallow clone. Shadow sync requires full history.\n  Run: git fetch --unshallow");
   }
 
-  // 2. Check remote tree for problematic entries
   const tree = runSafe(["ls-tree", "-r", "--long", externalRef]);
   if (tree.ok && tree.stdout) {
-    const entries = tree.stdout.split("\n").filter(Boolean);
     const paths: string[] = [];
-
-    for (const entry of entries) {
-      const match = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
-      if (!match) continue;
-      const [, mode, , filePath] = match;
+    for (const entry of tree.stdout.split("\n").filter(Boolean)) {
+      const m = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
+      if (!m) continue;
+      const [, mode, , filePath] = m;
       paths.push(filePath);
-
-      if (mode === "160000") {
-        warnings.push({
-          level: "warn",
-          code: "SUBMODULE",
-          message: `Remote contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`,
-        });
-      }
-
-      if (mode === "120000") {
-        warnings.push({
-          level: "warn",
-          code: "SYMLINK",
-          message: `Remote contains a symlink at '${filePath}'. Symlink targets are not adjusted for the local subdirectory.`,
-        });
-      }
+      if (mode === "160000") warn("SUBMODULE", `Remote contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`);
+      if (mode === "120000") warn("SYMLINK", `Remote contains a symlink at '${filePath}'. Symlink targets are not adjusted for the local subdirectory.`);
     }
 
-    // 3. Case conflict detection (only matters on case-insensitive FS)
     if (process.platform === "win32" || process.platform === "darwin") {
       const lower = new Map<string, string>();
       for (const p of paths) {
-        const key = p.toLowerCase();
-        const existing = lower.get(key);
+        const existing = lower.get(p.toLowerCase());
         if (existing && existing !== p) {
-          warnings.push({
-            level: "error",
-            code: "CASE_CONFLICT",
-            message: `Case conflict: '${existing}' and '${p}' differ only in case.\n`
-              + "  This will cause data loss on case-insensitive filesystems (Windows/macOS).",
-          });
+          error("CASE_CONFLICT", `Case conflict: '${existing}' and '${p}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
         }
-        lower.set(key, p);
+        lower.set(p.toLowerCase(), p);
       }
     }
   }
 
-  // 4. LFS detection
   const attrs = runSafe(["show", `${externalRef}:.gitattributes`]);
   if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
-    warnings.push({
-      level: "warn",
-      code: "GIT_LFS",
-      message: "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n"
-        + "  Ensure LFS is configured in the internal repo, or large files will be pointers.",
-    });
+    warn("GIT_LFS", "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n  Ensure LFS is configured in the internal repo, or large files will be pointers.");
   }
 
   return warnings;
@@ -242,23 +183,12 @@ export function preflightChecks(externalRef: string): { level: "error" | "warn";
  * Returns true if safe to continue, false if there were errors.
  */
 export function handlePreflightResults(warnings: { level: "error" | "warn"; code: string; message: string }[]): boolean {
-  if (warnings.length === 0) return true;
-
-  const errors = warnings.filter(w => w.level === "error");
-  const warns  = warnings.filter(w => w.level === "warn");
-
-  for (const w of warns) {
-    console.error(`⚠ [${w.code}] ${w.message}`);
+  for (const w of warnings) {
+    console.error(`${w.level === "error" ? "✘" : "⚠"} [${w.code}] ${w.message}`);
   }
-  for (const e of errors) {
-    console.error(`✘ [${e.code}] ${e.message}`);
-  }
-
-  if (errors.length > 0) {
-    console.error(`\nAborting due to ${errors.length} error(s).`);
-    return false;
-  }
-  return true;
+  const errorCount = warnings.filter(w => w.level === "error").length;
+  if (errorCount > 0) console.error(`\nAborting due to ${errorCount} error(s).`);
+  return errorCount === 0;
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
@@ -300,7 +230,7 @@ export function shadowBranchName(dir: string, branch: string): string {
 
 // ── Lockfile ──────────────────────────────────────────────────────────────────
 
-export function acquireLock(scriptDir: string, name: string): () => void {
+export function acquireLock(scriptDir: string, name: string): void {
   const key   = crypto.createHash("md5").update(scriptDir).digest("hex").slice(0, 8);
   const lock  = path.join(os.tmpdir(), `${name}-${key}.lock`);
   const myPid = process.pid.toString();
@@ -353,8 +283,6 @@ export function acquireLock(scriptDir: string, name: string): () => void {
   process.on("exit",    release);
   process.on("SIGINT",  () => { release(); process.exit(130); });
   process.on("SIGTERM", () => { release(); process.exit(143); });
-
-  return release;
 }
 
 // ── Replay engine (internal helpers + exported entry point) ───────────────────
@@ -431,8 +359,7 @@ function diffForCommit(meta: CommitMeta): string {
     if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
     return result.stdout ?? "";
   }
-  const parentRef = parentCount > 1 ? `${hash}^1` : `${hash}^`;
-  const parentHash = run(["rev-parse", parentRef]);
+  const parentHash = run(["rev-parse", `${hash}^1`]);
   const result = spawnSync("git", [...diffArgs, parentHash, hash], {
     encoding: "utf8",
     maxBuffer: MAX_BUFFER,
@@ -459,26 +386,14 @@ function commitWithMeta(meta: CommitMeta, message: string, allowEmpty = false): 
 }
 
 function extractPatchFiles(patch: string, subdir: string): string[] {
-  const seen = new Set<string>();
-  const files: string[] = [];
-  const add = (p: string) => { if (!seen.has(p)) { seen.add(p); files.push(p); } };
-
+  const files = new Set<string>();
   for (const line of patch.split("\n")) {
-    const m = line.match(/^diff --git a\/.+ b\/(.+)$/);
-    if (m) {
-      const rel = m[1];
-      if (rel.includes("..") || rel.startsWith("/")) continue;
-      add(`${subdir}/${rel}`);
-      continue;
-    }
-    const del = line.match(/^--- a\/(.+)$/);
-    if (del && del[1] !== "/dev/null") {
-      const rel = del[1];
-      if (rel.includes("..") || rel.startsWith("/")) continue;
-      add(`${subdir}/${rel}`);
+    const m = line.match(/^diff --git a\/.+ b\/(.+)$/) ?? line.match(/^--- a\/(.+)$/);
+    if (m && m[1] !== "/dev/null" && !m[1].includes("..") && !m[1].startsWith("/")) {
+      files.add(`${subdir}/${m[1]}`);
     }
   }
-  return files;
+  return [...files];
 }
 
 const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
@@ -500,7 +415,7 @@ function buildAlreadySyncedSetFor(dir: string): Set<string> {
 const SEED_HASH_RE = /^Shadow-seed:\s*(\S+)\s+([0-9a-f]{7,40})/;
 
 function findSeedHash(dir: string): string | null {
-  const log = runSafe(["log", `--grep=^${SEED_TRAILER}:`, "--format=%B"]);
+  const log = runSafe(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"]);
   if (!log.ok || !log.stdout) return null;
   for (const line of log.stdout.split("\n")) {
     const match = line.match(SEED_HASH_RE);
@@ -566,9 +481,17 @@ export function replayCommits(opts: {
   console.log(`Found ${newCommits.length} new commit(s) to mirror.\n`);
 
   for (const hash of newCommits) {
-    if (alreadySynced.has(hash)) continue;
-
     const meta = getCommitMeta(hash);
+
+    // Skip commits that were forwarded by us — they'd create a round-trip duplicate.
+    if (meta.message.includes("Shadow-forwarded-from:")) {
+      console.log(`  Skipping ${meta.short} (forwarded by us).`);
+      alreadySynced.add(hash);
+      const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
+      const syncedMessage = appendTrailer(cleanMsg, `${SYNC_TRAILER}: ${hash}`);
+      commitWithMeta(meta, syncedMessage, true);
+      continue;
+    }
 
     const label = meta.parentCount > 1
       ? `merge commit ${meta.short} (diffing against first parent)`

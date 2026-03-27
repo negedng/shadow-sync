@@ -18,7 +18,7 @@ import * as path from "path";
 import { spawnSync } from "child_process";
 import {
   REMOTES, SHADOW_BRANCH_PREFIX, MAX_DIR_DEPTH,
-  run, runSafe, refExists,
+  run, runSafe, refExists, appendTrailer,
   validateName, die,
 } from "./shadow-common";
 
@@ -81,7 +81,7 @@ const externalExists = refExists(externalRef);
 
 // Create a worktree from the external remote branch
 const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-forward-")).replace(/\\/g, "/");
-const archiveDir  = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-archive-")).replace(/\\/g, "/");
+const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-archive-")).replace(/\\/g, "/");
 const tempBranch = `shadow-forward-${Date.now()}`;
 let cleanupDone = false;
 
@@ -91,11 +91,11 @@ const cleanup = () => {
   runSafe(["worktree", "remove", "--force", worktreeDir]);
   runSafe(["branch", "-D", tempBranch]);
   fs.rmSync(worktreeDir, { recursive: true, force: true });
-  fs.rmSync(archiveDir,  { recursive: true, force: true });
+  fs.rmSync(archiveDir, { recursive: true, force: true });
 };
 
-process.on("exit",    cleanup);
-process.on("SIGINT",  () => { cleanup(); process.exit(130); });
+process.on("exit", cleanup);
+process.on("SIGINT", () => { cleanup(); process.exit(130); });
 process.on("SIGTERM", () => { cleanup(); process.exit(143); });
 
 // Extract {dir}/ content from shadow branch, stripping the prefix
@@ -144,8 +144,13 @@ if (!hasStagedChanges) {
   process.exit(0);
 }
 
-// Use the latest shadow branch commit message
-const message = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+// Use the shadow branch commit message, stripped of any existing Shadow-*
+// trailers to prevent accumulation across round-trips. Then add our own
+// forwarded-from trailer so CI sync recognizes it and skips it on pull-back.
+const shadowHash = run(["rev-parse", `origin/${refName}`]);
+const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
+const message = appendTrailer(cleanMessage, `Shadow-forwarded-from: ${shadowHash}`);
 const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-m", message], {
   cwd: worktreeDir,
   encoding: "utf8",
