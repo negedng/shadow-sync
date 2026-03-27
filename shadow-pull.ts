@@ -67,27 +67,33 @@ if (!runSafe(["diff", "--quiet"]).ok || !runSafe(["diff", "--cached", "--quiet"]
 // ── Trigger CI sync ───────────────────────────────────────────────────────────
 
 if (!values["no-sync"]) {
+  triggerSync();
+}
+
+function triggerSync() {
   const token = process.env.EXTERNAL_REPO_TOKEN;
-  if (token) {
-    const originUrl = run(["remote", "get-url", pushOrigin]);
-    const m = originUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-    if (m) {
-      console.log(`Triggering CI sync on ${m[1]}/${m[2]}...`);
-      const res = await fetch(
-        `https://api.github.com/repos/${m[1]}/${m[2]}/actions/workflows/shadow-sync.yml/dispatches`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
-          body: JSON.stringify({ ref: "main" }),
-        },
-      );
-      if (res.status === 204) {
-        console.log("Waiting for sync to complete...");
-        await new Promise(r => setTimeout(r, 20000));
-      } else {
-        console.log(`Sync trigger failed (${res.status}), pulling current shadow state.`);
-      }
-    }
+  if (!token) return;
+  const originUrl = run(["remote", "get-url", pushOrigin]);
+  const m = originUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+  if (!m) return;
+
+  console.log(`Triggering CI sync on ${m[1]}/${m[2]}...`);
+  const { spawnSync: spawn } = require("child_process");
+  const curlArgs = [
+    "-s", "-o", "/dev/null", "-w", "%{http_code}",
+    "-X", "POST",
+    "-H", `Authorization: Bearer ${token}`,
+    "-H", "Accept: application/vnd.github+json",
+    "-d", JSON.stringify({ ref: "main" }),
+    `https://api.github.com/repos/${m[1]}/${m[2]}/actions/workflows/shadow-sync.yml/dispatches`,
+  ];
+  const result = spawn("curl", curlArgs, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  const status = (result.stdout ?? "").trim();
+  if (status === "204") {
+    console.log("Waiting for sync to complete...");
+    spawn("node", ["-e", "setTimeout(()=>{},20000)"], { stdio: "inherit" });
+  } else {
+    console.log(`Sync trigger failed (HTTP ${status}), pulling current shadow state.`);
   }
 }
 
