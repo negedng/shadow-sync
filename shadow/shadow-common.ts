@@ -85,65 +85,42 @@ export function validateName(value: string, label: string): void {
   if (value.startsWith("-")) die(`${label} must not start with '-'.`);
 }
 
-function git(args: string[], cwd?: string) {
-  return spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
-    encoding: "utf8", cwd: cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
-  });
-}
+type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
+type GitOpts = { cwd?: string; plain?: boolean };
 
-/** Run a git command without config overrides (uses repo/global settings as-is). */
-function gitPlain(args: string[], cwd?: string) {
-  return spawnSync("git", args, {
-    encoding: "utf8", cwd: cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+/** Run a git command. Throws on non-zero exit.
+ *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
+export function git(args: string[], opts?: GitOpts & { safe?: false }): string;
+/** Run a git command. Returns { stdout, stderr, status, ok } — never throws.
+ *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
+export function git(args: string[], opts: GitOpts & { safe: true }): GitResult;
+export function git(args: string[], opts?: GitOpts & { safe?: boolean }): string | GitResult {
+  const fullArgs = opts?.plain ? args : [...GIT_CONFIG_OVERRIDES, ...args];
+  const r = spawnSync("git", fullArgs, {
+    encoding: "utf8", cwd: opts?.cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
   });
-}
 
-/** Run a git command, return trimmed stdout. Throws on non-zero exit. */
-export function run(args: string[], cwd?: string): string {
-  const r = git(args, cwd);
+  if (opts?.safe) {
+    if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
+    return {
+      stdout: (r.stdout ?? "").trim(),
+      stderr: (r.stderr ?? "").trim(),
+      status: r.status ?? 1,
+      ok:     r.status === 0,
+    };
+  }
+
   if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
   return (r.stdout ?? "").trim();
-}
-
-/** Run a git command, return { stdout, stderr, status, ok } — never throws. */
-export function runSafe(args: string[], cwd?: string) {
-  const r = git(args, cwd);
-  if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
-  return {
-    stdout: (r.stdout ?? "").trim(),
-    stderr: (r.stderr ?? "").trim(),
-    status: r.status ?? 1,
-    ok:     r.status === 0,
-  };
-}
-
-/** Like run but without config overrides — uses repo/global git settings. */
-export function runPlain(args: string[], cwd?: string): string {
-  const r = gitPlain(args, cwd);
-  if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
-  if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
-  return (r.stdout ?? "").trim();
-}
-
-/** Like runSafe but without config overrides — uses repo/global git settings. */
-export function runSafePlain(args: string[], cwd?: string) {
-  const r = gitPlain(args, cwd);
-  if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
-  return {
-    stdout: (r.stdout ?? "").trim(),
-    stderr: (r.stderr ?? "").trim(),
-    status: r.status ?? 1,
-    ok:     r.status === 0,
-  };
 }
 
 export function refExists(ref: string): boolean {
-  return runSafe(["rev-parse", "--verify", ref]).ok;
+  return git(["rev-parse", "--verify", ref], { safe: true }).ok;
 }
 
 export function getCurrentBranch(): string {
-  const result = runSafe(["symbolic-ref", "--short", "HEAD"]);
+  const result = git(["symbolic-ref", "--short", "HEAD"], { safe: true });
   if (!result.ok) {
     die("You are in a detached HEAD state. Check out a branch first.");
   }
@@ -151,7 +128,7 @@ export function getCurrentBranch(): string {
 }
 
 export function listExternalBranches(remote: string): string[] {
-  return run(["branch", "-r"])
+  return git(["branch", "-r"])
     .split("\n")
     .map(l => l.trim())
     .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
@@ -260,12 +237,12 @@ export function preflightChecks(externalRef: string): { level: "error" | "warn";
   const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
   const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
 
-  const shallow = runSafe(["rev-parse", "--is-shallow-repository"]);
+  const shallow = git(["rev-parse", "--is-shallow-repository"], { safe: true });
   if (shallow.ok && shallow.stdout === "true") {
     error("SHALLOW_CLONE", "This repository is a shallow clone. Shadow sync requires full history.\n  Run: git fetch --unshallow");
   }
 
-  const tree = runSafe(["ls-tree", "-r", "--long", externalRef]);
+  const tree = git(["ls-tree", "-r", "--long", externalRef], { safe: true });
   if (tree.ok && tree.stdout) {
     const paths: string[] = [];
     for (const entry of tree.stdout.split("\n").filter(Boolean)) {
@@ -289,7 +266,7 @@ export function preflightChecks(externalRef: string): { level: "error" | "warn";
     }
   }
 
-  const attrs = runSafe(["show", `${externalRef}:.gitattributes`]);
+  const attrs = git(["show", `${externalRef}:.gitattributes`], { safe: true });
   if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
     warn("GIT_LFS", "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n  Ensure LFS is configured in the internal repo, or large files will be pointers.");
   }
@@ -329,7 +306,7 @@ function getCommitMeta(hash: string): CommitMeta {
   const SEP = "---SHADOW-SEP---";
   const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%B", "%h: %s", "%P"]
     .join(SEP);
-  const raw = run(["log", "-1", `--format=${format}`, hash]);
+  const raw = git(["log", "-1", `--format=${format}`, hash]);
   const parts = raw.split(SEP);
   const head = parts.slice(0, 6);
   const tail = parts.slice(-2);
@@ -384,7 +361,7 @@ function diffForCommit(meta: CommitMeta): string {
     if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
     return result.stdout ?? "";
   }
-  const parentHash = run(["rev-parse", `${hash}^1`]);
+  const parentHash = git(["rev-parse", `${hash}^1`]);
   const result = spawnSync("git", [...diffArgs, parentHash, hash], {
     encoding: "utf8",
     maxBuffer: MAX_BUFFER,
@@ -425,8 +402,8 @@ const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
 
 function buildAlreadySyncedSetFor(dir: string): Set<string> {
   const synced = new Set<string>();
-  const log = runSafe(
-    ["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B", "--", `${dir}/`]
+  const log = git(
+    ["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B", "--", `${dir}/`], { safe: true }
   );
   if (!log.ok || !log.stdout) return synced;
 
@@ -440,7 +417,7 @@ function buildAlreadySyncedSetFor(dir: string): Set<string> {
 const SEED_HASH_RE = /^Shadow-seed:\s*(\S+)\s+([0-9a-f]{7,40})/;
 
 function findSeedHash(dir: string): string | null {
-  const log = runSafe(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"]);
+  const log = git(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"], { safe: true });
   if (!log.ok || !log.stdout) return null;
   for (const line of log.stdout.split("\n")) {
     const match = line.match(SEED_HASH_RE);
@@ -459,7 +436,7 @@ function collectExternalCommits(
   } else {
     args.push(externalRef);
   }
-  const commits = runSafe(args);
+  const commits = git(args, { safe: true });
   if (!commits.ok || !commits.stdout) return [];
   return commits.stdout.split("\n").filter(Boolean);
 }
@@ -535,10 +512,10 @@ export function replayCommits(opts: {
 
     const patchFiles = extractPatchFiles(patch, dir);
     if (patchFiles.length > 0) {
-      run(["add", "--", ...patchFiles]);
+      git(["add", "--", ...patchFiles]);
     }
 
-    const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"]).ok;
+    const hasStagedChanges = !git(["diff", "--cached", "--quiet"], { safe: true }).ok;
     const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
 
     if (!hasStagedChanges) {

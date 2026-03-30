@@ -17,7 +17,7 @@ import * as os from "os";
 import * as path from "path";
 import {
   REMOTES, SHADOW_BRANCH_PREFIX,
-  run, runSafe, refExists, appendTrailer,
+  git, refExists, appendTrailer,
   validateName, die,
 } from "./shadow-common";
 
@@ -64,15 +64,15 @@ console.log();
 
 // ── Add external remote and fetch ────────────────────────────────────────────
 
-const existing = runSafe(["remote", "get-url", remote]);
+const existing = git(["remote", "get-url", remote], { safe: true });
 if (!existing.ok) {
-  run(["remote", "add", remote, resolvedUrl]);
+  git(["remote", "add", remote, resolvedUrl]);
 } else if (existing.stdout !== resolvedUrl) {
-  run(["remote", "set-url", remote, resolvedUrl]);
+  git(["remote", "set-url", remote, resolvedUrl]);
 }
 
 console.log(`Fetching from '${remote}'...`);
-run(["fetch", remote]);
+git(["fetch", remote]);
 
 // ── Build tree and push to external remote ───────────────────────────────────
 
@@ -85,18 +85,18 @@ process.env.GIT_INDEX_FILE = tmpIndex;
 try {
   // Read dir/ from shadow branch at root level (strips the prefix)
   console.log(`Building tree from ${dir}/ on shadow branch...`);
-  run(["read-tree", "--empty"]);
-  const treeCheck = runSafe(["rev-parse", `origin/${refName}:${dir}`]);
+  git(["read-tree", "--empty"]);
+  const treeCheck = git(["rev-parse", `origin/${refName}:${dir}`], { safe: true });
   if (!treeCheck.ok) {
     console.log(`No files under ${dir}/ on shadow branch. Nothing to forward.`);
     process.exit(0);
   }
-  run(["read-tree", `origin/${refName}:${dir}`]);
-  const tree = run(["write-tree"]);
+  git(["read-tree", `origin/${refName}:${dir}`]);
+  const tree = git(["write-tree"]);
 
   // Check if anything changed
   if (externalExists) {
-    const externalTree = run(["rev-parse", `${externalRef}^{tree}`]);
+    const externalTree = git(["rev-parse", `${externalRef}^{tree}`]);
     if (tree === externalTree) {
       console.log("External remote is already up to date. Nothing to forward.");
       process.exit(0);
@@ -106,18 +106,18 @@ try {
   // Build commit message from the shadow branch merge commit.
   // Strip existing Shadow-* trailers to prevent accumulation across round-trips.
   // Add our own trailer so CI sync recognizes it and skips it on pull-back.
-  const shadowHash = run(["rev-parse", `origin/${refName}`]);
-  const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+  const shadowHash = git(["rev-parse", `origin/${refName}`]);
+  const rawMessage = git(["log", "-1", "--format=%B", `origin/${refName}`]);
   const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
   const message = appendTrailer(cleanMessage, `Shadow-forwarded-from: ${shadowHash}`);
 
   // Create commit (with external branch tip as parent if it exists)
-  const parentArgs = externalExists ? ["-p", run(["rev-parse", externalRef])] : [];
-  const newCommit = run(["commit-tree", tree, ...parentArgs, "-m", message]);
+  const parentArgs = externalExists ? ["-p", git(["rev-parse", externalRef])] : [];
+  const newCommit = git(["commit-tree", tree, ...parentArgs, "-m", message]);
 
   // Push to external remote
   console.log(`\nPushing to ${remote}/${externalBranch}...`);
-  const pushResult = runSafe(["push", remote, `${newCommit}:refs/heads/${externalBranch}`]);
+  const pushResult = git(["push", remote, `${newCommit}:refs/heads/${externalBranch}`], { safe: true });
   if (!pushResult.ok) {
     console.error(pushResult.stderr);
     die(`git push to ${remote}/${externalBranch} failed.`);

@@ -17,7 +17,7 @@ import { spawnSync } from "child_process";
 import { parseArgs } from "util";
 import {
   REMOTES,
-  run, runPlain, runSafe, runSafePlain, refExists,
+  git, refExists,
   getCurrentBranch, shadowBranchName,
   validateName, die,
 } from "./shadow-common";
@@ -62,7 +62,7 @@ const shadowBranch = shadowBranchName(dir, externalBranch);
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
 // Refuse if working tree is dirty (use plain git to respect repo's autocrlf setting)
-if (!runSafePlain(["diff", "--quiet"]).ok || !runSafePlain(["diff", "--cached", "--quiet"]).ok) {
+if (!git(["diff", "--quiet"], { safe: true, plain: true }).ok || !git(["diff", "--cached", "--quiet"], { safe: true, plain: true }).ok) {
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
@@ -74,7 +74,7 @@ if (!values["no-sync"]) {
   // ci-sync checks out shadow branches, which modifies the working tree and
   // detaches HEAD. Stash any untracked files so checkout doesn't fail, then
   // restore everything after.
-  const stashed = runSafePlain(["stash", "push", "-u", "-m", "shadow-import: pre-sync stash"]).ok;
+  const stashed = git(["stash", "push", "-u", "-m", "shadow-import: pre-sync stash"], { safe: true, plain: true }).ok;
 
   const ciSyncPath = path.join(__dirname, "shadow-ci-sync.ts");
   const tsxPath = require.resolve("tsx/cli");
@@ -85,9 +85,9 @@ if (!values["no-sync"]) {
   });
 
   // Restore the original branch and working tree
-  runPlain(["checkout", localBranch]);
-  runPlain(["checkout", "HEAD", "--", "."]);
-  if (stashed) runSafePlain(["stash", "pop"]);
+  git(["checkout", localBranch], { plain: true });
+  git(["checkout", "HEAD", "--", "."], { plain: true });
+  if (stashed) git(["stash", "pop"], { safe: true, plain: true });
 
   if (result.status !== 0) {
     if (result.error) console.error(result.error.message);
@@ -98,13 +98,13 @@ if (!values["no-sync"]) {
 // ── Fetch and merge ───────────────────────────────────────────────────────────
 
 console.log(`Fetching latest from ${pushOrigin}...`);
-run(["fetch", pushOrigin]);
+git(["fetch", pushOrigin]);
 
 if (!refExists(shadowRef)) {
   die(`Shadow branch '${shadowRef}' does not exist.`);
 }
 
-if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
+if (git(["merge-base", "--is-ancestor", shadowRef, "HEAD"], { safe: true }).ok) {
   console.log("Already up to date — shadow branch is fully merged into your local branch.");
   process.exit(0);
 }
@@ -112,17 +112,17 @@ if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
 console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
 // Use plain git (no autocrlf override) for working-tree operations on Windows
-const mergeResult = runSafePlain(["merge", "--no-commit", "--no-ff", shadowRef]);
+const mergeResult = git(["merge", "--no-commit", "--no-ff", shadowRef], { safe: true, plain: true });
 
-if (!mergeResult.ok && !runSafePlain(["rev-parse", "MERGE_HEAD"]).ok) {
+if (!mergeResult.ok && !git(["rev-parse", "MERGE_HEAD"], { safe: true, plain: true }).ok) {
   console.error(mergeResult.stderr);
   die("Merge failed.");
 }
 
 // Reset index to HEAD (undoes merge effect on all files), then overlay
 // only dir/ from the shadow branch. MERGE_HEAD is preserved.
-runPlain(["read-tree", "HEAD"]);
-runPlain(["checkout", shadowRef, "--", `${dir}/`]);
-runPlain(["commit", "--no-edit", "--allow-empty"]);
+git(["read-tree", "HEAD"], { plain: true });
+git(["checkout", shadowRef, "--", `${dir}/`], { plain: true });
+git(["commit", "--no-edit", "--allow-empty"], { plain: true });
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
