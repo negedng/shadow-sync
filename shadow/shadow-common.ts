@@ -86,6 +86,13 @@ function git(args: string[], cwd?: string) {
   });
 }
 
+/** Run a git command without config overrides (uses repo/global settings as-is). */
+function gitPlain(args: string[], cwd?: string) {
+  return spawnSync("git", args, {
+    encoding: "utf8", cwd, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
 /** Run a git command, return trimmed stdout. Throws on non-zero exit. */
 export function run(args: string[], cwd?: string): string {
   const r = git(args, cwd);
@@ -97,6 +104,18 @@ export function run(args: string[], cwd?: string): string {
 /** Run a git command, return { stdout, stderr, status, ok } — never throws. */
 export function runSafe(args: string[], cwd?: string) {
   const r = git(args, cwd);
+  if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
+  return {
+    stdout: (r.stdout ?? "").trim(),
+    stderr: (r.stderr ?? "").trim(),
+    status: r.status ?? 1,
+    ok:     r.status === 0,
+  };
+}
+
+/** Like runSafe but without config overrides — uses repo/global git settings. */
+export function runSafePlain(args: string[], cwd?: string) {
+  const r = gitPlain(args, cwd);
   if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
   return {
     stdout: (r.stdout ?? "").trim(),

@@ -16,7 +16,7 @@ import * as os from "os";
 import { spawnSync } from "child_process";
 import {
   REMOTES,
-  run, runSafe, refExists,
+  run, runSafe, runSafePlain, refExists,
   getCurrentBranch, shadowBranchName,
   parseShadowIgnore, acquireLock, validateName, die,
 } from "./shadow-common";
@@ -71,8 +71,8 @@ const pushOrigin   = process.env.SHADOW_PUSH_ORIGIN ?? "origin";
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
 // Refuse to export if the local dir has uncommitted changes
-const dirtyStaged   = !runSafe(["diff", "--cached", "--quiet", "--", `${dir}/`]).ok;
-const dirtyUnstaged = !runSafe(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
+const dirtyStaged   = !runSafePlain(["diff", "--cached", "--quiet", "--", `${dir}/`]).ok;
+const dirtyUnstaged = !runSafePlain(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
 if (dirtyStaged || dirtyUnstaged) {
   console.error(`\u2718 '${dir}/' has uncommitted changes:\n`);
   spawnSync("git", ["-c", "core.autocrlf=false", "status", "--short", "--", `${dir}/`], { stdio: "inherit" });

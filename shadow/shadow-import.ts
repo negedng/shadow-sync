@@ -15,7 +15,7 @@
 import { parseArgs } from "util";
 import {
   REMOTES,
-  run, runSafe, refExists,
+  run, runSafe, runSafePlain, refExists,
   getCurrentBranch, shadowBranchName,
   validateName, die,
 } from "./shadow-common";
@@ -59,8 +59,8 @@ const pushOrigin   = process.env.SHADOW_PUSH_ORIGIN ?? "origin";
 const shadowBranch = shadowBranchName(dir, externalBranch);
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
-// Refuse if working tree is dirty
-if (!runSafe(["diff", "--quiet"]).ok || !runSafe(["diff", "--cached", "--quiet"]).ok) {
+// Refuse if working tree is dirty (use plain git to respect repo's autocrlf setting)
+if (!runSafePlain(["diff", "--quiet"]).ok || !runSafePlain(["diff", "--cached", "--quiet"]).ok) {
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
