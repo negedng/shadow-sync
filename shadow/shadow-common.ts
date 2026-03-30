@@ -62,6 +62,11 @@ if (process.env.SHADOW_TEST_REMOTES) {
 const MAX_BUFFER = config.maxBuffer;
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/** Repo root — ensures git commands use paths relative to the repo, not the cwd.
+ *  When invoked via `npm --prefix shadow`, cwd is shadow/ which breaks path-based commands. */
+const REPO_ROOT = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" })
+  .stdout.trim();
+
 /** Git config overrides for cross-OS consistency. */
 const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
   ([key, value]) => ["-c", `${key}=${value}`],
@@ -82,14 +87,14 @@ export function validateName(value: string, label: string): void {
 
 function git(args: string[], cwd?: string) {
   return spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
-    encoding: "utf8", cwd, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+    encoding: "utf8", cwd: cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
 /** Run a git command without config overrides (uses repo/global settings as-is). */
 function gitPlain(args: string[], cwd?: string) {
   return spawnSync("git", args, {
-    encoding: "utf8", cwd, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+    encoding: "utf8", cwd: cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
   });
 }
 

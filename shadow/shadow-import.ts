@@ -115,28 +115,16 @@ console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
 // Use plain git (no autocrlf override) for working-tree operations on Windows
 const mergeResult = runSafePlain(["merge", "--no-commit", "--no-ff", shadowRef]);
-console.log(`  merge exit: ${mergeResult.status}, stderr: ${mergeResult.stderr}`);
 
-const mhResult = runSafePlain(["rev-parse", "MERGE_HEAD"]);
-console.log(`  MERGE_HEAD: ${mhResult.ok ? mhResult.stdout : "not found"}`);
-
-if (!mergeResult.ok && !mhResult.ok) {
+if (!mergeResult.ok && !runSafePlain(["rev-parse", "MERGE_HEAD"]).ok) {
   console.error(mergeResult.stderr);
   die("Merge failed.");
 }
 
 // Reset index to HEAD (undoes merge effect on all files), then overlay
 // only dir/ from the shadow branch. MERGE_HEAD is preserved.
-console.log(`  read-tree HEAD...`);
 runPlain(["read-tree", "HEAD"]);
-console.log(`  cwd=${process.cwd()}`);
-console.log(`  checkout ${shadowRef} -- ${dir}/...`);
-const coRes = runSafePlain(["checkout", shadowRef, "--", `${dir}/`]);
-console.log(`  checkout exit=${coRes.status} stderr=${coRes.stderr}`);
-if (!coRes.ok) {
-  console.log(`  fallback: trying without trailing slash`);
-  runPlain(["checkout", shadowRef, "--", dir]);
-}
+runPlain(["checkout", shadowRef, "--", `${dir}/`]);
 runPlain(["commit", "--no-edit", "--allow-empty"]);
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
