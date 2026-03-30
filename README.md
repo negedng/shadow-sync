@@ -29,13 +29,12 @@ Three copies of the code:
 ```bash
 npm --prefix shadow run import                    # pull from first configured remote
 npm --prefix shadow run import -- -r frontend     # pull from a specific remote
-npm --prefix shadow run import -- --no-sync       # skip CI sync trigger, just pull current shadow state
+npm --prefix shadow run import -- --no-sync       # skip sync, just merge current shadow state
 ```
 
 This runs `shadow-import.ts` which:
-1. Triggers CI sync on GitHub to fetch the latest external changes (requires `EXTERNAL_REPO_TOKEN` — skipped if not set)
-2. Waits ~20 seconds for the sync to complete
-3. Safely merges the shadow branch into your local branch — resets the index to HEAD with `git read-tree`, then overlays only `dir/` changes, so all other files are preserved
+1. Runs ci-sync locally — fetches from external remotes and replays new commits into shadow branches (no token needed)
+2. Safely merges the shadow branch into your local branch — resets the index to HEAD with `git read-tree`, then overlays only `dir/` changes, so all other files are preserved
 
 **Warning:** Do **not** use a raw `git merge origin/shadow/{dir}/main`. The shadow branch only contains `dir/` files, so a raw merge would delete everything else in your repo.
 
@@ -128,27 +127,14 @@ git remote add backend   https://github.com/org/backend.git
 git remote add frontend  https://github.com/org/frontend.git
 ```
 
-3. Create two fine-grained PATs (see [PAT setup](shadow/shadow-sync-explained.html#pat-setup) for step-by-step):
+3. Create a fine-grained PAT (see [PAT setup](shadow/shadow-sync-explained.html#pat-setup) for step-by-step):
 
-   **Token 1 — CI forward** (pushes to external repos):
+   **CI forward token** (pushes to external repos):
    - Repos: the external repos only (`test-frontend`, `test-backend`)
    - Permission: **Contents: Read and write**
    - Add as `EXTERNAL_REPO_TOKEN` secret in your internal repo settings (Settings → Secrets → Actions)
 
-   **Token 2 — Local sync trigger** (triggers CI sync from `npm --prefix shadow run import`):
-   - Repos: the internal repo only (`test-main`)
-   - Permission: **Actions: Read and write**
-   - Set as local environment variable:
-
-   ```bash
-   # Linux/macOS (add to ~/.bashrc or ~/.zshrc)
-   export EXTERNAL_REPO_TOKEN=github_pat_...
-
-   # PowerShell (add to $PROFILE)
-   $env:EXTERNAL_REPO_TOKEN = "github_pat_..."
-   ```
-
-   You can use a single token for both if you prefer — just include all repos and both permissions. Two tokens is safer: if one leaks, the blast radius is smaller.
+   No local token is needed — `shadow-import` runs the sync locally instead of dispatching a CI workflow.
 
 ## Initial bootstrap
 

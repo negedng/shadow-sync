@@ -2,8 +2,8 @@
 /**
  * shadow-import.ts — Import external changes into your local branch.
  *
- * 1. Triggers CI sync on GitHub (external → shadow) and waits for it.
- *    Requires EXTERNAL_REPO_TOKEN env var. Skipped if not set.
+ * 1. Runs ci-sync locally to fetch and replay external commits into the shadow branch.
+ *    Skipped with --no-sync.
  * 2. Safely merges the shadow branch into your local branch, resetting the
  *    index to HEAD and overlaying only dir/ changes so nothing else is affected.
  *
@@ -12,6 +12,8 @@
  *   npx tsx shadow-import.ts -r frontend
  *   npx tsx shadow-import.ts --no-sync
  */
+import * as path from "path";
+import { spawnSync } from "child_process";
 import { parseArgs } from "util";
 import {
   REMOTES,
@@ -64,36 +66,18 @@ if (!runSafePlain(["diff", "--quiet"]).ok || !runSafePlain(["diff", "--cached", 
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
-// ── Trigger CI sync ───────────────────────────────────────────────────────────
+// ── Run local sync ────────────────────────────────────────────────────────────
 
 if (!values["no-sync"]) {
-  triggerSync();
-}
-
-function triggerSync() {
-  const token = process.env.EXTERNAL_REPO_TOKEN;
-  if (!token) return;
-  const originUrl = run(["remote", "get-url", pushOrigin]);
-  const m = originUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-  if (!m) return;
-
-  console.log(`Triggering CI sync on ${m[1]}/${m[2]}...`);
-  const { spawnSync: spawn } = require("child_process");
-  const curlArgs = [
-    "-s", "-o", "/dev/null", "-w", "%{http_code}",
-    "-X", "POST",
-    "-H", `Authorization: Bearer ${token}`,
-    "-H", "Accept: application/vnd.github+json",
-    "-d", JSON.stringify({ ref: "main" }),
-    `https://api.github.com/repos/${m[1]}/${m[2]}/actions/workflows/shadow-sync.yml/dispatches`,
-  ];
-  const result = spawn("curl", curlArgs, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-  const status = (result.stdout ?? "").trim();
-  if (status === "204") {
-    console.log("Waiting for sync to complete...");
-    spawn("node", ["-e", "setTimeout(()=>{},20000)"], { stdio: "inherit" });
-  } else {
-    console.log(`Sync trigger failed (HTTP ${status}), pulling current shadow state.`);
+  console.log("Running local sync (fetching external changes)...");
+  const ciSyncPath = path.join(__dirname, "shadow-ci-sync.ts");
+  const result = spawnSync("npx", ["tsx", ciSyncPath], {
+    encoding: "utf8",
+    stdio: "inherit",
+    cwd: path.resolve(__dirname, ".."),
+  });
+  if (result.status !== 0) {
+    die("Local sync failed.");
   }
 }
 
