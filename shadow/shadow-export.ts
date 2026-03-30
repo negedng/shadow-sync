@@ -15,8 +15,8 @@ import * as fs from "fs";
 import * as os from "os";
 import { spawnSync } from "child_process";
 import {
-  REMOTES, MAX_PUSH_RETRIES,
-  run, runSafe, refExists,
+  REMOTES,
+  run, runSafe, runSafePlain, refExists,
   getCurrentBranch, shadowBranchName,
   parseShadowIgnore, acquireLock, validateName, die,
 } from "./shadow-common";
@@ -50,9 +50,7 @@ const commitMsg = values.message;
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-const SCRIPT_DIR = typeof __dirname !== "undefined"
-  ? __dirname
-  : path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const SCRIPT_DIR = __dirname;
 
 const localBranch = getCurrentBranch();
 const remoteEntry = values.remote
@@ -73,8 +71,8 @@ const pushOrigin   = process.env.SHADOW_PUSH_ORIGIN ?? "origin";
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
 // Refuse to export if the local dir has uncommitted changes
-const dirtyStaged   = !runSafe(["diff", "--cached", "--quiet", "--", `${dir}/`]).ok;
-const dirtyUnstaged = !runSafe(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
+const dirtyStaged   = !runSafePlain(["diff", "--cached", "--quiet", "--", `${dir}/`]).ok;
+const dirtyUnstaged = !runSafePlain(["diff", "--quiet", "HEAD", "--", `${dir}/`]).ok;
 if (dirtyStaged || dirtyUnstaged) {
   console.error(`\u2718 '${dir}/' has uncommitted changes:\n`);
   spawnSync("git", ["-c", "core.autocrlf=false", "status", "--short", "--", `${dir}/`], { stdio: "inherit" });
@@ -102,8 +100,7 @@ if (!refExists(shadowRef)) {
   die(`Shadow branch '${shadowRef}' does not exist. Run shadow-setup.ts first.`);
 }
 
-// Refuse to export if the shadow branch has changes not merged into HEAD.
-// This catches external commits (synced via CI) that the user hasn't pulled yet.
+// Check if latest shadow is merged into work branch (HEAD's ancestor)
 if (!runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
   console.error(`\u2718 '${shadowRef}' has commits not merged into your local branch.\n`);
   console.error(`Merge them first:`);
@@ -113,132 +110,79 @@ if (!runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
   process.exit(1);
 }
 
-// ── Worktree ──────────────────────────────────────────────────────────────────
-
-const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-export-")).replace(/\\/g, "/");
-const tempBranch  = `shadow-export-${Date.now()}`;
-let   cleanupDone = false;
-
-const cleanup = () => {
-  if (cleanupDone) return;
-  cleanupDone = true;
-  runSafe(["worktree", "remove", "--force", worktreeDir]);
-  runSafe(["branch", "-D", tempBranch]);
-  fs.rmSync(worktreeDir, { recursive: true, force: true });
-};
-
-process.on("exit",    cleanup);
-process.on("SIGINT",  () => { cleanup(); process.exit(130); });
-process.on("SIGTERM", () => { cleanup(); process.exit(143); });
-
-run(["worktree", "add", "-b", tempBranch, worktreeDir, shadowRef]);
-
-// ── Merge ─────────────────────────────────────────────────────────────────────
-// Merge HEAD into shadow with --no-commit so we can clean the index.
-// -X theirs prefers local (HEAD) on conflict.  --allow-unrelated-histories
-// is harmless when histories are related and avoids a retry path.
+// ── Build tree using temp index ───────────────────────────────────────────────
+// Instead of a worktree + merge + cleanup, we use git plumbing:
+// read only the subtrees we want into a temp index, write a tree, and
+// create a merge commit with commit-tree. No files touch disk.
 
 const headCommit = run(["rev-parse", "HEAD"]);
-console.log(`Merging ${localBranch} (${headCommit.slice(0, 10)}) into shadow branch...`);
+const shadowTip  = run(["rev-parse", shadowRef]);
+const tmpIndex   = path.join(os.tmpdir(), `shadow-export-idx-${Date.now()}`);
 
-const mergeResult = runSafe(
-  ["merge", "--no-commit", "--no-ff", "-X", "theirs", "--allow-unrelated-histories", headCommit],
-  worktreeDir,
-);
+console.log(`Building export tree from ${localBranch} (${headCommit.slice(0, 10)})...`);
 
-if (!mergeResult.ok && !runSafe(["rev-parse", "MERGE_HEAD"], worktreeDir).ok) {
-  console.error(mergeResult.stderr);
-  die("Merge failed. Resolve conflicts manually and retry.");
-}
+process.env.GIT_INDEX_FILE = tmpIndex;
+try {
+  // Read only the subtrees we want from HEAD
+  run(["read-tree", "--empty"]);
+  run(["read-tree", `--prefix=${dir}/`, `HEAD:${dir}`]);
+  runSafe(["read-tree", `--prefix=.github/`, "HEAD:.github"]);
+  runSafe(["read-tree", `--prefix=shadow/`, "HEAD:shadow"]);
 
-// ── Clean index ───────────────────────────────────────────────────────────────
-// Strip to only dir/ files minus shadowignored patterns.
-// MERGE_HEAD is still present so the commit will record both parents.
-
-console.log(`Cleaning index (removing files outside '${dir}/' and shadowignored files)...`);
-
-const allIndexed = run(["ls-files"], worktreeDir).split("\n").filter(Boolean);
-
-// Keep files needed by CI workflows on the shadow branch. GitHub reads
-// workflow files from the pushed branch, and the forward job needs
-// package.json, the forward script, and shared modules to run.
-const ciKeep = [".github/", "shadow/"];
-const nonDirFiles = allIndexed.filter(f =>
-  !f.startsWith(`${dir}/`) && !ciKeep.some(p => f.startsWith(p))
-);
-for (let i = 0; i < nonDirFiles.length; i += 100) {
-  runSafe(["rm", "--cached", "-f", "--", ...nonDirFiles.slice(i, i + 100)], worktreeDir);
-}
-
-if (ignorePatterns.length > 0) {
-  const compiled = ignorePatterns.map(globToRegex);
-  const ignoredFiles = run(["ls-files", "--", `${dir}/`], worktreeDir)
-    .split("\n").filter(Boolean)
-    .filter(f => compiled.some(re => re.test(f.slice(dir.length + 1))));
-  for (let i = 0; i < ignoredFiles.length; i += 100) {
-    runSafe(["rm", "--cached", "-f", "--", ...ignoredFiles.slice(i, i + 100)], worktreeDir);
+  // Remove shadowignored files
+  if (ignorePatterns.length > 0) {
+    const compiled = ignorePatterns.map(globToRegex);
+    const dirFiles = run(["ls-files", "--", `${dir}/`]).split("\n").filter(Boolean);
+    const ignoredFiles = dirFiles.filter(f => compiled.some(re => re.test(f.slice(dir.length + 1))));
+    for (let i = 0; i < ignoredFiles.length; i += 100) {
+      runSafe(["rm", "--cached", "-f", "--", ...ignoredFiles.slice(i, i + 100)]);
+    }
   }
-}
 
-// ── Commit & push ─────────────────────────────────────────────────────────────
+  const tree = run(["write-tree"]);
 
-const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"], worktreeDir).ok;
-if (!hasStagedChanges) {
-  console.log("No changes to export — shadow branch is already up to date.");
-  cleanup();
-  process.exit(0);
-}
+  // Check if anything changed compared to the shadow branch
+  const shadowTree = run(["rev-parse", `${shadowRef}^{tree}`]);
+  if (tree === shadowTree) {
+    console.log("No changes to export — shadow branch is already up to date.");
+    process.exit(0);
+  }
 
-console.log("\nChanges to export:");
-spawnSync("git", ["-c", "core.autocrlf=false", "diff", "--cached", "--stat"], { cwd: worktreeDir, stdio: "inherit" });
-console.log();
+  // Show what changed
+  console.log("\nChanges to export:");
+  spawnSync("git", ["diff-tree", "--stat", shadowTree, tree], { stdio: "inherit" });
+  console.log();
 
-if (dryRun) {
-  console.log("[DRY RUN] No changes were exported.");
-  cleanup();
-  process.exit(0);
-}
+  if (dryRun) {
+    console.log("[DRY RUN] No changes were exported.");
+    process.exit(0);
+  }
 
-// Generate a readable commit message if none provided.
-// Lists the subjects of commits since the last export that touched dir/.
-if (!commitMsg) {
-  const shadowTip = run(["rev-parse", shadowRef]);
-  const subjects = runSafe(["log", "--format=%s", `${shadowTip}..HEAD`, "--", `${dir}/`])
-    .stdout.split("\n").filter(Boolean);
-  const auto = subjects.length > 0
-    ? `Export ${dir}/ (${subjects.length} commit${subjects.length > 1 ? "s" : ""})\n\n${subjects.map(s => `- ${s}`).join("\n")}`
-    : `Export ${dir}/`;
-  // Write to MERGE_MSG so git commit picks it up without -m
-  const msgPath = run(["rev-parse", "--git-dir"], worktreeDir) + "/MERGE_MSG";
-  require("fs").writeFileSync(msgPath, auto + "\n");
-}
+  // Generate a readable commit message if none provided.
+  // Lists the subjects of commits since the last export that touched dir/.
+  const message = commitMsg ?? (() => {
+    const subjects = runSafe(["log", "--format=%s", `${shadowTip}..HEAD`, "--", `${dir}/`])
+      .stdout.split("\n").filter(Boolean);
+    return subjects.length > 0
+      ? `Export ${dir}/ (${subjects.length} commit${subjects.length > 1 ? "s" : ""})\n\n${subjects.map((s: string) => `- ${s}`).join("\n")}`
+      : `Export ${dir}/`;
+  })();
 
-const commitArgs = ["-c", "core.autocrlf=false", "commit", ...(commitMsg ? ["-m", commitMsg] : [])];
-const commitResult = spawnSync("git", commitArgs, {
-  cwd: worktreeDir, encoding: "utf8", stdio: "inherit",
-});
-if (commitResult.error) die(`Failed to spawn git: ${commitResult.error.message}`);
-if (commitResult.status !== 0) die("git commit failed in worktree.");
+  // Create merge commit (two parents: shadow tip + HEAD)
+  const newCommit = run(["commit-tree", tree, "-p", shadowTip, "-p", headCommit, "-m", message]);
 
-console.log(`Pushing to ${pushOrigin}/${shadowBranch}...`);
-
-for (let attempt = 1; attempt <= MAX_PUSH_RETRIES; attempt++) {
-  const pushResult = runSafe(["push", pushOrigin, `HEAD:${shadowBranch}`], worktreeDir);
-  if (pushResult.ok) break;
-  const isNonFF = /non-fast-forward|rejected|fetch first/.test(pushResult.stderr);
-  if (!isNonFF || attempt === MAX_PUSH_RETRIES) {
+  // Push
+  console.log(`Pushing to ${pushOrigin}/${shadowBranch}...`);
+  const pushResult = runSafe(["push", pushOrigin, `${newCommit}:refs/heads/${shadowBranch}`]);
+  if (!pushResult.ok) {
     console.error(pushResult.stderr);
-    die(`git push failed after ${attempt} attempt(s).`);
+    die(`Push failed. Run 'git fetch ${pushOrigin} && git merge ${shadowRef}' then re-run the export.`);
   }
-  console.log(`  Push rejected (non-fast-forward), retrying (${attempt}/${MAX_PUSH_RETRIES})...`);
-  run(["fetch", pushOrigin]);
-  const updatedRef = run(["rev-parse", `${pushOrigin}/${shadowBranch}`]);
-  if (!runSafe(["rebase", updatedRef], worktreeDir).ok) {
-    die("Rebase onto updated shadow branch failed. Resolve manually and retry.");
-  }
+} finally {
+  delete process.env.GIT_INDEX_FILE;
+  fs.rmSync(tmpIndex, { force: true });
 }
 
-cleanup();
 console.log(`\n\u2713 Done. Exported '${dir}/' \u2192 ${pushOrigin}/${shadowBranch}`);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

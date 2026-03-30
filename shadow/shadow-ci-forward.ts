@@ -15,12 +15,12 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawnSync } from "child_process";
 import {
-  REMOTES, SHADOW_BRANCH_PREFIX, MAX_DIR_DEPTH,
+  REMOTES, SHADOW_BRANCH_PREFIX,
   run, runSafe, refExists, appendTrailer,
   validateName, die,
 } from "./shadow-common";
+
 
 // ── Determine which shadow branch was pushed ─────────────────────────────────
 
@@ -74,137 +74,57 @@ if (!existing.ok) {
 console.log(`Fetching from '${remote}'...`);
 run(["fetch", remote]);
 
-// ── Snapshot shadow branch content into external remote ──────────────────────
+// ── Build tree and push to external remote ───────────────────────────────────
 
 const externalRef = `${remote}/${externalBranch}`;
 const externalExists = refExists(externalRef);
 
-// Create a worktree from the external remote branch
-const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-forward-")).replace(/\\/g, "/");
-const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-archive-")).replace(/\\/g, "/");
-const tempBranch = `shadow-forward-${Date.now()}`;
-let cleanupDone = false;
+const tmpIndex = path.join(os.tmpdir(), `shadow-fwd-idx-${Date.now()}`);
+process.env.GIT_INDEX_FILE = tmpIndex;
 
-const cleanup = () => {
-  if (cleanupDone) return;
-  cleanupDone = true;
-  runSafe(["worktree", "remove", "--force", worktreeDir]);
-  runSafe(["branch", "-D", tempBranch]);
-  fs.rmSync(worktreeDir, { recursive: true, force: true });
-  fs.rmSync(archiveDir, { recursive: true, force: true });
-};
+try {
+  // Read dir/ from shadow branch at root level (strips the prefix)
+  console.log(`Building tree from ${dir}/ on shadow branch...`);
+  run(["read-tree", "--empty"]);
+  const treeCheck = runSafe(["rev-parse", `origin/${refName}:${dir}`]);
+  if (!treeCheck.ok) {
+    console.log(`No files under ${dir}/ on shadow branch. Nothing to forward.`);
+    process.exit(0);
+  }
+  run(["read-tree", `origin/${refName}:${dir}`]);
+  const tree = run(["write-tree"]);
 
-process.on("exit", cleanup);
-process.on("SIGINT", () => { cleanup(); process.exit(130); });
-process.on("SIGTERM", () => { cleanup(); process.exit(143); });
-
-// Extract {dir}/ content from shadow branch, stripping the prefix
-console.log(`Extracting ${dir}/ from shadow branch...`);
-const filesOutput = runSafe(["ls-tree", "-r", "--name-only", `origin/${refName}`, "--", `${dir}/`]);
-if (!filesOutput.ok || !filesOutput.stdout) {
-  console.log(`No files under ${dir}/ on shadow branch. Nothing to forward.`);
-  process.exit(0);
-}
-const files = filesOutput.stdout.split("\n").filter(Boolean);
-
-for (const filePath of files) {
-  // Strip the dir prefix: "backend/src/foo.ts" → "src/foo.ts"
-  const rel = filePath.slice(dir.length + 1);
-  const destPath = path.join(archiveDir, rel);
-  fs.mkdirSync(path.dirname(destPath), { recursive: true });
-  const gitPath = filePath.replace(/\\/g, "/");
-  const result = spawnSync("git", ["-c", "core.autocrlf=false", "show", `origin/${refName}:${gitPath}`], {
-    maxBuffer: 50 * 1024 * 1024,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  if (result.error) die(`Failed to spawn git: ${result.error.message}`);
-  if (result.status !== 0) die(`Failed to extract ${gitPath} from shadow branch`);
-  fs.writeFileSync(destPath, result.stdout);
-}
-
-// Create worktree from external branch (or orphan)
-if (externalExists) {
-  run(["worktree", "add", "-b", tempBranch, worktreeDir, externalRef]);
-} else {
-  run(["worktree", "add", "--orphan", "-b", tempBranch, worktreeDir]);
-  spawnSync("git", ["-c", "core.autocrlf=false", "commit", "--allow-empty", "-m", "Initialize branch"], {
-    cwd: worktreeDir, encoding: "utf8", stdio: "inherit",
-  });
-}
-
-// Sync archive into worktree (like rsync --delete)
-console.log(`Syncing to worktree...`);
-syncToWorktree(archiveDir, worktreeDir);
-
-run(["add", "-A"], worktreeDir);
-const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"], worktreeDir).ok;
-if (!hasStagedChanges) {
-  console.log("External remote is already up to date. Nothing to forward.");
-  cleanup();
-  process.exit(0);
-}
-
-// Use the shadow branch commit message, stripped of any existing Shadow-*
-// trailers to prevent accumulation across round-trips. Then add our own
-// forwarded-from trailer so CI sync recognizes it and skips it on pull-back.
-const shadowHash = run(["rev-parse", `origin/${refName}`]);
-const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
-const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
-const message = appendTrailer(cleanMessage, `Shadow-forwarded-from: ${shadowHash}`);
-const commitResult = spawnSync("git", ["-c", "core.autocrlf=false", "commit", "-m", message], {
-  cwd: worktreeDir,
-  encoding: "utf8",
-  stdio: "inherit",
-});
-if (commitResult.error) die(`Failed to spawn git: ${commitResult.error.message}`);
-if (commitResult.status !== 0) die("git commit failed in worktree.");
-
-// Push to external remote
-console.log(`\nPushing to ${remote}/${externalBranch}...`);
-const pushResult = runSafe(["push", remote, `HEAD:${externalBranch}`], worktreeDir);
-if (!pushResult.ok) {
-  console.error(pushResult.stderr);
-  die(`git push to ${remote}/${externalBranch} failed.`);
-}
-
-cleanup();
-console.log(`\n✓ Done. Forwarded shadow/${dir}/${externalBranch} → ${remote}/${externalBranch}.`);
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function syncToWorktree(src: string, dest: string) {
-  const destFiles = listAllFiles(dest);
-  for (const rel of destFiles) {
-    if (rel.startsWith(".git/") || rel === ".git") continue;
-    const srcPath = path.join(src, rel);
-    if (!fs.existsSync(srcPath)) {
-      fs.rmSync(path.join(dest, rel), { force: true });
+  // Check if anything changed
+  if (externalExists) {
+    const externalTree = run(["rev-parse", `${externalRef}^{tree}`]);
+    if (tree === externalTree) {
+      console.log("External remote is already up to date. Nothing to forward.");
+      process.exit(0);
     }
   }
-  const srcFiles = listAllFiles(src);
-  for (const rel of srcFiles) {
-    const srcPath = path.join(src, rel);
-    const destPath = path.join(dest, rel);
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.copyFileSync(srcPath, destPath);
-  }
-}
 
-function listAllFiles(dir: string, prefix = "", depth = 0): string[] {
-  if (depth > MAX_DIR_DEPTH) {
-    console.warn(`Warning: skipping directory at depth ${depth}: ${dir}`);
-    return [];
+  // Build commit message from the shadow branch merge commit.
+  // Strip existing Shadow-* trailers to prevent accumulation across round-trips.
+  // Add our own trailer so CI sync recognizes it and skips it on pull-back.
+  const shadowHash = run(["rev-parse", `origin/${refName}`]);
+  const rawMessage = run(["log", "-1", "--format=%B", `origin/${refName}`]);
+  const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
+  const message = appendTrailer(cleanMessage, `Shadow-forwarded-from: ${shadowHash}`);
+
+  // Create commit (with external branch tip as parent if it exists)
+  const parentArgs = externalExists ? ["-p", run(["rev-parse", externalRef])] : [];
+  const newCommit = run(["commit-tree", tree, ...parentArgs, "-m", message]);
+
+  // Push to external remote
+  console.log(`\nPushing to ${remote}/${externalBranch}...`);
+  const pushResult = runSafe(["push", remote, `${newCommit}:refs/heads/${externalBranch}`]);
+  if (!pushResult.ok) {
+    console.error(pushResult.stderr);
+    die(`git push to ${remote}/${externalBranch} failed.`);
   }
-  const results: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) continue;
-    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      if (entry.name === ".git") continue;
-      results.push(...listAllFiles(path.join(dir, entry.name), rel, depth + 1));
-    } else {
-      results.push(rel);
-    }
-  }
-  return results;
+
+  console.log(`\n✓ Done. Forwarded shadow/${dir}/${externalBranch} → ${remote}/${externalBranch}.`);
+} finally {
+  delete process.env.GIT_INDEX_FILE;
+  fs.rmSync(tmpIndex, { force: true });
 }

@@ -1,21 +1,21 @@
 #!/usr/bin/env ts-node
 /**
- * shadow-pull.ts — Sync external changes and merge them into your local branch.
+ * shadow-import.ts — Import external changes into your local branch.
  *
  * 1. Triggers CI sync on GitHub (external → shadow) and waits for it.
  *    Requires EXTERNAL_REPO_TOKEN env var. Skipped if not set.
- * 2. Safely merges the shadow branch into your local branch, restoring
- *    non-dir/ files so only dir/ content is affected.
+ * 2. Safely merges the shadow branch into your local branch, resetting the
+ *    index to HEAD and overlaying only dir/ changes so nothing else is affected.
  *
  * Usage:
- *   npx tsx shadow-pull.ts
- *   npx tsx shadow-pull.ts -r frontend
- *   npx tsx shadow-pull.ts --no-sync
+ *   npx tsx shadow-import.ts
+ *   npx tsx shadow-import.ts -r frontend
+ *   npx tsx shadow-import.ts --no-sync
  */
 import { parseArgs } from "util";
 import {
   REMOTES,
-  run, runSafe, refExists,
+  run, runPlain, runSafe, runSafePlain, refExists,
   getCurrentBranch, shadowBranchName,
   validateName, die,
 } from "./shadow-common";
@@ -32,7 +32,7 @@ const { values } = parseArgs({
 });
 
 if (values.help) {
-  console.log("Usage: shadow-pull.ts [-r remote] [-d dir] [-b branch] [--no-sync]");
+  console.log("Usage: shadow-import.ts [-r remote] [-d dir] [-b branch] [--no-sync]");
   console.log("  -r         Remote name                          (default: first entry in REMOTES)");
   console.log("  -d         Local subdirectory                   (default: inferred from remote config)");
   console.log("  -b         Branch                               (default: your current branch)");
@@ -59,8 +59,8 @@ const pushOrigin   = process.env.SHADOW_PUSH_ORIGIN ?? "origin";
 const shadowBranch = shadowBranchName(dir, externalBranch);
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
-// Refuse if working tree is dirty
-if (!runSafe(["diff", "--quiet"]).ok || !runSafe(["diff", "--cached", "--quiet"]).ok) {
+// Refuse if working tree is dirty (use plain git to respect repo's autocrlf setting)
+if (!runSafePlain(["diff", "--quiet"]).ok || !runSafePlain(["diff", "--cached", "--quiet"]).ok) {
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
@@ -113,24 +113,18 @@ if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
 
 console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
-const mergeResult = runSafe(["merge", "--no-commit", "--no-ff", shadowRef]);
+// Use plain git (no autocrlf override) for working-tree operations on Windows
+const mergeResult = runSafePlain(["merge", "--no-commit", "--no-ff", shadowRef]);
 
-if (!mergeResult.ok && !runSafe(["rev-parse", "MERGE_HEAD"]).ok) {
+if (!mergeResult.ok && !runSafePlain(["rev-parse", "MERGE_HEAD"]).ok) {
   console.error(mergeResult.stderr);
   die("Merge failed.");
 }
 
-const headFiles = run(["ls-tree", "-r", "--name-only", "HEAD"])
-  .split("\n").filter(Boolean);
-const nonDirFiles = headFiles.filter(f => !f.startsWith(`${dir}/`));
-
-if (nonDirFiles.length > 0) {
-  console.log(`Appending ${nonDirFiles.length} file(s) outside '${dir}/' back to the merge...`);
-  for (let i = 0; i < nonDirFiles.length; i += 100) {
-    run(["checkout", "HEAD", "--", ...nonDirFiles.slice(i, i + 100)]);
-  }
-}
-
-run(["commit", "--no-edit", "--allow-empty"]);
+// Reset index to HEAD (undoes merge effect on all files), then overlay
+// only dir/ from the shadow branch. MERGE_HEAD is preserved.
+runPlain(["read-tree", "HEAD"]);
+runPlain(["checkout", shadowRef, "--", `${dir}/`]);
+runPlain(["commit", "--no-edit", "--allow-empty"]);
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);

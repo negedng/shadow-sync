@@ -8,3 +8,9 @@ app.get("/api/health", (req, res) => {
 });
 
 export default app;
+
+// Graceful shutdown handler
+export function gracefulShutdown() {
+  console.log("Shutting down gracefully...");
+  process.exit(0);
+}
