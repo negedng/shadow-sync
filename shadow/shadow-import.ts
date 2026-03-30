@@ -86,7 +86,7 @@ if (!values["no-sync"]) {
 
   // Restore the original branch and working tree
   runPlain(["checkout", localBranch]);
-  runPlain(["checkout", "--", "."]);
+  runPlain(["checkout", "HEAD", "--", "."]);
   if (stashed) runSafePlain(["stash", "pop"]);
 
   if (result.status !== 0) {
