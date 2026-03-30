@@ -73,10 +73,11 @@ if (!values["no-sync"]) {
   const ciSyncPath = path.join(__dirname, "shadow-ci-sync.ts");
   const result = spawnSync("npx", ["tsx", ciSyncPath], {
     encoding: "utf8",
-    stdio: "inherit",
+    stdio: ["pipe", "inherit", "inherit"],
     cwd: path.resolve(__dirname, ".."),
   });
   if (result.status !== 0) {
+    if (result.error) console.error(result.error.message);
     die("Local sync failed.");
   }
 }
