@@ -154,6 +154,38 @@ npm --prefix shadow run import -- -r backend
 npm --prefix shadow run export -- -r backend
 ```
 
+## Troubleshooting
+
+### Someone pushed directly to a `shadow/**` branch
+
+Shadow branches should only be written to by `shadow-export` and `shadow-ci-sync`. Direct pushes create commits without the expected trailers, which breaks the sync cycle.
+
+**Symptoms:** `shadow-export` refuses with "shadow has commits not merged into your local branch", or unexpected files appear after `shadow-import`.
+
+**Fix — if the commit was NOT yet imported into local:**
+
+```bash
+# Find the last valid commit on the shadow branch (look for Shadow-synced-from or Shadow-export trailers)
+git fetch origin
+git log origin/shadow/backend/main --oneline
+
+# Force-push the shadow branch back to the last valid commit
+git push origin <last-valid-hash>:refs/heads/shadow/backend/main --force
+```
+
+**Fix — if the commit WAS already imported into local:**
+
+```bash
+# Revert the import merge commit on your local branch
+git revert <merge-commit-hash>
+git push origin main
+
+# Then fix the shadow branch as above
+git push origin <last-valid-hash>:refs/heads/shadow/backend/main --force
+```
+
+**Prevention:** Never push directly to `shadow/**` branches. Use `npm run export` to push local changes and let CI sync handle external changes.
+
 ## Tests
 
 ```bash

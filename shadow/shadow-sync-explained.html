@@ -1174,7 +1174,61 @@
 </table>
 
 <!-- ================================================================ -->
-<h2 id="pat-setup">12. Setting Up Cross-Repo Push Access (PAT)</h2>
+<h2 id="troubleshooting">12. Troubleshooting</h2>
+
+<h3>Someone pushed directly to a <code>shadow/**</code> branch</h3>
+
+<div class="card card-red">
+  <p>Shadow branches should only be written to by <code>shadow-export</code> and <code>shadow-ci-sync</code>. Direct pushes create commits without the expected trailers (<code>Shadow-export:</code>, <code>Shadow-synced-from:</code>), which breaks the sync cycle.</p>
+</div>
+
+<div class="card">
+  <h4>Symptoms</h4>
+  <ul>
+    <li><code>shadow-export</code> refuses with <em>"shadow has commits not merged into your local branch"</em></li>
+    <li>Unexpected files appear after <code>shadow-import</code></li>
+    <li>ci-sync creates duplicate commits (the rogue commit has no <code>Shadow-synced-from:</code> trailer, so it doesn't get deduplicated)</li>
+  </ul>
+
+  <h4>What won't happen</h4>
+  <ul>
+    <li><strong>No infinite loop</strong> &mdash; the forward workflow only triggers for commits with the <code>Shadow-export:</code> trailer, so the rogue commit won't be forwarded to the external repo</li>
+    <li><strong>No data loss</strong> &mdash; your local branch and external repos are unaffected until you explicitly import or export</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h4>Fix &mdash; rogue commit was NOT yet imported into local</h4>
+  <ol>
+    <li>Find the last valid commit on the shadow branch:
+      <pre><code>git fetch origin
+git log origin/shadow/backend/main --oneline
+# Look for the last commit with a Shadow-synced-from: or Shadow-export: trailer</code></pre>
+    </li>
+    <li>Force-push the shadow branch back:
+      <pre><code>git push origin &lt;last-valid-hash&gt;:refs/heads/shadow/backend/main --force</code></pre>
+    </li>
+  </ol>
+
+  <h4>Fix &mdash; rogue commit WAS already imported into local</h4>
+  <ol>
+    <li>Revert the import merge on your local branch:
+      <pre><code>git revert &lt;merge-commit-hash&gt;
+git push origin main</code></pre>
+    </li>
+    <li>Then fix the shadow branch as above:
+      <pre><code>git push origin &lt;last-valid-hash&gt;:refs/heads/shadow/backend/main --force</code></pre>
+    </li>
+  </ol>
+</div>
+
+<div class="card card-orange">
+  <h4>Prevention</h4>
+  <p>Never push directly to <code>shadow/**</code> branches. Use <code>npm run export</code> to push local changes and let CI sync handle external changes. Optionally, set up a <a href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets">GitHub branch ruleset</a> on <code>shadow/**</code> to restrict pushes to specific users or the GitHub Actions bot.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="pat-setup">13. Setting Up Cross-Repo Push Access (PAT)</h2>
 
 <div class="card card-accent">
   <p>Shadow Sync needs one fine-grained PAT for the CI forward workflow to push to external repos (the default <code>GITHUB_TOKEN</code> can only push to the repo the workflow runs in).</p>
@@ -1238,7 +1292,7 @@
 </div>
 
 <!-- ================================================================ -->
-<h2 id="git-commands">13. Git Commands Reference</h2>
+<h2 id="git-commands">14. Git Commands Reference</h2>
 
 <p>Shadow Sync relies on a mix of git <strong>plumbing</strong> (low-level) and <strong>porcelain</strong> (high-level) commands. This section explains every git command used by the system.</p>
 
@@ -1337,7 +1391,7 @@
 </div>
 
 <!-- ================================================================ -->
-<h2 id="security">14. Security Considerations</h2>
+<h2 id="security">15. Security Considerations</h2>
 
 <div class="card card-red">
   <h4>Input validation</h4>
