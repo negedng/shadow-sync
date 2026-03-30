@@ -20,7 +20,7 @@ import * as os from "os";
 import { spawnSync } from "child_process";
 import {
   REMOTES,
-  run, runSafe, runPlain, runSafePlain, refExists,
+  run, runSafe, runPlain, runSafePlain, refExists, appendTrailer,
   getCurrentBranch, shadowBranchName,
   parseShadowIgnore, acquireLock, validateName, die,
 } from "./shadow-common";
@@ -200,7 +200,9 @@ try {
   })();
 
   // Create merge commit (two parents: shadow tip + HEAD)
-  const newCommit = run(["commit-tree", tree, "-p", shadowTip, "-p", headCommit, "-m", message]);
+  // Add trailer so the forward workflow knows this push should be forwarded
+  const finalMessage = appendTrailer(message, "Shadow-export: true");
+  const newCommit = run(["commit-tree", tree, "-p", shadowTip, "-p", headCommit, "-m", finalMessage]);
 
   // Push
   console.log(`Pushing to ${pushOrigin}/${shadowBranch}...`);

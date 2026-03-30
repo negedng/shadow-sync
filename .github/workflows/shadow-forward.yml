@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   forward:
+    # Only forward export commits, not ci-sync mirrored commits
+    if: contains(github.event.head_commit.message, 'Shadow-export:')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
