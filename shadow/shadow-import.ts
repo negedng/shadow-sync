@@ -129,10 +129,14 @@ if (!mergeResult.ok && !mhResult.ok) {
 // only dir/ from the shadow branch. MERGE_HEAD is preserved.
 console.log(`  read-tree HEAD...`);
 runPlain(["read-tree", "HEAD"]);
+console.log(`  cwd=${process.cwd()}`);
 console.log(`  checkout ${shadowRef} -- ${dir}/...`);
-const lsResult = runSafePlain(["ls-tree", "--name-only", shadowRef, "--", `${dir}/`]);
-console.log(`  ls-tree ${shadowRef} -- ${dir}/: ${lsResult.stdout.split("\n").length} files`);
-runPlain(["checkout", shadowRef, "--", `${dir}/`]);
+const coRes = runSafePlain(["checkout", shadowRef, "--", `${dir}/`]);
+console.log(`  checkout exit=${coRes.status} stderr=${coRes.stderr}`);
+if (!coRes.ok) {
+  console.log(`  fallback: trying without trailing slash`);
+  runPlain(["checkout", shadowRef, "--", dir]);
+}
 runPlain(["commit", "--no-edit", "--allow-empty"]);
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
