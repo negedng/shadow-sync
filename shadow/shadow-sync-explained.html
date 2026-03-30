@@ -870,11 +870,11 @@
 <h3 id="fn-pull"><a href="shadow-import.ts">shadow-import.ts</a> &mdash; Local Import Script</h3>
 
 <div class="card">
-  <p><strong>Purpose:</strong> Sync external changes and safely merge them into your local working branch. Triggers CI sync on GitHub first (if <code>EXTERNAL_REPO_TOKEN</code> is set), then merges the shadow branch so only <code>dir/</code> files are affected.</p>
+  <p><strong>Purpose:</strong> Sync external changes and safely merge them into your local working branch. Runs ci-sync locally to fetch and replay external commits, then merges the shadow branch so only <code>dir/</code> files are affected. No token needed.</p>
 
   <h4>How it works:</h4>
   <ol>
-    <li><strong>Trigger CI sync</strong> &mdash; calls the GitHub API to dispatch the Shadow Sync workflow (external &rarr; shadow). Waits ~20 seconds for it to complete. Skipped if <code>EXTERNAL_REPO_TOKEN</code> is not set or <code>--no-sync</code> is passed.</li>
+    <li><strong>Local sync</strong> &mdash; stashes the working tree, runs <code>shadow-ci-sync.ts</code> locally to fetch from external remotes and replay new commits into shadow branches, then restores the original branch and pops the stash. Skipped with <code>--no-sync</code>.</li>
     <li><strong>Fetch</strong> the latest shadow branch from origin</li>
     <li><strong>Check if up to date</strong> &mdash; if shadow is already an ancestor of HEAD, nothing to do</li>
     <li><strong>Merge with <code>--no-commit</code></strong> &mdash; merges the shadow branch but stops before committing, so we can fix the index</li>
@@ -976,8 +976,8 @@
 </div>
 
 <div class="card card-red">
-  <h4>CI only &mdash; do not run locally</h4>
-  <p>This script uses <code>git checkout</code> to switch between shadow branches in the working tree. In CI this is safe because the runner starts clean and is discarded afterward. <strong>Running it locally will switch your checkout away from your working branch</strong>, and any untracked or modified files that conflict with the shadow branch will cause errors or be overwritten. If you need to trigger a sync manually, use the GitHub Actions <em>workflow_dispatch</em> trigger (the "Run workflow" button in the Actions tab) rather than running the script directly.</p>
+  <h4>Designed for CI, but safe to run locally via <code>npm run import</code></h4>
+  <p>This script uses <code>git checkout</code> to switch between shadow branches in the working tree. In CI this is safe because the runner starts clean. When run locally via <code>shadow-import.ts</code>, the import script handles stashing the working tree beforehand and restoring the original branch + working tree afterward. <strong>Do not run <code>shadow-ci-sync.ts</code> directly</strong> &mdash; use <code>npm run import</code> which wraps it safely.</p>
 </div>
 
 <hr>
@@ -1145,7 +1145,7 @@
   <tr><td><code>-r</code></td><td><code>--remote</code></td><td>Remote name (selects config entry)</td><td>First entry in config</td></tr>
   <tr><td><code>-d</code></td><td><code>--dir</code></td><td>Local subdirectory</td><td>Inferred from remote config</td></tr>
   <tr><td><code>-b</code></td><td><code>--branch</code></td><td>Branch</td><td>Your current local branch</td></tr>
-  <tr><td></td><td><code>--no-sync</code></td><td>Skip triggering CI sync (just pull current shadow state)</td><td>Off</td></tr>
+  <tr><td></td><td><code>--no-sync</code></td><td>Skip local sync (just merge current shadow state from origin)</td><td>Off</td></tr>
   <tr><td><code>-h</code></td><td><code>--help</code></td><td>Show usage help</td><td>&mdash;</td></tr>
 </table>
 
@@ -1175,15 +1175,11 @@
 <h2 id="pat-setup">12. Setting Up Cross-Repo Push Access (PAT)</h2>
 
 <div class="card card-accent">
-  <p>Shadow Sync needs two types of API access that the default <code>GITHUB_TOKEN</code> doesn't provide:</p>
-  <ul>
-    <li><strong>CI forward</strong> needs to push to external repos (the default token can only push to the repo the workflow runs in)</li>
-    <li><strong><code>npm run import</code></strong> needs to trigger the sync workflow via the GitHub API (requires Actions permission)</li>
-  </ul>
-  <p>We recommend <strong>two separate fine-grained PATs</strong> with minimal scope. If one leaks, the blast radius is limited. You can also use a single token with both permissions if you prefer.</p>
+  <p>Shadow Sync needs one fine-grained PAT for the CI forward workflow to push to external repos (the default <code>GITHUB_TOKEN</code> can only push to the repo the workflow runs in).</p>
+  <p>No local token is needed &mdash; <code>npm run import</code> runs ci-sync locally using your git remotes, which already have access.</p>
 </div>
 
-<h3>Token 1: CI Forward (pushes to external repos)</h3>
+<h3>CI Forward Token (pushes to external repos)</h3>
 
 <div class="card">
   <h4>Create the token:</h4>
@@ -1219,58 +1215,19 @@
   <p>The forward workflow is already configured to use this secret.</p>
 </div>
 
-<h3>Token 2: Local Sync Trigger (triggers CI sync from <code>npm run import</code>)</h3>
-
-<div class="card">
-  <h4>Create the token:</h4>
-  <ol>
-    <li>Same steps as above, but with different scope:
-      <table>
-        <tr><th>Field</th><th>Value</th></tr>
-        <tr><td>Token name</td><td><code>shadow-sync-trigger</code></td></tr>
-        <tr><td>Repository access</td><td><strong>Only select repositories</strong> &rarr; select the <strong>internal repo only</strong> (e.g. <code>test-main</code>)</td></tr>
-      </table>
-    </li>
-    <li>Under <strong>Permissions &rarr; Repository permissions</strong>, set:
-      <table>
-        <tr><th>Permission</th><th>Level</th><th>Why</th></tr>
-        <tr><td>Actions</td><td><strong>Read and write</strong></td><td>Trigger the sync workflow via API</td></tr>
-      </table>
-    </li>
-    <li>Click <strong>Generate token</strong> and copy it.</li>
-  </ol>
-
-  <h4>Set as local environment variable:</h4>
-  <pre><code># Linux/macOS (add to ~/.bashrc or ~/.zshrc)
-export EXTERNAL_REPO_TOKEN=github_pat_...
-
-# PowerShell (create $PROFILE if it doesn't exist, then add)
-$env:EXTERNAL_REPO_TOKEN = "github_pat_..."</code></pre>
-  <p>If not set, <code>npm run import</code> still works &mdash; it just skips the sync trigger and pulls whatever the shadow branch currently has.</p>
-</div>
-
-<div class="card card-orange">
-  <h4>Single token alternative</h4>
-  <p>If you prefer one token, create it with all repos selected (<code>test-main</code> + external repos) and both permissions (Contents: Read and write + Actions: Read and write). Use it for both the repository secret and the local env var. The trade-off: if it leaks, the attacker can push to your external repos <em>and</em> trigger workflows.</p>
-</div>
-
 <div class="note">
-  Fine-grained tokens expire. When a token expires, either the forward workflow will fail (Token 1) or <code>npm run import</code> will skip the sync trigger (Token 2). Generate new tokens and update the secret / env var. Consider setting a calendar reminder a few days before expiration.
+  Fine-grained tokens expire. When your token expires, the forward workflow will start failing. Generate a new token and update the <code>EXTERNAL_REPO_TOKEN</code> secret. Consider setting a calendar reminder for a few days before expiration.
 </div>
 
 <h3>Verify It Works</h3>
 
 <div class="card">
   <ol>
-    <li>Run <code>npm run import -- -r frontend</code> &mdash; should show "Triggering CI sync..." if the local token is set</li>
+    <li>Run <code>npm run import -- -r frontend</code> &mdash; should show "Running local sync..." and fetch external changes</li>
     <li>Make a change under <code>frontend/</code>, commit, run <code>npm run export -- -r frontend</code></li>
     <li>Check the <strong>Actions</strong> tab &mdash; the <strong>Shadow Forward</strong> workflow should trigger and push to the external repo</li>
     <li>Verify the change appears on the external repo</li>
   </ol>
-</div>
-
-<div class="note">
-  Fine-grained tokens expire. When your token expires, the forward workflow will start failing silently (the push step will error). Generate a new token and update the <code>EXTERNAL_REPO_TOKEN</code> secret. Consider setting a calendar reminder for a few days before expiration.
 </div>
 
 <div class="card card-orange">

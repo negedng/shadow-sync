@@ -87,7 +87,7 @@ Requires an `EXTERNAL_REPO_TOKEN` secret (a fine-grained PAT with Contents: Read
 | `-r` | Remote name | First entry in config |
 | `-d` | Local subdirectory | Inferred from remote config |
 | `-b` | Branch | Current local branch |
-| `--no-sync` | Skip triggering CI sync | |
+| `--no-sync` | Skip local sync (just merge current shadow state from origin) | |
 
 **shadow-export:**
 
@@ -167,7 +167,7 @@ All shadow sync scripts live in the `shadow/` directory:
 | `shadow/shadow-config.json` | Remotes, trailers, git config overrides, limits |
 | `shadow/shadow-common.ts` | Shared config, git helpers, replay engine, lockfile |
 | `shadow/shadow-setup.ts` | Bootstrap: records seed so CI sync skips existing history |
-| `shadow/shadow-import.ts` | Safely merges shadow branch into local (only `dir/` affected) |
+| `shadow/shadow-import.ts` | Runs ci-sync locally, then safely merges shadow branch into local (only `dir/` affected) |
 | `shadow/shadow-export.ts` | Exports local changes to shadow branch using git plumbing (with `.shadowignore` filtering) |
 | `shadow/shadow-ci-sync.ts` | CI: replays external commits into shadow branches |
 | `shadow/shadow-ci-forward.ts` | CI: forwards shadow branch content to external remotes using git plumbing |
