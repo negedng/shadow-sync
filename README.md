@@ -76,7 +76,7 @@ Runs on a cron schedule (every 15 minutes requested, but GitHub may delay runs �
 
 ### Shadow Forward — `.github/workflows/shadow-forward.yml`
 
-Triggers on push to `shadow/**` branches. Uses git plumbing (`git read-tree` + `git commit-tree`) to build a commit with the `{dir}/` content at root level (stripping the prefix) and pushes to the external remote.
+Triggers on push to `shadow/**` branches, but only runs for export commits (checks for `Shadow-export:` trailer — ci-sync commits are skipped). Uses git plumbing (`git read-tree` + `git commit-tree`) to build a commit with the `{dir}/` content at root level (stripping the prefix) and pushes to the external remote.
 
 Requires an `EXTERNAL_REPO_TOKEN` secret (a fine-grained PAT with Contents: Read and write access to the external repos). See the [PAT setup section in the technical docs](shadow/shadow-sync-explained.html#pat-setup) for step-by-step instructions.
 

@@ -477,7 +477,7 @@
   </div>
   <div class="flow-step">
     <div class="flow-num">5</div>
-    <div><strong>CI forward triggers automatically.</strong> The push to <code>shadow/**</code> triggers <a href=".github/workflows/shadow-forward.yml"><code>shadow-forward.yml</code></a>, which runs <a href="#fn-ci-forward"><code>shadow-ci-forward.ts</code></a>. It strips the <code>backend/</code> prefix and pushes the files to the external remote.</div>
+    <div><strong>CI forward triggers automatically.</strong> The push to <code>shadow/**</code> triggers <a href=".github/workflows/shadow-forward.yml"><code>shadow-forward.yml</code></a>, which checks for the <code>Shadow-export:</code> trailer (only export commits are forwarded, not ci-sync mirrors). It runs <a href="#fn-ci-forward"><code>shadow-ci-forward.ts</code></a>, which strips the <code>backend/</code> prefix and pushes the files to the external remote.</div>
   </div>
 </div>
 
@@ -640,7 +640,7 @@
   </div>
   <div class="card card-orange">
     <h4>shadow-forward.yml &mdash; "Push"</h4>
-    <p><strong>Trigger:</strong> Push to any <code>shadow/**</code> branch</p>
+    <p><strong>Trigger:</strong> Push to any <code>shadow/**</code> branch, but only for export commits (checks for <code>Shadow-export:</code> trailer in the commit message &mdash; ci-sync commits are skipped)</p>
     <p><strong>What it does:</strong></p>
     <ol>
       <li>Checks out repo with full history and <code>persist-credentials: false</code> (disables the default credential helper so the PAT is used instead)</li>
@@ -912,7 +912,7 @@
     <li><strong>Compare tree against shadow branch's tree</strong> &mdash; if <code>git rev-parse shadowRef^{tree}</code> matches, exit with "no changes"</li>
     <li><strong>Show diff</strong> with <code>git diff-tree --stat</code> so the user sees what will be exported</li>
     <li><strong>Auto-generate commit message</strong> if none provided &mdash; lists commit subjects since the last export (e.g. <code>Export backend/ (2 commits)\n- Add logger\n- Add config</code>)</li>
-    <li><strong><code>git commit-tree</code></strong> with two parents (shadow tip + HEAD) &mdash; creates a proper merge commit without an actual merge operation</li>
+    <li><strong><code>git commit-tree</code></strong> with two parents (shadow tip + HEAD) &mdash; creates a proper merge commit without an actual merge operation. Adds a <code>Shadow-export: true</code> trailer so the forward workflow knows to forward this commit (ci-sync commits don't have this trailer and are skipped).</li>
     <li><strong>Push to origin</strong> &mdash; if rejected (non-fast-forward), the user must merge the shadow branch and retry</li>
     <li><strong>Cleanup</strong> &mdash; delete the temp index file</li>
   </ol>
