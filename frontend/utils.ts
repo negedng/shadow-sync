@@ -1,1 +1,1 @@
-// Frontend utilities\nexport function formatDate(d: Date) {\n  return d.toISOString().split('T')[0];\n}
+// Frontend utilities\nexport function formatDate(d: Date) {\n  return d.toISOString().split('T')[0];\n}\n\n// Cross-edit test: frontend ping helper\nexport function ping() {\n  return fetch('/api/ping').then(r => r.json());\n}
