@@ -1,0 +1,23 @@
+{
+  "remotes": [
+    { "remote": "backend",  "dir": "backend",  "url": "https://github.com/negedng/test-backend.git"  },
+    { "remote": "frontend", "dir": "frontend", "url": "https://github.com/negedng/test-frontend.git" }
+  ],
+
+  "trailers": {
+    "sync": "Shadow-synced-from",
+    "seed": "Shadow-seed"
+  },
+
+  "gitConfigOverrides": {
+    "core.autocrlf": "false",
+    "core.safecrlf": "false",
+    "core.precomposeunicode": "true",
+    "core.quotepath": "false"
+  },
+
+  "maxBuffer": 52428800,
+  "maxDirDepth": 100,
+  "maxPushRetries": 3,
+  "shadowBranchPrefix": "shadow"
+}
