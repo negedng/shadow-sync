@@ -1,1 +1,1 @@
-// Frontend utilities\nexport function formatDate(d: Date) {\n  return d.toISOString().split('T')[0];\n}
+// Frontend utilities\nexport function formatDate(d: Date) {\n  return d.toISOString().split('T')[0];\n}\n\n// Auto-shadow test: frontend version helper\nexport function getVersion() {\n  return fetch('/api/version').then(r => r.json());\n}
