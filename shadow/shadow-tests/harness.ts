@@ -307,7 +307,7 @@ export function runCiForward(env: TestEnv, remote?: RemoteInfo): RunResult {
 /** Run shadow-export.ts — local filtered export to shadow branch. */
 export function runExport(env: TestEnv, message: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
   const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, ...extraArgs], localEnv(env));
+  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, "--no-sync", ...extraArgs], localEnv(env));
 }
 
 /** Alias for runExport. */
