@@ -1,0 +1,40 @@
+name: Shadow Forward
+
+on:
+  push:
+    branches:
+      - 'shadow/**'
+
+concurrency:
+  group: shadow-forward-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    # Only forward export commits, not ci-sync mirrored commits
+    if: contains(github.event.head_commit.message, 'Shadow-export:')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Don't persist credentials — we use our own PAT for external pushes
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm --prefix shadow ci
+
+      - name: Configure git
+        run: |
+          git config --global user.name "Shadow Sync"
+          git config --global user.email "shadow-sync@users.noreply.github.com"
+          git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Forward to external remote
+        run: npx --prefix shadow tsx shadow/shadow-ci-forward.ts
