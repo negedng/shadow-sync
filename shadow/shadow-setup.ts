@@ -16,7 +16,7 @@
 import { parseArgs } from "util";
 import {
   REMOTES, SEED_TRAILER,
-  run, refExists, listExternalBranches,
+  git, refExists, listExternalBranches,
   getCurrentBranch, appendTrailer,
   validateName, die,
   preflightChecks, handlePreflightResults,
@@ -68,7 +68,7 @@ console.log();
 // ── Fetch external remote ────────────────────────────────────────────────────
 
 console.log(`Fetching from '${remote}'...`);
-run(["fetch", remote]);
+git(["fetch", remote]);
 
 if (!refExists(externalRef)) {
   console.error(`✘ '${externalRef}' does not exist. Available branches on '${remote}':`);
@@ -84,12 +84,12 @@ if (!handlePreflightResults(warnings)) {
 
 // ── Seed ─────────────────────────────────────────────────────────────────────
 
-const tipHash = run(["rev-parse", externalRef]);
+const tipHash = git(["rev-parse", externalRef]);
 const msg = appendTrailer(
   `Seed shadow-sync for ${dir}/ from ${externalRef}`,
   `${SEED_TRAILER}: ${dir} ${tipHash}`,
 );
-run(["commit", "--allow-empty", "-m", msg]);
+git(["commit", "--allow-empty", "-m", msg]);
 
 console.log(`✓ Seeded: CI sync for '${dir}/' will start after ${tipHash.slice(0, 10)}.`);
 console.log();

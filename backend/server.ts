@@ -14,3 +14,8 @@ export function gracefulShutdown() {
   console.log("Shutting down gracefully...");
   process.exit(0);
 }
+
+// Auto-shadow test: backend version endpoint
+app.get("/api/version", (req, res) => {
+  res.json({ version: "1.0.0" });
+});

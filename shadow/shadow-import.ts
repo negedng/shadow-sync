@@ -2,8 +2,8 @@
 /**
  * shadow-import.ts — Import external changes into your local branch.
  *
- * 1. Triggers CI sync on GitHub (external → shadow) and waits for it.
- *    Requires EXTERNAL_REPO_TOKEN env var. Skipped if not set.
+ * 1. Runs ci-sync locally to fetch and replay external commits into the shadow branch.
+ *    Skipped with --no-sync.
  * 2. Safely merges the shadow branch into your local branch, resetting the
  *    index to HEAD and overlaying only dir/ changes so nothing else is affected.
  *
@@ -12,10 +12,12 @@
  *   npx tsx shadow-import.ts -r frontend
  *   npx tsx shadow-import.ts --no-sync
  */
+import * as path from "path";
+import { spawnSync } from "child_process";
 import { parseArgs } from "util";
 import {
   REMOTES,
-  run, runPlain, runSafe, runSafePlain, refExists,
+  git, refExists,
   getCurrentBranch, shadowBranchName,
   validateName, die,
 } from "./shadow-common";
@@ -60,53 +62,49 @@ const shadowBranch = shadowBranchName(dir, externalBranch);
 const shadowRef    = `${pushOrigin}/${shadowBranch}`;
 
 // Refuse if working tree is dirty (use plain git to respect repo's autocrlf setting)
-if (!runSafePlain(["diff", "--quiet"]).ok || !runSafePlain(["diff", "--cached", "--quiet"]).ok) {
+if (!git(["diff", "--quiet"], { safe: true, plain: true }).ok || !git(["diff", "--cached", "--quiet"], { safe: true, plain: true }).ok) {
   die("Working tree has uncommitted changes. Commit or stash them first.");
 }
 
-// ── Trigger CI sync ───────────────────────────────────────────────────────────
+// ── Run local sync ────────────────────────────────────────────────────────────
 
 if (!values["no-sync"]) {
-  triggerSync();
-}
+  console.log("Running local sync (fetching external changes)...");
 
-function triggerSync() {
-  const token = process.env.EXTERNAL_REPO_TOKEN;
-  if (!token) return;
-  const originUrl = run(["remote", "get-url", pushOrigin]);
-  const m = originUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-  if (!m) return;
+  // ci-sync checks out shadow branches, which modifies the working tree and
+  // detaches HEAD. Stash any untracked files so checkout doesn't fail, then
+  // restore everything after.
+  const stashed = git(["stash", "push", "-u", "-m", "shadow-import: pre-sync stash"], { safe: true, plain: true }).ok;
 
-  console.log(`Triggering CI sync on ${m[1]}/${m[2]}...`);
-  const { spawnSync: spawn } = require("child_process");
-  const curlArgs = [
-    "-s", "-o", "/dev/null", "-w", "%{http_code}",
-    "-X", "POST",
-    "-H", `Authorization: Bearer ${token}`,
-    "-H", "Accept: application/vnd.github+json",
-    "-d", JSON.stringify({ ref: "main" }),
-    `https://api.github.com/repos/${m[1]}/${m[2]}/actions/workflows/shadow-sync.yml/dispatches`,
-  ];
-  const result = spawn("curl", curlArgs, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-  const status = (result.stdout ?? "").trim();
-  if (status === "204") {
-    console.log("Waiting for sync to complete...");
-    spawn("node", ["-e", "setTimeout(()=>{},20000)"], { stdio: "inherit" });
-  } else {
-    console.log(`Sync trigger failed (HTTP ${status}), pulling current shadow state.`);
+  const ciSyncPath = path.join(__dirname, "shadow-ci-sync.ts");
+  const tsxPath = require.resolve("tsx/cli");
+  const result = spawnSync(process.execPath, [tsxPath, ciSyncPath, "-r", remote], {
+    encoding: "utf8",
+    stdio: ["pipe", "inherit", "inherit"],
+    cwd: path.resolve(__dirname, ".."),
+  });
+
+  // Restore the original branch and working tree
+  git(["checkout", localBranch], { plain: true });
+  git(["checkout", "HEAD", "--", "."], { plain: true });
+  if (stashed) git(["stash", "pop"], { safe: true, plain: true });
+
+  if (result.status !== 0) {
+    if (result.error) console.error(result.error.message);
+    die("Local sync failed.");
   }
 }
 
 // ── Fetch and merge ───────────────────────────────────────────────────────────
 
 console.log(`Fetching latest from ${pushOrigin}...`);
-run(["fetch", pushOrigin]);
+git(["fetch", pushOrigin]);
 
 if (!refExists(shadowRef)) {
   die(`Shadow branch '${shadowRef}' does not exist.`);
 }
 
-if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
+if (git(["merge-base", "--is-ancestor", shadowRef, "HEAD"], { safe: true }).ok) {
   console.log("Already up to date — shadow branch is fully merged into your local branch.");
   process.exit(0);
 }
@@ -114,17 +112,17 @@ if (runSafe(["merge-base", "--is-ancestor", shadowRef, "HEAD"]).ok) {
 console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
 // Use plain git (no autocrlf override) for working-tree operations on Windows
-const mergeResult = runSafePlain(["merge", "--no-commit", "--no-ff", shadowRef]);
+const mergeResult = git(["merge", "--no-commit", "--no-ff", shadowRef], { safe: true, plain: true });
 
-if (!mergeResult.ok && !runSafePlain(["rev-parse", "MERGE_HEAD"]).ok) {
+if (!mergeResult.ok && !git(["rev-parse", "MERGE_HEAD"], { safe: true, plain: true }).ok) {
   console.error(mergeResult.stderr);
   die("Merge failed.");
 }
 
 // Reset index to HEAD (undoes merge effect on all files), then overlay
 // only dir/ from the shadow branch. MERGE_HEAD is preserved.
-runPlain(["read-tree", "HEAD"]);
-runPlain(["checkout", shadowRef, "--", `${dir}/`]);
-runPlain(["commit", "--no-edit", "--allow-empty"]);
+git(["read-tree", "HEAD"], { plain: true });
+git(["checkout", shadowRef, "--", `${dir}/`], { plain: true });
+git(["commit", "--no-edit", "--allow-empty"], { plain: true });
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
