@@ -20,3 +20,6 @@ app.get("/api/version", (req, res) => {
   res.json({ version: "1.0.0" });
 });
 // External author test 1774957073
+
+// External: add /api/status endpoint
+app.get("/api/status", (req, res) => res.json({ status: "ok" }));
