@@ -19,10 +19,3 @@ export function gracefulShutdown() {
 app.get("/api/version", (req, res) => {
   res.json({ version: "1.0.0" });
 });
-
-
-// Local: add /api/ping endpoint
-app.get("/api/ping", (req, res) => res.json({ pong: true }));
-
-// External: add /api/status endpoint
-app.get("/api/status", (req, res) => res.json({ status: "ok" }));
