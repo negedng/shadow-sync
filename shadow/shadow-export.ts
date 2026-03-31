@@ -112,8 +112,8 @@ if (!values["no-sync"]) {
     cwd: path.resolve(__dirname, ".."),
   });
 
-  git(["checkout", localBranch], { plain: true });
-  git(["checkout", "HEAD", "--", "."], { plain: true });
+  // Use checkout -f to force-restore files deleted by ci-sync's branch switching.
+  git(["checkout", "-f", localBranch], { plain: true });
   if (stashed) git(["stash", "pop"], { safe: true, plain: true });
 
   if (result.status !== 0) {
