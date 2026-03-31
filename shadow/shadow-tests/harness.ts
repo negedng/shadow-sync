@@ -86,7 +86,7 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   const scriptDir = path.resolve(__dirname, "..");
   const scripts = [
     "shadow-common.ts", "shadow-ci-sync.ts", "shadow-ci-forward.ts",
-    "shadow-export.ts", "shadow-config.json",
+    "shadow-export.ts", "shadow-import.ts", "shadow-config.json",
   ];
   for (const f of scripts) {
     fs.copyFileSync(path.join(scriptDir, f), path.join(localRepo, f));
@@ -312,6 +312,12 @@ export function runExport(env: TestEnv, message: string, extraArgs: string[] = [
 
 /** Alias for runExport. */
 export const runPush = runExport;
+
+/** Run shadow-import.ts — merge shadow branch changes into local working branch. */
+export function runImport(env: TestEnv, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
+  const name = remote?.remoteName ?? env.remoteName;
+  return runScript(env, "shadow-import.ts", ["-r", name, "--no-sync", ...extraArgs], localEnv(env));
+}
 
 /** Pull latest from bare remote into the remote working copy. */
 export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {

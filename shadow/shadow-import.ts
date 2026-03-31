@@ -119,10 +119,31 @@ if (!mergeResult.ok && !git(["rev-parse", "MERGE_HEAD"], { safe: true, plain: tr
   die("Merge failed.");
 }
 
-// Reset index to HEAD (undoes merge effect on all files), then overlay
-// only dir/ from the shadow branch. MERGE_HEAD is preserved.
-git(["read-tree", "HEAD"], { plain: true });
-git(["checkout", shadowRef, "--", `${dir}/`], { plain: true });
+// Undo merge changes for files outside dir/ — only dir/ should be affected.
+// Get list of files changed by the merge outside the target directory.
+const changedFiles = git(["diff", "--cached", "--name-only", "HEAD"], { safe: true, plain: true });
+if (changedFiles.ok && changedFiles.stdout) {
+  const outsideFiles = changedFiles.stdout.split("\n").filter(f => f && !f.startsWith(`${dir}/`));
+  if (outsideFiles.length > 0) {
+    // Restore non-dir files back to HEAD state
+    git(["checkout", "HEAD", "--", ...outsideFiles], { plain: true });
+  }
+}
+
+// Check if there are merge conflicts in dir/
+const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { safe: true, plain: true });
+if (conflicts.ok && conflicts.stdout) {
+  const dirConflicts = conflicts.stdout.split("\n").filter(f => f && f.startsWith(`${dir}/`));
+  if (dirConflicts.length > 0) {
+    console.log(`\n⚠ Merge conflicts in ${dir}/:\n`);
+    for (const f of dirConflicts) {
+      console.log(`  ${f}`);
+    }
+    console.log(`\nResolve conflicts, then run: git add <files> && git commit --no-edit`);
+    process.exit(1);
+  }
+}
+
 git(["commit", "--no-edit", "--allow-empty"], { plain: true });
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
