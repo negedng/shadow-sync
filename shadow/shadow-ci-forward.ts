@@ -43,6 +43,7 @@ if (slashIdx === -1) {
 const dir = rest.slice(0, slashIdx);
 const externalBranch = rest.slice(slashIdx + 1);
 validateName(dir, "Directory");
+validateName(externalBranch, "External branch");
 
 // Find the matching remote config entry
 const remoteEntry = REMOTES.find(r => r.dir === dir);

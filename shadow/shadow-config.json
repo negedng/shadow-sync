@@ -19,6 +19,5 @@
 
   "maxBuffer": 52428800,
   "maxDirDepth": 100,
-  "maxPushRetries": 3,
   "shadowBranchPrefix": "shadow"
 }

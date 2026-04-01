@@ -21,7 +21,6 @@ interface ShadowSyncConfig {
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
   maxDirDepth: number;
-  maxPushRetries: number;
   shadowBranchPrefix: string;
 }
 
@@ -40,7 +39,6 @@ function loadConfig(): ShadowSyncConfig {
     gitConfigOverrides: (doc.gitConfigOverrides as Record<string, string>) ?? {},
     maxBuffer:          (doc.maxBuffer as number) ?? 50 * 1024 * 1024,
     maxDirDepth:        (doc.maxDirDepth as number) ?? 100,
-    maxPushRetries:     (doc.maxPushRetries as number) ?? 3,
     shadowBranchPrefix: (doc.shadowBranchPrefix as string) ?? "shadow",
   };
 }

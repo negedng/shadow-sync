@@ -27,6 +27,7 @@ const { values } = parseArgs({
     remote:    { type: "string",  short: "r" },
     dir:       { type: "string",  short: "d" },
     branch:    { type: "string",  short: "b" },
+    "dry-run": { type: "boolean", short: "n" },
     "no-sync": { type: "boolean" },
     help:      { type: "boolean", short: "h" },
   },
@@ -34,10 +35,11 @@ const { values } = parseArgs({
 });
 
 if (values.help) {
-  console.log("Usage: shadow-import.ts [-r remote] [-d dir] [-b branch] [--no-sync]");
+  console.log("Usage: shadow-import.ts [-r remote] [-d dir] [-b branch] [-n] [--no-sync]");
   console.log("  -r         Remote name                          (default: first entry in REMOTES)");
   console.log("  -d         Local subdirectory                   (default: inferred from remote config)");
   console.log("  -b         Branch                               (default: your current branch)");
+  console.log("  -n         Dry run — show what would change without merging");
   console.log("  --no-sync  Skip triggering CI sync");
   process.exit(0);
 }
@@ -51,6 +53,7 @@ if (values.remote && !remoteEntry) {
   die(`Remote '${values.remote}' not found in REMOTES. Add it to shadow-config.json.`);
 }
 
+const dryRun = values["dry-run"] ?? false;
 const remote = values.remote ?? remoteEntry!.remote;
 const dir    = values.dir    ?? remoteEntry!.dir;
 const externalBranch = values.branch ?? localBranch;
@@ -106,6 +109,13 @@ if (!refExists(shadowRef)) {
 
 if (git(["merge-base", "--is-ancestor", shadowRef, "HEAD"], { safe: true }).ok) {
   console.log("Already up to date — shadow branch is fully merged into your local branch.");
+  process.exit(0);
+}
+
+if (dryRun) {
+  console.log(`\nChanges that would be imported into ${dir}/:`);
+  console.log(git(["diff", "--stat", `HEAD...${shadowRef}`, "--", `${dir}/`]));
+  console.log("\n[DRY RUN] No changes were imported.");
   process.exit(0);
 }
 

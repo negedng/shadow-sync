@@ -106,6 +106,20 @@ for (const { remote, dir, url } of remotesToSync) {
     // Return to detached HEAD so we can check out the next shadow branch
     git(["checkout", "--detach"], { safe: true });
   }
+
+  // Detect stale shadow branches (remote branch was deleted but shadow/ remains)
+  const shadowPrefix = `origin/${shadowBranchName(dir, "")}`;
+  const allShadow = git(["branch", "-r"])
+    .split("\n").map(l => l.trim())
+    .filter(l => l.startsWith(shadowPrefix));
+  const activeBranches = new Set(branches.map(b => `origin/${shadowBranchName(dir, b)}`));
+  const stale = allShadow.filter(s => !activeBranches.has(s));
+  if (stale.length > 0) {
+    console.log(`\n⚠ Stale shadow branches (remote branch deleted from '${remote}'):`);
+    for (const s of stale) {
+      console.log(`  ${s}  →  git push origin --delete ${s.replace("origin/", "")}`);
+    }
+  }
 }
 
 if (failed > 0) {
