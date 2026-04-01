@@ -27,6 +27,7 @@ const { values } = parseArgs({
     remote:    { type: "string",  short: "r" },
     dir:       { type: "string",  short: "d" },
     branch:    { type: "string",  short: "b" },
+    "dry-run": { type: "boolean", short: "n" },
     "no-sync": { type: "boolean" },
     help:      { type: "boolean", short: "h" },
   },
@@ -34,10 +35,11 @@ const { values } = parseArgs({
 });
 
 if (values.help) {
-  console.log("Usage: shadow-import.ts [-r remote] [-d dir] [-b branch] [--no-sync]");
+  console.log("Usage: shadow-import.ts [-r remote] [-d dir] [-b branch] [-n] [--no-sync]");
   console.log("  -r         Remote name                          (default: first entry in REMOTES)");
   console.log("  -d         Local subdirectory                   (default: inferred from remote config)");
   console.log("  -b         Branch                               (default: your current branch)");
+  console.log("  -n         Dry run — show what would change without merging");
   console.log("  --no-sync  Skip triggering CI sync");
   process.exit(0);
 }
@@ -51,6 +53,7 @@ if (values.remote && !remoteEntry) {
   die(`Remote '${values.remote}' not found in REMOTES. Add it to shadow-config.json.`);
 }
 
+const dryRun = values["dry-run"] ?? false;
 const remote = values.remote ?? remoteEntry!.remote;
 const dir    = values.dir    ?? remoteEntry!.dir;
 const externalBranch = values.branch ?? localBranch;
@@ -84,9 +87,9 @@ if (!values["no-sync"]) {
     cwd: path.resolve(__dirname, ".."),
   });
 
-  // Restore the original branch and working tree
-  git(["checkout", localBranch], { plain: true });
-  git(["checkout", "HEAD", "--", "."], { plain: true });
+  // Restore the original branch and working tree.
+  // Use checkout -f to force-restore files deleted by ci-sync's branch switching.
+  git(["checkout", "-f", localBranch], { plain: true });
   if (stashed) git(["stash", "pop"], { safe: true, plain: true });
 
   if (result.status !== 0) {
@@ -109,6 +112,13 @@ if (git(["merge-base", "--is-ancestor", shadowRef, "HEAD"], { safe: true }).ok) 
   process.exit(0);
 }
 
+if (dryRun) {
+  console.log(`\nChanges that would be imported into ${dir}/:`);
+  console.log(git(["diff", "--stat", `HEAD...${shadowRef}`, "--", `${dir}/`]));
+  console.log("\n[DRY RUN] No changes were imported.");
+  process.exit(0);
+}
+
 console.log(`Merging ${shadowRef} into ${localBranch}...`);
 
 // Use plain git (no autocrlf override) for working-tree operations on Windows
@@ -119,10 +129,31 @@ if (!mergeResult.ok && !git(["rev-parse", "MERGE_HEAD"], { safe: true, plain: tr
   die("Merge failed.");
 }
 
-// Reset index to HEAD (undoes merge effect on all files), then overlay
-// only dir/ from the shadow branch. MERGE_HEAD is preserved.
-git(["read-tree", "HEAD"], { plain: true });
-git(["checkout", shadowRef, "--", `${dir}/`], { plain: true });
+// Undo merge changes for files outside dir/ — only dir/ should be affected.
+// Get list of files changed by the merge outside the target directory.
+const changedFiles = git(["diff", "--cached", "--name-only", "HEAD"], { safe: true, plain: true });
+if (changedFiles.ok && changedFiles.stdout) {
+  const outsideFiles = changedFiles.stdout.split("\n").filter(f => f && !f.startsWith(`${dir}/`));
+  if (outsideFiles.length > 0) {
+    // Restore non-dir files back to HEAD state
+    git(["checkout", "HEAD", "--", ...outsideFiles], { plain: true });
+  }
+}
+
+// Check if there are merge conflicts in dir/
+const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { safe: true, plain: true });
+if (conflicts.ok && conflicts.stdout) {
+  const dirConflicts = conflicts.stdout.split("\n").filter(f => f && f.startsWith(`${dir}/`));
+  if (dirConflicts.length > 0) {
+    console.log(`\n⚠ Merge conflicts in ${dir}/:\n`);
+    for (const f of dirConflicts) {
+      console.log(`  ${f}`);
+    }
+    console.log(`\nResolve conflicts, then run: git add <files> && git commit --no-edit`);
+    process.exit(1);
+  }
+}
+
 git(["commit", "--no-edit", "--allow-empty"], { plain: true });
 
 console.log(`\n\u2713 Done. Merged ${shadowRef} into ${localBranch} (only '${dir}/' was affected).`);
