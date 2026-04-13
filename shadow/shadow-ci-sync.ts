@@ -40,6 +40,11 @@ for (const { remote, dir, url } of remotesToSync) {
   validateName(remote, "Remote name");
   validateName(dir, "Directory");
 
+  if (!url) {
+    console.error(`⚠ No URL for remote '${remote}'. Add url to shadow-config.json. Skipping.`);
+    continue;
+  }
+
   // Add or update the git remote
   const existing = git(["remote", "get-url", remote], { safe: true });
   if (!existing.ok) {
@@ -48,11 +53,11 @@ for (const { remote, dir, url } of remotesToSync) {
     git(["remote", "set-url", remote, url]);
   }
 
-  // Fetch from external remote
+  // 3. Fetch from external remote
   console.log(`\n══ Fetching from '${remote}' ══`);
   git(["fetch", remote]);
 
-  // Process each branch on the remote
+  // 4. Process each branch on the remote
   const branches = listExternalBranches(remote);
   if (branches.length === 0) {
     console.log(`  No branches found on '${remote}'.`);
@@ -105,20 +110,6 @@ for (const { remote, dir, url } of remotesToSync) {
 
     // Return to detached HEAD so we can check out the next shadow branch
     git(["checkout", "--detach"], { safe: true });
-  }
-
-  // Detect stale shadow branches (remote branch was deleted but shadow/ remains)
-  const shadowPrefix = `origin/${shadowBranchName(dir, "")}`;
-  const allShadow = git(["branch", "-r"])
-    .split("\n").map(l => l.trim())
-    .filter(l => l.startsWith(shadowPrefix));
-  const activeBranches = new Set(branches.map(b => `origin/${shadowBranchName(dir, b)}`));
-  const stale = allShadow.filter(s => !activeBranches.has(s));
-  if (stale.length > 0) {
-    console.log(`\n⚠ Stale shadow branches (remote branch deleted from '${remote}'):`);
-    for (const s of stale) {
-      console.log(`  ${s}  →  git push origin --delete ${s.replace("origin/", "")}`);
-    }
   }
 }
 

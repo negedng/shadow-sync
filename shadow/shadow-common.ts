@@ -12,15 +12,16 @@ interface RemoteConfig {
   /** Local subdirectory in your repo that maps to the root of that remote */
   dir: string;
   /** URL for the external repo */
-  url: string;
+  url?: string;
 }
 
 interface ShadowSyncConfig {
   remotes: RemoteConfig[];
-  trailers: { sync: string; seed: string; forward: string };
+  trailers: { sync: string; seed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
   maxDirDepth: number;
+  maxPushRetries: number;
   shadowBranchPrefix: string;
 }
 
@@ -34,11 +35,11 @@ function loadConfig(): ShadowSyncConfig {
     trailers: {
       sync: ((doc.trailers as Record<string, string>)?.sync) ?? "Shadow-synced-from",
       seed: ((doc.trailers as Record<string, string>)?.seed) ?? "Shadow-seed",
-      forward: ((doc.trailers as Record<string, string>)?.forward) ?? "Shadow-forwarded-from",
     },
     gitConfigOverrides: (doc.gitConfigOverrides as Record<string, string>) ?? {},
     maxBuffer:          (doc.maxBuffer as number) ?? 50 * 1024 * 1024,
     maxDirDepth:        (doc.maxDirDepth as number) ?? 100,
+    maxPushRetries:     (doc.maxPushRetries as number) ?? 3,
     shadowBranchPrefix: (doc.shadowBranchPrefix as string) ?? "shadow",
   };
 }
@@ -46,9 +47,8 @@ function loadConfig(): ShadowSyncConfig {
 const config = loadConfig();
 
 export const REMOTES: RemoteConfig[] = [...config.remotes];
-const SYNC_TRAILER    = config.trailers.sync;
-export const SEED_TRAILER    = config.trailers.seed;
-export const FORWARD_TRAILER = config.trailers.forward;
+const SYNC_TRAILER   = config.trailers.sync;
+export const SEED_TRAILER   = config.trailers.seed;
 export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
 // Allow tests to inject config via environment variable (JSON array of RemoteConfig).
@@ -86,11 +86,10 @@ export function validateName(value: string, label: string): void {
 }
 
 type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
-type GitOpts = { cwd?: string; plain?: boolean; raw?: boolean; env?: Record<string, string>; input?: string };
+type GitOpts = { cwd?: string; plain?: boolean };
 
 /** Run a git command. Throws on non-zero exit.
- *  Use { plain: true } to skip config overrides (for working-tree ops on Windows).
- *  Use { raw: true } to skip trimming stdout (for patches where whitespace matters). */
+ *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
 export function git(args: string[], opts?: GitOpts & { safe?: false }): string;
 /** Run a git command. Returns { stdout, stderr, status, ok } — never throws.
  *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
@@ -99,16 +98,12 @@ export function git(args: string[], opts?: GitOpts & { safe?: boolean }): string
   const fullArgs = opts?.plain ? args : [...GIT_CONFIG_OVERRIDES, ...args];
   const r = spawnSync("git", fullArgs, {
     encoding: "utf8", cwd: opts?.cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
-    ...(opts?.input != null ? { input: opts.input } : {}),
-    ...(opts?.env ? { env: { ...process.env, ...opts.env } } : {}),
   });
-
-  const trim = (s: string) => opts?.raw ? s : s.trim();
 
   if (opts?.safe) {
     if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
     return {
-      stdout: trim(r.stdout ?? ""),
+      stdout: (r.stdout ?? "").trim(),
       stderr: (r.stderr ?? "").trim(),
       status: r.status ?? 1,
       ok:     r.status === 0,
@@ -117,7 +112,7 @@ export function git(args: string[], opts?: GitOpts & { safe?: boolean }): string
 
   if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
-  return trim(r.stdout ?? "");
+  return (r.stdout ?? "").trim();
 }
 
 export function refExists(ref: string): boolean {
@@ -147,24 +142,34 @@ export function shadowBranchName(dir: string, branch: string): string {
 
 /** Append a trailer to a commit message using `git interpret-trailers`. */
 export function appendTrailer(message: string, trailer: string): string {
-  const result = git(["interpret-trailers", "--trailer", trailer],
-    { safe: true, input: message, raw: true });
-  if (!result.ok) {
+  const result = spawnSync(
+    "git",
+    [...GIT_CONFIG_OVERRIDES, "interpret-trailers", "--trailer", trailer],
+    { input: message, encoding: "utf8", maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  if (result.error || result.status !== 0) {
     const trimmed = message.trimEnd();
     return `${trimmed}\n\n${trailer}\n`;
   }
   return result.stdout;
 }
 
+// ── .shadowignore ─────────────────────────────────────────────────────────────
+
+export function parseShadowIgnore(scriptDir: string): string[] {
+  const ignoreFile = path.join(scriptDir, ".shadowignore");
+  if (!fs.existsSync(ignoreFile)) return [];
+
+  const patterns = fs.readFileSync(ignoreFile, "utf8")
+    .split("\n")
+    .map(l => l.replace(/#.*$/, "").trim())
+    .filter(Boolean);
+  console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
+  return patterns;
+}
+
 // ── Lockfile ──────────────────────────────────────────────────────────────────
 
-/**
- * Prevent concurrent runs of the same script by creating a PID-based lock file
- * in the OS temp directory. If a stale lock exists (process no longer alive),
- * it is removed automatically. The lock is released on exit, SIGINT, or SIGTERM.
- * Uses exclusive file creation (wx flag) to avoid races between the existence
- * check and lock acquisition.
- */
 export function acquireLock(scriptDir: string, name: string): void {
   const key   = crypto.createHash("md5").update(scriptDir).digest("hex").slice(0, 8);
   const lock  = path.join(os.tmpdir(), `${name}-${key}.lock`);
@@ -223,11 +228,7 @@ export function acquireLock(scriptDir: string, name: string): void {
 // ── Pre-flight checks ─────────────────────────────────────────────────────────
 
 /**
- * Run pre-flight checks on an external ref before syncing.
- * Inspects the remote's tree for potential issues: shallow clones (need full
- * history for commit replay), submodules (can't be synced), symlinks (targets
- * won't be adjusted for the subdirectory), case-conflicting paths (data loss
- * on Windows/macOS), and Git LFS usage (only pointer files are transferred).
+ * Run pre-flight checks before sync.
  * Returns an array of warnings/errors. Callers should abort on "error" level.
  */
 export function preflightChecks(externalRef: string): { level: "error" | "warn"; code: string; message: string }[] {
@@ -324,38 +325,77 @@ function getCommitMeta(hash: string): CommitMeta {
   };
 }
 
+function applyPatch(patch: string, subdir: string): boolean {
+  const normalizedPatch = patch.replace(/\r\n/g, "\n");
+  const tmpPatch = path.join(os.tmpdir(), `shadow-patch-${process.pid}.patch`);
+  fs.writeFileSync(tmpPatch, normalizedPatch);
+
+  try {
+    const result = spawnSync("git", [
+      ...GIT_CONFIG_OVERRIDES, "apply", "--directory", subdir,
+      "--ignore-whitespace", tmpPatch,
+    ], {
+      encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
+    return result.status === 0;
+  } finally {
+    try { fs.unlinkSync(tmpPatch); } catch (e: any) {
+      if (e.code !== "ENOENT") console.warn(`Warning: failed to delete temp patch: ${e.message}`);
+    }
+  }
+}
+
 function diffForCommit(meta: CommitMeta): string {
   const { hash, parentCount } = meta;
-  const diffArgs = ["-c", "core.filemode=false",
+  const diffArgs = [...GIT_CONFIG_OVERRIDES, "-c", "core.filemode=false",
     "diff", "--binary", "-M", "--no-ext-diff", "--no-textconv"];
   if (parentCount === 0) {
-    return git([...diffArgs, EMPTY_TREE, hash], { raw: true });
+    const result = spawnSync("git", [...diffArgs, EMPTY_TREE, hash], {
+      encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
+    return result.stdout ?? "";
   }
   const parentHash = git(["rev-parse", `${hash}^1`]);
-  return git([...diffArgs, parentHash, hash], { raw: true });
+  const result = spawnSync("git", [...diffArgs, parentHash, hash], {
+    encoding: "utf8",
+    maxBuffer: MAX_BUFFER,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
+  return result.stdout ?? "";
 }
 
 function commitWithMeta(meta: CommitMeta, message: string, allowEmpty = false): void {
-  git(["commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message], {
-    env: {
-      GIT_AUTHOR_NAME:      meta.authorName,
-      GIT_AUTHOR_EMAIL:     meta.authorEmail,
-      GIT_AUTHOR_DATE:      meta.authorDate,
-      GIT_COMMITTER_NAME:   meta.committerName,
-      GIT_COMMITTER_EMAIL:  meta.committerEmail,
-      GIT_COMMITTER_DATE:   meta.committerDate,
-    },
-  });
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME:      meta.authorName,
+    GIT_AUTHOR_EMAIL:     meta.authorEmail,
+    GIT_AUTHOR_DATE:      meta.authorDate,
+    GIT_COMMITTER_NAME:   meta.committerName,
+    GIT_COMMITTER_EMAIL:  meta.committerEmail,
+    GIT_COMMITTER_DATE:   meta.committerDate,
+  };
+  const args = [...GIT_CONFIG_OVERRIDES, "commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message];
+  const result = spawnSync("git", args, { env, encoding: "utf8", stdio: "inherit" });
+  if (result.error) die(`Failed to spawn git: ${result.error.message}`);
+  if (result.status !== 0) die("git commit failed.");
 }
 
-function filesForCommit(meta: CommitMeta, subdir: string): string[] {
-  const { hash, parentCount } = meta;
-  const nameArgs = ["-c", "core.filemode=false",
-    "diff", "--name-only", "-M", "--no-ext-diff", "--no-textconv"];
-  const raw = parentCount === 0
-    ? git([...nameArgs, EMPTY_TREE, hash])
-    : git([...nameArgs, `${hash}^1`, hash]);
-  return raw.split("\n").filter(Boolean).map(f => `${subdir}/${f}`);
+function extractPatchFiles(patch: string, subdir: string): string[] {
+  const files = new Set<string>();
+  for (const line of patch.split("\n")) {
+    const m = line.match(/^diff --git a\/.+ b\/(.+)$/) ?? line.match(/^--- a\/(.+)$/);
+    if (m && m[1] !== "/dev/null" && !m[1].includes("..") && !m[1].startsWith("/")) {
+      files.add(`${subdir}/${m[1]}`);
+    }
+  }
+  return [...files];
 }
 
 const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
@@ -418,18 +458,15 @@ export function replayCommits(opts: {
   const { remote, dir, externalBranch } = opts;
   const externalRef = `${remote}/${externalBranch}`;
 
-  // Scans local git log for Shadow-synced-from trailers to avoid re-replaying commits.
   console.log("Scanning local history for already-mirrored commits...");
   const alreadySynced = buildAlreadySyncedSetFor(dir);
   console.log(`Found ${alreadySynced.size} previously mirrored commit(s).`);
 
-  // A seed marks the starting point for sync — all commits before it are skipped.
   const seedHash = findSeedHash(dir);
   if (seedHash) {
     console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
   }
 
-  // Collect new commits to replay
   const allExternalCommits = collectExternalCommits(externalRef, seedHash ?? undefined);
 
   const newCommits: string[] = [];
@@ -445,12 +482,11 @@ export function replayCommits(opts: {
 
   console.log(`Found ${newCommits.length} new commit(s) to mirror.\n`);
 
-  // Replay each commit
   for (const hash of newCommits) {
     const meta = getCommitMeta(hash);
 
-    // Skip commits that were forwarded by us (they have a forward trailer).
-    if (meta.message.includes(`${FORWARD_TRAILER}:`)) {
+    // Skip commits that were forwarded by us — they'd create a round-trip duplicate.
+    if (meta.message.includes("Shadow-forwarded-from:")) {
       console.log(`  Skipping ${meta.short} (forwarded by us).`);
       alreadySynced.add(hash);
       const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
@@ -467,30 +503,21 @@ export function replayCommits(opts: {
 
     console.log(`  Applying ${label}...`);
 
-    // Generate a diff for this commit and apply it under the subdirectory.
-    // The patch maps external repo root paths into {dir}/ in the monorepo.
     const patch = diffForCommit(meta);
-    // Apply patch via stdin, normalizing CRLF → LF for cross-OS consistency
-    const result = git(["apply", "--directory", dir, "--ignore-whitespace"],
-      { safe: true, input: patch.replace(/\r\n/g, "\n") }).ok;
+    const result = applyPatch(patch, dir);
 
     if (!result) {
       throw new Error(`Could not apply patch for ${meta.short}. Shadow branch may be out of sync.`);
     }
 
-    // Stage only the files touched by this patch (not the whole dir).
-    const patchFiles = filesForCommit(meta, dir);
+    const patchFiles = extractPatchFiles(patch, dir);
     if (patchFiles.length > 0) {
       git(["add", "--", ...patchFiles]);
     }
 
-    // Commit with the original author/committer metadata preserved, plus a
-    // sync trailer recording the external commit hash for deduplication.
     const hasStagedChanges = !git(["diff", "--cached", "--quiet"], { safe: true }).ok;
     const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
 
-    // If the patch produced no actual changes (e.g. the file was already
-    // identical), record an empty commit so we skip it on future runs.
     if (!hasStagedChanges) {
       console.log("    (no changes after apply — recording as synced)");
       commitWithMeta(meta, syncedMessage, /* allowEmpty */ true);

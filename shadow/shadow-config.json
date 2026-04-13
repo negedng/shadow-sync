@@ -6,8 +6,7 @@
 
   "trailers": {
     "sync": "Shadow-synced-from",
-    "seed": "Shadow-seed",
-    "forward": "Shadow-forwarded-from"
+    "seed": "Shadow-seed"
   },
 
   "gitConfigOverrides": {
@@ -19,5 +18,6 @@
 
   "maxBuffer": 52428800,
   "maxDirDepth": 100,
+  "maxPushRetries": 3,
   "shadowBranchPrefix": "shadow"
 }

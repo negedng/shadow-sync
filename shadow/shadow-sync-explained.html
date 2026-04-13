@@ -498,7 +498,7 @@
   </tr>
   <tr>
     <td><a href="shadow-setup.ts"><code>shadow-setup.ts</code></a></td>
-    <td>Optional bootstrap: records a seed commit so CI sync skips existing history. Not required &mdash; <code>shadow-export</code> auto-creates shadow branches on first use (<a href="#fn-setup">details</a>)</td>
+    <td>One-time bootstrap: records a seed commit so CI sync skips existing history (<a href="#fn-setup">details</a>)</td>
     <td><span class="tag tag-green">Local</span></td>
   </tr>
   <tr>
@@ -508,7 +508,7 @@
   </tr>
   <tr>
     <td><a href="shadow-export.ts"><code>shadow-export.ts</code></a></td>
-    <td>Exports your local changes to the shadow branch (with <code>.shadowignore</code> filtering). Auto-creates shadow branches on first use (<a href="#fn-export">details</a>)</td>
+    <td>Exports your local changes to the shadow branch (with <code>.shadowignore</code> filtering) (<a href="#fn-export">details</a>)</td>
     <td><span class="tag tag-green">Local</span></td>
   </tr>
   <tr>
@@ -830,8 +830,8 @@
 </div>
 
 <div class="card card-purple">
-  <div class="fn-sig" id="fn-filesForCommit"><span class="tag tag-purple">private</span> filesForCommit(meta: CommitMeta, subdir: string): string[] <a class="src-link" href="shadow-common.ts#L371">[source:371]</a></div>
-  <p>Uses <code>git diff --name-only</code> to find which files were modified by a commit. Used to <code>git add</code> only the affected files (not the entire repo).</p>
+  <div class="fn-sig" id="fn-extractPatchFiles"><span class="tag tag-purple">private</span> extractPatchFiles(patch: string, subdir: string): string[] <a class="src-link" href="shadow-common.ts#L363">[source:363]</a></div>
+  <p>Parses a patch to find which files were modified. Used to <code>git add</code> only the affected files (not the entire repo). Validates paths to prevent directory traversal attacks (<code>..</code> or absolute paths).</p>
 </div>
 
 <div class="card card-purple">
@@ -858,7 +858,7 @@
     <li>Find the seed hash (via <a href="#fn-findSeedHash"><code>findSeedHash</code></a>)</li>
     <li>Collect all external commits that need replaying (via <a href="#fn-collectExternalCommits"><code>collectExternalCommits</code></a>)</li>
     <li>Filter out already-synced ones</li>
-    <li>For each new commit: <a href="#fn-diffForCommit">generate patch</a> &rarr; <a href="#fn-applyPatch">apply to subdirectory</a> &rarr; <a href="#fn-filesForCommit">stage files</a> &rarr; <a href="#fn-commitWithMeta">commit with original metadata</a> + sync trailer</li>
+    <li>For each new commit: <a href="#fn-diffForCommit">generate patch</a> &rarr; <a href="#fn-applyPatch">apply to subdirectory</a> &rarr; <a href="#fn-extractPatchFiles">stage files</a> &rarr; <a href="#fn-commitWithMeta">commit with original metadata</a> + sync trailer</li>
     <li>Handle empty patches (the commit exists in the external repo but produces no changes in our context) by recording an empty commit</li>
   </ol>
   <p>Returns how many commits were mirrored and whether we were already up to date.</p>
@@ -877,7 +877,7 @@
     <li><strong>Fetch</strong> the latest shadow branch from origin</li>
     <li><strong>Check if up to date</strong> &mdash; if shadow is already an ancestor of HEAD, nothing to do</li>
     <li><strong>Merge with <code>--no-commit</code></strong> &mdash; merges the shadow branch but stops before committing, so we can fix the index</li>
-    <li><strong>Restore non-<code>dir/</code> files</strong> &mdash; <code>git read-tree HEAD</code> resets the entire index to HEAD (undoing the merge's effect on all files in one command), then <code>git checkout HEAD -- .</code> restores the working tree to match (the merge deletes non-<code>dir/</code> files from disk, so the index reset alone is not enough). Finally, <code>git checkout shadowRef -- dir/</code> brings in only the <code>dir/</code> changes from the shadow branch.</li>
+    <li><strong>Restore non-<code>dir/</code> files</strong> &mdash; <code>git read-tree HEAD</code> resets the entire index to HEAD (undoing the merge's effect on all files in one command), then <code>git checkout shadowRef -- dir/</code> brings in only the <code>dir/</code> changes from the shadow branch. This is much more efficient than listing and checking out files in batches.</li>
     <li><strong>Commit</strong> &mdash; the merge commit has correct ancestry and only <code>dir/</code> files were changed</li>
   </ol>
 
@@ -903,7 +903,7 @@
     <li><strong>Check for uncommitted changes in <code>dir/</code></strong> &mdash; refuses to run if the subdirectory has unsaved work. <strong>Acquire lock</strong> (<a href="#fn-acquireLock"><code>acquireLock</code></a>) to prevent concurrent exports.</li>
     <li><strong>Parse .shadowignore</strong> (<a href="#fn-parseShadowIgnore"><code>parseShadowIgnore</code></a>) &mdash; load exclusion patterns</li>
     <li><strong>Local sync</strong> &mdash; runs <code>shadow-ci-sync.ts</code> locally (stash, sync, restore) to ensure the shadow branch has the latest external commits. Skipped with <code>--no-sync</code>.</li>
-    <li><strong>Fetch from origin</strong> &mdash; if the shadow branch does not exist yet, it is <strong>auto-created</strong> as an orphan branch with an empty seed commit, pushed to origin, and merged into the working branch. Then verify it is merged into HEAD (i.e. <code>git merge-base --is-ancestor shadowRef HEAD</code>). If the shadow branch has unmerged commits (e.g. from external changes), export refuses and tells you to import first.</li>
+    <li><strong>Fetch from origin</strong> &mdash; verify the shadow branch exists and is merged into HEAD (i.e. <code>git merge-base --is-ancestor shadowRef HEAD</code>). If the shadow branch has unmerged commits, export refuses and tells you to import first.</li>
     <li><strong>Set <code>GIT_INDEX_FILE</code></strong> &mdash; point to a temp file so the real index is untouched</li>
     <li><strong>Build the desired tree</strong> &mdash; <code>git read-tree --empty</code> clears the temp index, then <code>git read-tree --prefix=dir/ HEAD:dir</code> reads the subdirectory into the index. Also reads <code>.github/</code> and <code>shadow/</code> subtrees for CI dependencies.</li>
     <li><strong>Remove shadowignored files</strong> from the index via <code>git rm --cached</code></li>
@@ -941,18 +941,17 @@
 
 <hr>
 
-<h3 id="fn-setup"><a href="shadow-setup.ts">shadow-setup.ts</a> &mdash; Bootstrap Script (optional)</h3>
+<h3 id="fn-setup"><a href="shadow-setup.ts">shadow-setup.ts</a> &mdash; Bootstrap Script</h3>
 
 <div class="card">
-  <p><strong>Purpose:</strong> Optional one-time initialization for each remote. Records a seed baseline so CI sync skips existing external history.</p>
-  <p><strong>Note:</strong> <code>shadow-export.ts</code> now <strong>auto-creates shadow branches</strong> on first use, so running setup is no longer required. You only need setup if you want to record a seed commit for CI sync before your first export.</p>
+  <p><strong>Purpose:</strong> One-time initialization for each remote. Run once when you first start syncing with an external repo.</p>
   <h4>What it does:</h4>
   <ol>
     <li>Fetches from the external remote</li>
     <li>Runs <a href="#fn-preflightChecks">pre-flight checks</a> (shallow clone, submodules, etc.)</li>
     <li>Records a seed commit on your current branch with the trailer <code>Shadow-seed: backend a1b2c3d</code>, telling CI sync "start after this commit." Without it, the first CI sync would try to replay the <em>entire history</em> of the external repo from the very beginning.</li>
   </ol>
-  <p>The shadow branch itself is created automatically by <a href="#fn-ci-sync">CI sync</a> on its next run, or by <a href="#fn-export"><code>shadow-export.ts</code></a> on first export.</p>
+  <p>The shadow branch itself is created automatically by <a href="#fn-ci-sync">CI sync</a> on its next run &mdash; setup only needs to record where to start.</p>
 </div>
 
 <hr>
