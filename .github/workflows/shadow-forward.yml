@@ -3,6 +3,7 @@ name: Shadow Forward
 on:
   push:
     branches:
+      # Must match shadowBranchPrefix in shadow/shadow-config.json (can't be dynamic — GitHub evaluates before checkout).
       - 'shadow/**'
 
 concurrency:
@@ -14,6 +15,9 @@ permissions:
 
 jobs:
   forward:
+    # Only forward export commits, not ci-sync mirrored commits.
+    # Must match trailers.export in shadow/shadow-config.json (can't be dynamic — GitHub evaluates before checkout).
+    if: contains(github.event.head_commit.message, 'Shadow-export:')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +30,7 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      - run: npm --prefix shadow ci
 
       - name: Configure git
         run: |
@@ -35,4 +39,4 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Forward to external remote
-        run: npx tsx shadow-ci-forward.ts
+        run: npx --prefix shadow tsx shadow/shadow-ci-forward.ts
