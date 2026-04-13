@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -h \"^import\\\\|^from\" /c/SharedMedia/Realogic/test-main/shadow-tests/*.ts)"
-    ]
-  }
-}

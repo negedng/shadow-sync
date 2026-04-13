@@ -1,0 +1,39 @@
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile, getExternalShadowLogFull } from "./harness";
+import { assertEqual, assertIncludes } from "./assert";
+
+export default function run() {
+  const env = createTestEnv("push-basic");
+  try {
+    // Sync initial state
+    commitOnRemote(env, { "base.txt": "base content\n" }, "Add base.txt");
+    const r1 = runCiSync(env);
+    mergeShadow(env);
+    assertEqual(r1.status, 0, "initial pull should succeed");
+
+    // Add a file locally and commit
+    commitOnLocal(env, { "new-feature.ts": "export function feat() {}\n" }, "Add new feature");
+
+    // Export to shadow branch
+    const r2 = runPush(env, "Add new feature from internal repo");
+    assertEqual(r2.status, 0, "export should succeed");
+    assertIncludes(r2.stdout, "Done", "should report done");
+
+    // Verify on the shadow branch
+    assertEqual(
+      readExternalShadowFile(env, "new-feature.ts"),
+      "export function feat() {}\n",
+      "new-feature.ts should appear on shadow branch",
+    );
+
+    // Shadow commit should have the commit message
+    const shadowLog = getExternalShadowLogFull(env);
+    assertIncludes(shadowLog, "Add new feature", "shadow commit should have the original commit message");
+  } finally {
+    env.cleanup();
+  }
+}
+
+if (require.main === module) {
+  run();
+  console.log("PASS  test-push-basic");
+}
