@@ -49,6 +49,8 @@ const config = loadConfig();
 export const REMOTES: RemoteConfig[] = [...config.remotes];
 const SYNC_TRAILER   = config.trailers.sync;
 export const SEED_TRAILER   = config.trailers.seed;
+export const MAX_DIR_DEPTH  = config.maxDirDepth;
+export const MAX_PUSH_RETRIES = config.maxPushRetries;
 export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
 // Allow tests to inject config via environment variable (JSON array of RemoteConfig).
@@ -57,25 +59,139 @@ if (process.env.SHADOW_TEST_REMOTES) {
   REMOTES.push(...JSON.parse(process.env.SHADOW_TEST_REMOTES));
 }
 
-// ── Core utilities ───────────────────────────────────────────────────────────
+// ── Git helpers ───────────────────────────────────────────────────────────────
 
 const MAX_BUFFER = config.maxBuffer;
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-/** Repo root — ensures git commands use paths relative to the repo, not the cwd.
- *  When invoked via `npm --prefix shadow`, cwd is shadow/ which breaks path-based commands. */
-const REPO_ROOT = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" })
-  .stdout.trim();
 
 /** Git config overrides for cross-OS consistency. */
 const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
   ([key, value]) => ["-c", `${key}=${value}`],
 );
 
-export function die(msg: string): never {
-  console.error(`✘ ${msg}`);
-  process.exit(1);
+function git(args: string[], cwd?: string) {
+  return spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
+    encoding: "utf8", cwd, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+  });
 }
+
+/** Run a git command, return trimmed stdout. Throws on non-zero exit. */
+export function run(args: string[], cwd?: string): string {
+  const r = git(args, cwd);
+  if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
+  return (r.stdout ?? "").trim();
+}
+
+/** Run a git command, return { stdout, stderr, status, ok } — never throws. */
+export function runSafe(args: string[], cwd?: string) {
+  const r = git(args, cwd);
+  if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
+  return {
+    stdout: (r.stdout ?? "").trim(),
+    stderr: (r.stderr ?? "").trim(),
+    status: r.status ?? 1,
+    ok:     r.status === 0,
+  };
+}
+
+export function getCurrentBranch(): string {
+  const result = runSafe(["symbolic-ref", "--short", "HEAD"]);
+  if (!result.ok) {
+    die("You are in a detached HEAD state. Check out a branch first.");
+  }
+  return result.stdout;
+}
+
+export function refExists(ref: string): boolean {
+  return runSafe(["rev-parse", "--verify", ref]).ok;
+}
+
+export function listExternalBranches(remote: string): string[] {
+  return run(["branch", "-r"])
+    .split("\n")
+    .map(l => l.trim())
+    .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
+    .map(l => l.replace(`${remote}/`, ""));
+}
+
+// ── .shadowignore ─────────────────────────────────────────────────────────────
+
+export function parseShadowIgnore(scriptDir: string): string[] {
+  const ignoreFile = path.join(scriptDir, ".shadowignore");
+  if (!fs.existsSync(ignoreFile)) return [];
+
+  const patterns = fs.readFileSync(ignoreFile, "utf8")
+    .split("\n")
+    .map(l => l.replace(/#.*$/, "").trim())
+    .filter(Boolean);
+  console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
+  return patterns;
+}
+
+// ── Pre-flight checks ─────────────────────────────────────────────────────────
+
+/**
+ * Run pre-flight checks before sync.
+ * Returns an array of warnings/errors. Callers should abort on "error" level.
+ */
+export function preflightChecks(externalRef: string): { level: "error" | "warn"; code: string; message: string }[] {
+  type W = { level: "error" | "warn"; code: string; message: string };
+  const warnings: W[] = [];
+  const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
+  const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
+
+  const shallow = runSafe(["rev-parse", "--is-shallow-repository"]);
+  if (shallow.ok && shallow.stdout === "true") {
+    error("SHALLOW_CLONE", "This repository is a shallow clone. Shadow sync requires full history.\n  Run: git fetch --unshallow");
+  }
+
+  const tree = runSafe(["ls-tree", "-r", "--long", externalRef]);
+  if (tree.ok && tree.stdout) {
+    const paths: string[] = [];
+    for (const entry of tree.stdout.split("\n").filter(Boolean)) {
+      const m = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
+      if (!m) continue;
+      const [, mode, , filePath] = m;
+      paths.push(filePath);
+      if (mode === "160000") warn("SUBMODULE", `Remote contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`);
+      if (mode === "120000") warn("SYMLINK", `Remote contains a symlink at '${filePath}'. Symlink targets are not adjusted for the local subdirectory.`);
+    }
+
+    if (process.platform === "win32" || process.platform === "darwin") {
+      const lower = new Map<string, string>();
+      for (const p of paths) {
+        const existing = lower.get(p.toLowerCase());
+        if (existing && existing !== p) {
+          error("CASE_CONFLICT", `Case conflict: '${existing}' and '${p}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
+        }
+        lower.set(p.toLowerCase(), p);
+      }
+    }
+  }
+
+  const attrs = runSafe(["show", `${externalRef}:.gitattributes`]);
+  if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
+    warn("GIT_LFS", "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n  Ensure LFS is configured in the internal repo, or large files will be pointers.");
+  }
+
+  return warnings;
+}
+
+/**
+ * Print preflight warnings and abort on errors.
+ * Returns true if safe to continue, false if there were errors.
+ */
+export function handlePreflightResults(warnings: { level: "error" | "warn"; code: string; message: string }[]): boolean {
+  for (const w of warnings) {
+    console.error(`${w.level === "error" ? "✘" : "⚠"} [${w.code}] ${w.message}`);
+  }
+  const errorCount = warnings.filter(w => w.level === "error").length;
+  if (errorCount > 0) console.error(`\nAborting due to ${errorCount} error(s).`);
+  return errorCount === 0;
+}
+
+// ── Misc ──────────────────────────────────────────────────────────────────────
 
 /** Validate that a dir/remote name is safe for use in git commands and path construction. */
 export function validateName(value: string, label: string): void {
@@ -85,59 +201,9 @@ export function validateName(value: string, label: string): void {
   if (value.startsWith("-")) die(`${label} must not start with '-'.`);
 }
 
-type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
-type GitOpts = { cwd?: string; plain?: boolean };
-
-/** Run a git command. Throws on non-zero exit.
- *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
-export function git(args: string[], opts?: GitOpts & { safe?: false }): string;
-/** Run a git command. Returns { stdout, stderr, status, ok } — never throws.
- *  Use { plain: true } to skip config overrides (for working-tree ops on Windows). */
-export function git(args: string[], opts: GitOpts & { safe: true }): GitResult;
-export function git(args: string[], opts?: GitOpts & { safe?: boolean }): string | GitResult {
-  const fullArgs = opts?.plain ? args : [...GIT_CONFIG_OVERRIDES, ...args];
-  const r = spawnSync("git", fullArgs, {
-    encoding: "utf8", cwd: opts?.cwd ?? REPO_ROOT, maxBuffer: MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  if (opts?.safe) {
-    if (r.error) return { stdout: "", stderr: `Failed to spawn git: ${r.error.message}`, status: 1, ok: false };
-    return {
-      stdout: (r.stdout ?? "").trim(),
-      stderr: (r.stderr ?? "").trim(),
-      status: r.status ?? 1,
-      ok:     r.status === 0,
-    };
-  }
-
-  if (r.error) throw new Error(`Failed to spawn git: ${r.error.message}`);
-  if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status}): ${(r.stderr ?? "").trim()}`);
-  return (r.stdout ?? "").trim();
-}
-
-export function refExists(ref: string): boolean {
-  return git(["rev-parse", "--verify", ref], { safe: true }).ok;
-}
-
-export function getCurrentBranch(): string {
-  const result = git(["symbolic-ref", "--short", "HEAD"], { safe: true });
-  if (!result.ok) {
-    die("You are in a detached HEAD state. Check out a branch first.");
-  }
-  return result.stdout;
-}
-
-export function listExternalBranches(remote: string): string[] {
-  return git(["branch", "-r"])
-    .split("\n")
-    .map(l => l.trim())
-    .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
-    .map(l => l.replace(`${remote}/`, ""));
-}
-
-/** Build the canonical shadow branch name: shadow/{dir}/{branch} */
-export function shadowBranchName(dir: string, branch: string): string {
-  return `${SHADOW_BRANCH_PREFIX}/${dir}/${branch}`;
+export function die(msg: string): never {
+  console.error(`✘ ${msg}`);
+  process.exit(1);
 }
 
 /** Append a trailer to a commit message using `git interpret-trailers`. */
@@ -154,19 +220,13 @@ export function appendTrailer(message: string, trailer: string): string {
   return result.stdout;
 }
 
-// ── .shadowignore ─────────────────────────────────────────────────────────────
+// ── Shadow branch helpers ────────────────────────────────────────────────────
 
-export function parseShadowIgnore(scriptDir: string): string[] {
-  const ignoreFile = path.join(scriptDir, ".shadowignore");
-  if (!fs.existsSync(ignoreFile)) return [];
-
-  const patterns = fs.readFileSync(ignoreFile, "utf8")
-    .split("\n")
-    .map(l => l.replace(/#.*$/, "").trim())
-    .filter(Boolean);
-  console.log(`Loaded ${patterns.length} exclusion(s) from .shadowignore`);
-  return patterns;
+/** Build the canonical shadow branch name: shadow/{dir}/{branch} */
+export function shadowBranchName(dir: string, branch: string): string {
+  return `${SHADOW_BRANCH_PREFIX}/${dir}/${branch}`;
 }
+
 
 // ── Lockfile ──────────────────────────────────────────────────────────────────
 
@@ -225,69 +285,7 @@ export function acquireLock(scriptDir: string, name: string): void {
   process.on("SIGTERM", () => { release(); process.exit(143); });
 }
 
-// ── Pre-flight checks ─────────────────────────────────────────────────────────
-
-/**
- * Run pre-flight checks before sync.
- * Returns an array of warnings/errors. Callers should abort on "error" level.
- */
-export function preflightChecks(externalRef: string): { level: "error" | "warn"; code: string; message: string }[] {
-  type W = { level: "error" | "warn"; code: string; message: string };
-  const warnings: W[] = [];
-  const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
-  const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
-
-  const shallow = git(["rev-parse", "--is-shallow-repository"], { safe: true });
-  if (shallow.ok && shallow.stdout === "true") {
-    error("SHALLOW_CLONE", "This repository is a shallow clone. Shadow sync requires full history.\n  Run: git fetch --unshallow");
-  }
-
-  const tree = git(["ls-tree", "-r", "--long", externalRef], { safe: true });
-  if (tree.ok && tree.stdout) {
-    const paths: string[] = [];
-    for (const entry of tree.stdout.split("\n").filter(Boolean)) {
-      const m = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
-      if (!m) continue;
-      const [, mode, , filePath] = m;
-      paths.push(filePath);
-      if (mode === "160000") warn("SUBMODULE", `Remote contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`);
-      if (mode === "120000") warn("SYMLINK", `Remote contains a symlink at '${filePath}'. Symlink targets are not adjusted for the local subdirectory.`);
-    }
-
-    if (process.platform === "win32" || process.platform === "darwin") {
-      const lower = new Map<string, string>();
-      for (const p of paths) {
-        const existing = lower.get(p.toLowerCase());
-        if (existing && existing !== p) {
-          error("CASE_CONFLICT", `Case conflict: '${existing}' and '${p}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
-        }
-        lower.set(p.toLowerCase(), p);
-      }
-    }
-  }
-
-  const attrs = git(["show", `${externalRef}:.gitattributes`], { safe: true });
-  if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
-    warn("GIT_LFS", "Remote uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.\n  Ensure LFS is configured in the internal repo, or large files will be pointers.");
-  }
-
-  return warnings;
-}
-
-/**
- * Print preflight warnings and abort on errors.
- * Returns true if safe to continue, false if there were errors.
- */
-export function handlePreflightResults(warnings: { level: "error" | "warn"; code: string; message: string }[]): boolean {
-  for (const w of warnings) {
-    console.error(`${w.level === "error" ? "✘" : "⚠"} [${w.code}] ${w.message}`);
-  }
-  const errorCount = warnings.filter(w => w.level === "error").length;
-  if (errorCount > 0) console.error(`\nAborting due to ${errorCount} error(s).`);
-  return errorCount === 0;
-}
-
-// ── Replay engine ─────────────────────────────────────────────────────────────
+// ── Replay engine (internal helpers + exported entry point) ───────────────────
 
 interface CommitMeta {
   hash:           string;
@@ -306,7 +304,7 @@ function getCommitMeta(hash: string): CommitMeta {
   const SEP = "---SHADOW-SEP---";
   const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%B", "%h: %s", "%P"]
     .join(SEP);
-  const raw = git(["log", "-1", `--format=${format}`, hash]);
+  const raw = run(["log", "-1", `--format=${format}`, hash]);
   const parts = raw.split(SEP);
   const head = parts.slice(0, 6);
   const tail = parts.slice(-2);
@@ -361,7 +359,7 @@ function diffForCommit(meta: CommitMeta): string {
     if (result.error) throw new Error(`Failed to spawn git: ${result.error.message}`);
     return result.stdout ?? "";
   }
-  const parentHash = git(["rev-parse", `${hash}^1`]);
+  const parentHash = run(["rev-parse", `${hash}^1`]);
   const result = spawnSync("git", [...diffArgs, parentHash, hash], {
     encoding: "utf8",
     maxBuffer: MAX_BUFFER,
@@ -402,8 +400,8 @@ const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
 
 function buildAlreadySyncedSetFor(dir: string): Set<string> {
   const synced = new Set<string>();
-  const log = git(
-    ["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B", "--", `${dir}/`], { safe: true }
+  const log = runSafe(
+    ["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B", "--", `${dir}/`]
   );
   if (!log.ok || !log.stdout) return synced;
 
@@ -417,7 +415,7 @@ function buildAlreadySyncedSetFor(dir: string): Set<string> {
 const SEED_HASH_RE = /^Shadow-seed:\s*(\S+)\s+([0-9a-f]{7,40})/;
 
 function findSeedHash(dir: string): string | null {
-  const log = git(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"], { safe: true });
+  const log = runSafe(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"]);
   if (!log.ok || !log.stdout) return null;
   for (const line of log.stdout.split("\n")) {
     const match = line.match(SEED_HASH_RE);
@@ -436,7 +434,7 @@ function collectExternalCommits(
   } else {
     args.push(externalRef);
   }
-  const commits = git(args, { safe: true });
+  const commits = runSafe(args);
   if (!commits.ok || !commits.stdout) return [];
   return commits.stdout.split("\n").filter(Boolean);
 }
@@ -489,8 +487,7 @@ export function replayCommits(opts: {
     if (meta.message.includes("Shadow-forwarded-from:")) {
       console.log(`  Skipping ${meta.short} (forwarded by us).`);
       alreadySynced.add(hash);
-      const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
-      const syncedMessage = appendTrailer(cleanMsg, `${SYNC_TRAILER}: ${hash}`);
+      const syncedMessage = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
       commitWithMeta(meta, syncedMessage, true);
       continue;
     }
@@ -512,10 +509,10 @@ export function replayCommits(opts: {
 
     const patchFiles = extractPatchFiles(patch, dir);
     if (patchFiles.length > 0) {
-      git(["add", "--", ...patchFiles]);
+      run(["add", "--", ...patchFiles]);
     }
 
-    const hasStagedChanges = !git(["diff", "--cached", "--quiet"], { safe: true }).ok;
+    const hasStagedChanges = !runSafe(["diff", "--cached", "--quiet"]).ok;
     const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
 
     if (!hasStagedChanges) {

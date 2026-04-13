@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm --prefix shadow ci
+      - run: npm ci
 
       - name: Run shadow sync
-        run: npx --prefix shadow tsx shadow/shadow-ci-sync.ts
+        run: npx tsx shadow-ci-sync.ts

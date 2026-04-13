@@ -9,34 +9,17 @@
  *   - The repo is checked out with full history (fetch-depth: 0)
  *   - Concurrency is managed by the workflow's concurrency group
  */
-import { parseArgs } from "util";
 import {
   REMOTES,
-  git, refExists, listExternalBranches,
+  run, runSafe, refExists, listExternalBranches,
   shadowBranchName,
   replayCommits, preflightChecks, handlePreflightResults,
   validateName,
 } from "./shadow-common";
 
-const { values } = parseArgs({
-  options: {
-    remote: { type: "string", short: "r" },
-  },
-  strict: true,
-});
-
-const remotesToSync = values.remote
-  ? REMOTES.filter(r => r.remote === values.remote)
-  : REMOTES;
-
-if (values.remote && remotesToSync.length === 0) {
-  console.error(`Remote '${values.remote}' not found in config.`);
-  process.exit(1);
-}
-
 let failed = 0;
 
-for (const { remote, dir, url } of remotesToSync) {
+for (const { remote, dir, url } of REMOTES) {
   validateName(remote, "Remote name");
   validateName(dir, "Directory");
 
@@ -46,16 +29,16 @@ for (const { remote, dir, url } of remotesToSync) {
   }
 
   // Add or update the git remote
-  const existing = git(["remote", "get-url", remote], { safe: true });
+  const existing = runSafe(["remote", "get-url", remote]);
   if (!existing.ok) {
-    git(["remote", "add", remote, url]);
+    run(["remote", "add", remote, url]);
   } else if (existing.stdout !== url) {
-    git(["remote", "set-url", remote, url]);
+    run(["remote", "set-url", remote, url]);
   }
 
   // 3. Fetch from external remote
   console.log(`\n══ Fetching from '${remote}' ══`);
-  git(["fetch", remote]);
+  run(["fetch", remote]);
 
   // 4. Process each branch on the remote
   const branches = listExternalBranches(remote);
@@ -80,36 +63,31 @@ for (const { remote, dir, url } of remotesToSync) {
 
     // Check out the shadow branch (from origin if it exists, or create from main)
     if (refExists(`origin/${shadow}`)) {
-      git(["checkout", "-B", shadow, `origin/${shadow}`]);
+      run(["checkout", "-B", shadow, `origin/${shadow}`]);
     } else {
-      git(["checkout", "-B", shadow, "origin/main"]);
+      run(["checkout", "-B", shadow, "origin/main"]);
     }
 
     // Run the per-commit replay
     try {
-      // Capture tree before replay to detect if anything actually changed
-      const treeBefore = git(["rev-parse", "HEAD^{tree}"]);
       const result = replayCommits({ remote, dir, externalBranch: branch });
-      const treeAfter = git(["rev-parse", "HEAD^{tree}"]);
 
-      if (result.upToDate) {
-        console.log(`  ${shadow} is up to date.`);
-      } else if (treeBefore === treeAfter) {
-        console.log(`  ${result.mirrored} commit(s) mirrored but no tree changes (all forwarded). Skipping push.`);
-      } else {
+      if (!result.upToDate) {
         console.log(`  Pushing ${result.mirrored} new commit(s) to origin/${shadow}...`);
-        git(["push", "origin", `${shadow}:${shadow}`]);
+        run(["push", "origin", `${shadow}:${shadow}`]);
         console.log(`  ✓ Pushed.`);
+      } else {
+        console.log(`  ${shadow} is up to date.`);
       }
     } catch (err: any) {
       console.error(`  ✘ Failed to replay ${externalRef}: ${err.message}`);
       failed++;
       // Reset any partial state before moving to next branch
-      git(["reset", "--hard"], { safe: true });
+      runSafe(["reset", "--hard"]);
     }
 
     // Return to detached HEAD so we can check out the next shadow branch
-    git(["checkout", "--detach"], { safe: true });
+    runSafe(["checkout", "--detach"]);
   }
 }
 
