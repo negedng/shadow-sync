@@ -400,7 +400,7 @@
   </div>
   <div class="card">
     <h4>Worktree</h4>
-    <p>A second working copy of the repo that shares the same git history. Like having two checkout folders at once &mdash; useful for making changes on a different branch without disturbing your current work. In Shadow Sync, only ci-sync uses worktrees (for replaying commits). Export and ci-forward use git plumbing with a temp index instead.</p>
+    <p>A second working copy of the repo that shares the same git history. Like having two checkout folders at once &mdash; useful for making changes on a different branch without disturbing your current work. Shadow Sync no longer uses worktrees &mdash; all scripts (export, ci-sync, ci-forward) use git plumbing with a temp index instead.</p>
   </div>
   <div class="card">
     <h4>Orphan Branch</h4>
@@ -437,12 +437,13 @@
   <div class="flow-step">
     <div class="flow-num">4</div>
     <div>
-      <strong>Replay commits.</strong> For each branch, it checks which external commits we've already copied over (by looking at trailers in our history) and skips those. Then, for each new commit:
+      <strong>Replay commits (topology-preserving).</strong> All branches are processed in a single pass. Commits across every branch are collected in <strong>topological order</strong> (parents before children, shared ancestors only once) using <code>git rev-list --topo-order --reverse --parents</code>. Already-synced commits (identified by <code>Shadow-synced-from</code> trailers) are skipped. Then, for each new commit:
       <ol style="margin-top:0.5rem">
-        <li>Takes the changes that commit introduced (the diff)</li>
-        <li>Applies those changes inside the corresponding folder (e.g. <code>backend/</code> or <code>frontend/</code>) &mdash; so if the external commit changed <code>src/app.ts</code>, we change <code>backend/src/app.ts</code></li>
-        <li>Creates a matching commit on the shadow branch, keeping the original author name, email, date, and message &mdash; so it looks like the external developer made the change directly in our repo</li>
+        <li>Scopes the external commit's tree under the target folder (e.g. <code>backend/</code>) using <code>git read-tree --prefix</code></li>
+        <li>Maps the commit's external parents to local SHAs &mdash; so merge commits and branch points stay structurally identical</li>
+        <li>Creates a matching commit via <code>git commit-tree</code>, keeping the original author name, email, date, and message &mdash; so it looks like the external developer made the change directly in our repo</li>
       </ol>
+      <p style="margin-top:0.5rem">Because commits are deduplicated across branches, a commit shared by <code>main</code> and <code>feature/x</code> gets the <strong>same local SHA</strong> on both shadow branches &mdash; preserving the DAG structure.</p>
     </div>
   </div>
   <div class="flow-step">
@@ -799,7 +800,9 @@
 
 <h4>Replay Engine (The Core)</h4>
 
-<p>These private functions power the commit-by-commit replay. They are not exported &mdash; only <code>replayCommits()</code> is public.</p>
+<p>Two replay engines exist. The <strong>topology-preserving engine</strong> (<code>replayCommitsTopological()</code>) is used by CI sync and is the primary engine. It replays all branches in a single topological pass using git plumbing, so shared commits get the same local SHA. The older <strong>per-branch engine</strong> (<code>replayCommits()</code>) replays one branch at a time using patches and is retained as a fallback.</p>
+
+<p>These private functions are shared by both engines:</p>
 
 <div class="card card-purple">
   <div class="fn-sig" id="fn-getCommitMeta"><span class="tag tag-purple">private</span> getCommitMeta(hash: string): CommitMeta <a class="src-link" href="shadow-common.ts#L278">[source:278]</a></div>
@@ -819,7 +822,7 @@
 
 <div class="card card-purple">
   <div class="fn-sig" id="fn-applyPatch"><span class="tag tag-purple">private</span> applyPatch(patch: string, subdir: string): boolean <a class="src-link" href="shadow-common.ts#L317">[source:317]</a></div>
-  <p>Applies a patch (diff) to a subdirectory using <code>git apply --ignore-whitespace</code>. Returns <code>true</code> on success, <code>false</code> on failure. Since shadow sync replays commits sequentially onto a clean state, a failed patch means something is fundamentally out of sync &mdash; not a merge conflict to resolve.</p>
+  <p>Applies a patch (diff) to a subdirectory using <code>git apply --ignore-whitespace</code>. Returns <code>true</code> on success, <code>false</code> on failure. Used by the per-branch (legacy) engine only &mdash; the topology-preserving engine uses <code>read-tree</code> instead of patches. A failed patch means something is fundamentally out of sync &mdash; not a merge conflict to resolve.</p>
   <p><strong>Design decision:</strong> Patches are written to a temp file (not piped via stdin) because Windows has issues with large stdin pipes. The temp file is always cleaned up in a <code>finally</code> block. CRLF line endings are normalized to LF before applying, since mixed line endings cause patch failures on Windows.</p>
 </div>
 
@@ -847,21 +850,54 @@
 
 <div class="card card-purple">
   <div class="fn-sig" id="fn-collectExternalCommits"><span class="tag tag-purple">private</span> collectExternalCommits(externalRef, seedHash?): string[] <a class="src-link" href="shadow-common.ts#L402">[source:402]</a></div>
-  <p>Collects the list of commit hashes to replay, in chronological order (<code>--reverse</code>). If a <code>seedHash</code> is provided (set during <a href="#fn-setup">setup</a>), only collects commits after that point.</p>
+  <p>Collects the list of commit hashes to replay for a single branch, in chronological order (<code>--reverse</code>). Used by the per-branch engine. If a <code>seedHash</code> is provided (set during <a href="#fn-setup">setup</a>), only collects commits after that point.</p>
+</div>
+
+<h4>Topology-Preserving Engine (Primary)</h4>
+
+<p>These functions power the topology-preserving replay used by <a href="#fn-ci-sync">CI sync</a>. Instead of processing branches one at a time, they collect all commits across all branches in a single topological traversal.</p>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-buildSyncedMapping"><span class="tag tag-purple">private</span> buildSyncedMapping(dir: string): Map&lt;string, string&gt; <a class="src-link" href="shadow-common.ts#L524">[source:524]</a></div>
+  <p>Scans ALL branches (<code>--all</code>) for commits with a <code>Shadow-synced-from</code> trailer. Returns a mapping of external SHA &rarr; local SHA. This global mapping is what allows shared commits to be deduplicated: if a commit was already mirrored for one branch, the same local SHA is reused when that commit appears on another branch.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-collectAllExternalCommits"><span class="tag tag-purple">private</span> collectAllExternalCommits(remote, branches, seedHash?): TopoCommit[] <a class="src-link" href="shadow-common.ts#L552">[source:552]</a></div>
+  <p>Collects all commits across multiple branches in a single <code>git rev-list --topo-order --reverse --parents</code> call. Returns an array of <code>{ hash, parents[] }</code> in topological order (parents before children). Git automatically deduplicates shared commits, so a commit reachable from both <code>main</code> and <code>feature/x</code> appears only once.</p>
+</div>
+
+<div class="card card-purple">
+  <div class="fn-sig" id="fn-buildBranchMapping"><span class="tag tag-purple">private</span> buildBranchMapping(remote, branches, shaMapping): Map&lt;string, string&gt; <a class="src-link" href="shadow-common.ts#L576">[source:576]</a></div>
+  <p>After replay, maps each branch name to the local SHA that corresponds to the external branch's HEAD. The caller uses this to <code>git update-ref</code> each shadow branch to the correct tip.</p>
 </div>
 
 <div class="card card-accent">
+  <div class="fn-sig" id="fn-replayCommitsTopological"><span class="tag tag-blue">exported</span> replayCommitsTopological(opts): { mirrored: number; branchMapping: Map; upToDate: boolean } <a class="src-link" href="shadow-common.ts#L601">[source:601]</a></div>
+  <p><strong>This is the heart of the system.</strong> It orchestrates the topology-preserving replay:</p>
+  <ol>
+    <li>Build the global external &rarr; local SHA mapping (via <a href="#fn-buildSyncedMapping"><code>buildSyncedMapping</code></a>)</li>
+    <li>Find the seed hash (via <a href="#fn-findSeedHash"><code>findSeedHash</code></a>)</li>
+    <li>Collect all commits across all branches in topological order (via <a href="#fn-collectAllExternalCommits"><code>collectAllExternalCommits</code></a>)</li>
+    <li>Filter out already-synced ones</li>
+    <li>For each new commit: scope tree under <code>dir/</code> via <code>git read-tree --prefix</code> &rarr; map external parents to local SHAs &rarr; create commit via <code>git commit-tree</code> with original metadata + sync trailer</li>
+    <li>Build the branch mapping so the caller can update shadow branch refs</li>
+  </ol>
+  <p><strong>Key property:</strong> Because all branches share a single SHA mapping, a commit reachable from multiple branches gets one local SHA. This means shadow branches share the same merge base, preserving the DAG topology of the external repo.</p>
+  <p>Returns how many commits were mirrored, whether we were already up to date, and the branch &rarr; local SHA mapping.</p>
+</div>
+
+<h4>Per-Branch Engine (Legacy Fallback)</h4>
+
+<div class="card card-accent">
   <div class="fn-sig" id="fn-replayCommits"><span class="tag tag-blue">exported</span> replayCommits(opts): { mirrored: number; upToDate: boolean } <a class="src-link" href="shadow-common.ts#L426">[source:426]</a></div>
-  <p><strong>This is the heart of the system.</strong> It orchestrates the entire replay process:</p>
+  <p>The original replay engine. Processes a single branch at a time using patch-based replay:</p>
   <ol>
     <li>Build the set of already-synced commits (via <a href="#fn-buildAlreadySyncedSetFor"><code>buildAlreadySyncedSetFor</code></a>)</li>
-    <li>Find the seed hash (via <a href="#fn-findSeedHash"><code>findSeedHash</code></a>)</li>
-    <li>Collect all external commits that need replaying (via <a href="#fn-collectExternalCommits"><code>collectExternalCommits</code></a>)</li>
-    <li>Filter out already-synced ones</li>
+    <li>Collect external commits for one branch (via <a href="#fn-collectExternalCommits"><code>collectExternalCommits</code></a>)</li>
     <li>For each new commit: <a href="#fn-diffForCommit">generate patch</a> &rarr; <a href="#fn-applyPatch">apply to subdirectory</a> &rarr; <a href="#fn-filesForCommit">stage files</a> &rarr; <a href="#fn-commitWithMeta">commit with original metadata</a> + sync trailer</li>
-    <li>Handle empty patches (the commit exists in the external repo but produces no changes in our context) by recording an empty commit</li>
   </ol>
-  <p>Returns how many commits were mirrored and whether we were already up to date.</p>
+  <p>Retained as a fallback but no longer used by CI sync. The topology-preserving engine above replaced it because this approach cannot share SHAs across branches &mdash; a commit on both <code>main</code> and <code>feature/x</code> gets two different local SHAs, breaking merge topology.</p>
 </div>
 
 <hr>
@@ -968,17 +1004,16 @@
     <li>Adds/updates the git remote</li>
     <li>Fetches from the external remote</li>
     <li>Lists all branches on the remote</li>
-    <li>For each branch, checks out the corresponding shadow branch and calls <a href="#fn-replayCommits"><code>replayCommits()</code></a></li>
-    <li>Pushes updated shadow branches to origin</li>
-    <li>Returns to detached HEAD between branches to avoid conflicts</li>
+    <li>Calls <a href="#fn-replayCommitsTopological"><code>replayCommitsTopological()</code></a> once per remote, passing all branches &mdash; commits are replayed in topological order across all branches simultaneously</li>
+    <li>Updates each shadow branch ref to the local SHA corresponding to the external branch tip, then pushes</li>
   </ol>
-  <p><strong>Error handling:</strong> If one branch fails, it logs the error, resets any partial state, and continues with the next branch. Only fails at the end if any syncs failed.</p>
+  <p><strong>Error handling:</strong> If a remote fails, it logs the error and continues with the next remote. Only fails at the end if any syncs failed.</p>
   <p><strong>New branches:</strong> If a new branch appears on the external remote, CI sync automatically discovers it (via <a href="#fn-listExternalBranches"><code>listExternalBranches</code></a>) and creates a new shadow branch for it.</p>
 </div>
 
 <div class="card card-red">
   <h4>Designed for CI, but safe to run locally via <code>npm run import</code></h4>
-  <p>This script uses <code>git checkout</code> to switch between shadow branches in the working tree. In CI this is safe because the runner starts clean. When run locally via <code>shadow-import.ts</code>, the import script handles stashing the working tree beforehand and restoring the original branch + working tree afterward. <strong>Do not run <code>shadow-ci-sync.ts</code> directly</strong> &mdash; use <code>npm run import</code> which wraps it safely.</p>
+  <p>This script uses git plumbing (<code>read-tree</code>, <code>commit-tree</code>, <code>update-ref</code>) with a temporary index, so it does not touch the working tree or switch branches. It is safe to run locally via <code>shadow-import.ts</code>, which wraps it with stash/restore for additional safety. <strong>Do not run <code>shadow-ci-sync.ts</code> directly</strong> &mdash; use <code>npm run import</code> which wraps it safely.</p>
 </div>
 
 <hr>
@@ -1015,6 +1050,11 @@
   <p>Replaying commits one-by-one preserves the full history: who made each change, when, and why. A squashed diff would lose all intermediate commits and show everything as one big change by "sync bot." Per-commit replay means <code>git blame</code> and <code>git log</code> remain useful.</p>
 </div>
 
+<div class="card card-accent">
+  <h4>Why topology-preserving replay across all branches?</h4>
+  <p>The earlier per-branch engine replayed each branch independently. This meant a commit reachable from both <code>main</code> and <code>feature/x</code> got <em>two different</em> local SHAs &mdash; one on each shadow branch. As a result, the shadow branches had no shared merge base, making later merges or comparisons misleading. The topology-preserving engine collects all commits in a single topological pass (<code>git rev-list --topo-order --reverse --parents</code>) so shared ancestors are replayed once and reused. This keeps the local DAG structurally identical to the external one: merges, forks, and common ancestors all line up.</p>
+</div>
+
 <div class="card card-green">
   <h4>Why trailers instead of a database or state file?</h4>
   <p>Trailers are embedded in commit messages, so they travel with the code. They work in CI, in clones, and across branches without any external state to manage. There's no database to corrupt, no file to lose, and no sync state to get out of date. The downside is that scanning the log gets slower as history grows, but in practice the seed hash limits how far back it needs to look.</p>
@@ -1026,8 +1066,8 @@
 </div>
 
 <div class="card card-purple">
-  <h4>Why git plumbing for export/forward?</h4>
-  <p>Export and ci-forward no longer use worktrees. They use git plumbing commands (<code>read-tree</code> + <code>write-tree</code> + <code>commit-tree</code>) with a temporary index file to build the tree and commit directly in memory. This is faster than worktrees (no disk I/O, no checkout, no cleanup) and avoids the complexity of managing a second working directory. CI sync still uses worktrees/checkout because it replays commits one-by-one and needs a working tree for <code>git apply</code>.</p>
+  <h4>Why git plumbing everywhere?</h4>
+  <p>All three sync scripts (export, ci-forward, and ci-sync) use git plumbing commands (<code>read-tree</code> + <code>write-tree</code> + <code>commit-tree</code>) with a temporary index file to build trees and commits without touching the working directory. This is faster than worktrees (no disk I/O, no checkout, no cleanup) and avoids the complexity of managing a second working directory. CI sync previously used worktrees/checkout for patch-based replay but was rewritten to use <code>read-tree --prefix</code> to scope external trees under <code>dir/</code>, eliminating the need for a working tree entirely.</p>
 </div>
 
 <div class="card card-accent">
