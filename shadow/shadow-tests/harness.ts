@@ -19,6 +19,8 @@ export interface TestEnv {
   originBare: string;
   subdir: string;
   remoteName: string;
+  /** Shadow branch prefix (default "shadow"). */
+  branchPrefix: string;
   /** All remotes registered in this env (including the primary one). */
   remotes: RemoteInfo[];
   cleanup: () => void;
@@ -29,7 +31,7 @@ function git(cmd: string, cwd: string): string {
 }
 
 /** Create an isolated test environment with three git repos. */
-export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
+export function createTestEnv(name: string, subdir = "frontend", branchPrefix = "shadow"): TestEnv {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `shadow-test-${name}-`));
   const remoteBare = path.join(tmpDir, "remote-bare").replace(/\\/g, "/");
   const remoteWorking = path.join(tmpDir, "remote-working").replace(/\\/g, "/");
@@ -71,26 +73,26 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
   git(`remote add origin "${originBare}"`, localRepo);
   git("push origin main", localRepo);
 
-  // Create shadow branch on origin for export tests
-  const shadowBranch = `shadow/${subdir}/main`;
-  git(`checkout --orphan ${shadowBranch}`, localRepo);
-  git("reset --hard", localRepo);
-  git('commit --allow-empty -m "Initialize shadow branch"', localRepo);
-  git(`push origin HEAD:${shadowBranch}`, localRepo);
-  git("checkout main", localRepo);
-  // Merge shadow into local so export's pre-flight check passes
-  // (export refuses if shadow has commits not in HEAD)
-  git(`merge origin/${shadowBranch} --allow-unrelated-histories --no-edit`, localRepo);
+  // Create seed commit on main — records the external repo's current tip
+  // so ci-sync knows where to start replaying. The seed commit is on main's
+  // history, giving shadow branches shared ancestry for plain git merge.
+  const extTip = git("rev-parse team/main", localRepo);
+  git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, localRepo);
+  git("push origin main", localRepo);
 
   // Copy shadow scripts and config into local repo so they run from there
   const scriptDir = path.resolve(__dirname, "..");
   const scripts = [
     "shadow-common.ts", "shadow-ci-sync.ts", "shadow-ci-forward.ts",
-    "shadow-export.ts", "shadow-import.ts", "shadow-config.json",
   ];
   for (const f of scripts) {
     fs.copyFileSync(path.join(scriptDir, f), path.join(localRepo, f));
   }
+  // Copy config, overriding branchPrefix if non-default
+  const configSrc = path.join(scriptDir, "shadow-config.json");
+  const configJson = JSON.parse(fs.readFileSync(configSrc, "utf8"));
+  configJson.shadowBranchPrefix = branchPrefix;
+  fs.writeFileSync(path.join(localRepo, "shadow-config.json"), JSON.stringify(configJson, null, 2));
 
   const primary: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking };
 
@@ -98,7 +100,7 @@ export function createTestEnv(name: string, subdir = "frontend"): TestEnv {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   };
 
-  return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, remotes: [primary], cleanup };
+  return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, branchPrefix, remotes: [primary], cleanup };
 }
 
 /** Add an additional remote to an existing test env. Returns a RemoteInfo handle. */
@@ -125,14 +127,10 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   git(`fetch ${remoteName}`, env.localRepo);
   fs.mkdirSync(path.join(env.localRepo, subdir), { recursive: true });
 
-  // Create shadow branch for this remote too
-  const shadowBranch = `shadow/${subdir}/main`;
-  git(`checkout --orphan ${shadowBranch}`, env.localRepo);
-  git("reset --hard", env.localRepo);
-  git('commit --allow-empty -m "Initialize shadow branch"', env.localRepo);
-  git(`push origin HEAD:${shadowBranch}`, env.localRepo);
-  git("checkout main", env.localRepo);
-  git(`merge origin/${shadowBranch} --allow-unrelated-histories --no-edit`, env.localRepo);
+  // Create seed commit on main for this remote
+  const extTip = git(`rev-parse ${remoteName}/main`, env.localRepo);
+  git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, env.localRepo);
+  git("push origin main", env.localRepo);
 
   const info: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking };
   env.remotes.push(info);
@@ -295,29 +293,21 @@ export function runCiSync(env: TestEnv): RunResult {
  * Run shadow-ci-forward.ts — simulates the CI forward workflow.
  * Forwards shadow branch content to the external remote.
  */
+/** Run shadow-ci-forward.ts — replay local commits to external shadow branch. */
 export function runCiForward(env: TestEnv, remote?: RemoteInfo): RunResult {
-  const subdir = remote?.subdir ?? env.subdir;
-  const envVars = {
-    ...ciEnv(env),
-    GITHUB_REF_NAME: `shadow/${subdir}/main`,
-  };
-  return runScript(env, "shadow-ci-forward.ts", [], envVars);
+  const name = remote?.remoteName ?? env.remoteName;
+  return runScript(env, "shadow-ci-forward.ts", ["-r", name], localEnv(env));
 }
 
-/** Run shadow-export.ts — local filtered export to shadow branch. */
-export function runExport(env: TestEnv, message: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
+/** Alias — runExport and runCiForward are now the same operation. */
+export function runExport(env: TestEnv, _message?: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
   const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-export.ts", ["-r", name, "-m", message, "--no-sync", ...extraArgs], localEnv(env));
+  return runScript(env, "shadow-ci-forward.ts", ["-r", name, ...extraArgs], localEnv(env));
 }
 
 /** Alias for runExport. */
 export const runPush = runExport;
 
-/** Run shadow-import.ts — merge shadow branch changes into local working branch. */
-export function runImport(env: TestEnv, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
-  const name = remote?.remoteName ?? env.remoteName;
-  return runScript(env, "shadow-import.ts", ["-r", name, "--no-sync", ...extraArgs], localEnv(env));
-}
 
 /** Pull latest from bare remote into the remote working copy. */
 export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
@@ -331,7 +321,7 @@ export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
  */
 export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `shadow/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
     const content = execSync(`git show origin/${shadowBranch}:${subdir}/${rel}`, {
@@ -346,7 +336,7 @@ export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): 
 /** Get the commit log from the shadow branch on origin. */
 export function getShadowLog(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `shadow/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --oneline -${n}`, env.localRepo);
@@ -358,7 +348,7 @@ export function getShadowLog(env: TestEnv, n = 20, remote?: RemoteInfo): string 
 /** Get commit authors from the shadow branch on origin (format: "Name <email>"). */
 export function getShadowAuthors(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `shadow/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --format="%an <%ae>" -${n}`, env.localRepo);
@@ -370,7 +360,7 @@ export function getShadowAuthors(env: TestEnv, n = 20, remote?: RemoteInfo): str
 /** Get full commit messages from the shadow branch on origin. */
 export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `shadow/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --format="%B" -${n}`, env.localRepo);
@@ -380,24 +370,43 @@ export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): str
 }
 
 /**
- * Merge the shadow branch into the local working branch.
- * Simulates what a user does to pull external changes locally.
+ * Read a file from the external remote's shadow branch (where export pushes).
+ * Files are at root level (prefix stripped). Returns null if absent.
  */
+export function readExternalShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
+  const remoteName = remote?.remoteName ?? env.remoteName;
+  const shadowBranch = `${env.branchPrefix}/main`;
+  try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return null; }
+  try {
+    const content = execSync(`git show ${remoteName}/${shadowBranch}:${rel}`, {
+      cwd: env.localRepo, encoding: "utf8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
+    });
+    return normalizeLF(content);
+  } catch {
+    return null;
+  }
+}
+
+/** Get full commit messages from the external remote's shadow branch. */
+export function getExternalShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
+  const remoteName = remote?.remoteName ?? env.remoteName;
+  const shadowBranch = `${env.branchPrefix}/main`;
+  try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return ""; }
+  try {
+    return git(`log ${remoteName}/${shadowBranch} --format="%B" -${n}`, env.localRepo);
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Safely merge shadow branch into local working branch.
- * Uses --no-commit + restore of non-dir files to prevent the shadow
- * branch's tree (which only contains dir/) from deleting everything else.
+ * Merge the shadow branch into the local working branch.
+ * Shadow commits now carry the full repo tree, so a plain merge works —
+ * git finds the seed commit as the merge base and only dir/ files differ.
  */
 export function mergeShadow(env: TestEnv, remote?: RemoteInfo): void {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `shadow/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   git(`fetch origin ${shadowBranch}`, env.localRepo);
-  git(`merge --no-commit --no-ff --allow-unrelated-histories origin/${shadowBranch}`, env.localRepo);
-  // Restore non-dir files that the merge "deleted"
-  const headFiles = git("ls-tree -r --name-only HEAD", env.localRepo).split("\n").filter(Boolean);
-  const nonDirFiles = headFiles.filter((f: string) => !f.startsWith(`${subdir}/`));
-  if (nonDirFiles.length > 0) {
-    git(`checkout HEAD -- ${nonDirFiles.join(" ")}`, env.localRepo);
-  }
-  git('commit --no-edit --allow-empty', env.localRepo);
+  git(`merge --no-ff origin/${shadowBranch}`, env.localRepo);
 }

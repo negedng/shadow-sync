@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -18,8 +18,8 @@ export default function run() {
     assertEqual(r2.status, 0, "push should succeed");
 
     // Verify shadow branch
-    assertEqual(readShadowFile(env, "keep.txt"), "keep\n", "keep.txt should still exist");
-    assertEqual(readShadowFile(env, "remove.txt"), null, "remove.txt should be gone on shadow branch");
+    assertEqual(readExternalShadowFile(env, "keep.txt"), "keep\n", "keep.txt should still exist");
+    assertEqual(readExternalShadowFile(env, "remove.txt"), null, "remove.txt should be gone on shadow branch");
   } finally {
     env.cleanup();
   }

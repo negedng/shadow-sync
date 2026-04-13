@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual, assertIncludes, assertExitCode } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -33,12 +33,12 @@ export default function run() {
     assertEqual(r2.status, 0, "push should succeed even with untracked file in subdir");
 
     assertEqual(
-      readShadowFile(env, "feature.ts"),
+      readExternalShadowFile(env, "feature.ts"),
       "export const x = 1;\n",
       "committed file should appear on shadow branch",
     );
     assertEqual(
-      readShadowFile(env, "local-notes.txt"),
+      readExternalShadowFile(env, "local-notes.txt"),
       null,
       "untracked file must NOT appear on shadow branch",
     );
@@ -58,7 +58,7 @@ export default function run() {
     );
 
     // Verify the WIP content did NOT reach the shadow branch
-    const shadowBase = readShadowFile(env, "base.txt");
+    const shadowBase = readExternalShadowFile(env, "base.txt");
     assertEqual(shadowBase, "base content\n", "shadow base.txt should not have WIP edits");
 
     // ── Scenario 3: staged but uncommitted changes ───────────────────
@@ -78,13 +78,10 @@ export default function run() {
     git('commit -m "Commit the WIP edit"', env.localRepo);
     fs.unlinkSync(untrackedPath);
 
-    // Merge shadow back (previous export added a commit the pre-flight check requires)
-    mergeShadow(env);
-
     const r5 = runPush(env, "Push after committing");
     assertEqual(r5.status, 0, "push should succeed after committing changes");
 
-    const finalBase = readShadowFile(env, "base.txt");
+    const finalBase = readExternalShadowFile(env, "base.txt");
     assertEqual(
       finalBase,
       "base content\nlocal WIP modification\n",

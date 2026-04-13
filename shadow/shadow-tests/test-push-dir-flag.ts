@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -25,13 +25,13 @@ export default function run() {
     git('add custom-dir/local-file.ts', env.localRepo);
     git('commit -m "Add local file"', env.localRepo);
 
-    // Push using -d flag explicitly (the harness already passes -r)
-    const r2 = runPush(env, "Push with custom dir", ["-d", "custom-dir"]);
+    // Push — the config already maps team → custom-dir
+    const r2 = runPush(env, "Push with custom dir");
     assertEqual(r2.status, 0, "push with -d flag should succeed");
 
     // Verify on shadow branch
     assertEqual(
-      readShadowFile(env, "local-file.ts"),
+      readExternalShadowFile(env, "local-file.ts"),
       "export const local = true;\n",
       "file should appear on shadow branch",
     );

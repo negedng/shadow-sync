@@ -1,12 +1,12 @@
 import { execSync } from "child_process";
-import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile, getShadowLog } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 
-/** Test: local branch + merge workflow, then shadow-push as a single commit. */
+/** Test: local branch + merge workflow, then export replays commits to external. */
 export default function run() {
   const env = createTestEnv("push-branch-merge");
   try {
@@ -36,28 +36,17 @@ export default function run() {
     git("checkout main", env.localRepo);
     git('merge feature/test-branch --no-ff -m "Merge feature/test-branch"', env.localRepo);
 
-    // Push — should produce a single commit on shadow branch with all changes
+    // Export replays commits to external's shadow branch
     const r2 = runPush(env, "Add feature from branch merge");
     assertEqual(r2.status, 0, "push should succeed");
     assertIncludes(r2.stdout, "Done", "should report done");
 
-    // Verify shadow branch has the merged content
+    // Verify external shadow branch has the merged content
     assertEqual(
-      readShadowFile(env, "feature.ts"),
+      readExternalShadowFile(env, "feature.ts"),
       "export const v1 = true;\nexport const v2 = true;\n",
-      "feature.ts should have final merged content on shadow branch",
+      "feature.ts should have final merged content on external shadow branch",
     );
-
-    // Verify it's a single commit (not two) on shadow branch's own lineage.
-    // Use --first-parent because the merge-based export creates merge commits
-    // whose ancestry includes the full working branch history.
-    const shadowLog = getShadowLog(env);
-    const firstParentLines = git(
-      "log origin/shadow/frontend/main --first-parent --oneline -20",
-      env.localRepo,
-    ).split("\n").filter(Boolean);
-    const featureCommits = firstParentLines.filter(l => l.includes("feature"));
-    assertEqual(featureCommits.length, 1, "should be exactly one commit for the feature on shadow branch");
   } finally {
     env.cleanup();
   }

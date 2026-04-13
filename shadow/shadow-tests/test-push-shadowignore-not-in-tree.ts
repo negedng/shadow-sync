@@ -1,7 +1,7 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { createTestEnv, commitOnLocal, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnLocal, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 function git(cmd: string, cwd: string): string {
@@ -38,30 +38,27 @@ export default function run() {
 
     // Verify secret.env is NOT on shadow branch
     assertEqual(
-      readShadowFile(env, "secret.env"),
+      readExternalShadowFile(env, "secret.env"),
       null,
       "secret.env should not be on shadow branch",
     );
     // Verify app.ts IS there
     assertEqual(
-      readShadowFile(env, "app.ts"),
+      readExternalShadowFile(env, "app.ts"),
       "export const app = true;\n",
       "app.ts should be on shadow branch",
     );
-
-    // Merge shadow back so the pre-flight check passes for the next export
-    mergeShadow(env);
 
     // Make another export to create multiple commits
     commitOnLocal(env, { "utils.ts": "export const util = true;\n" }, "Add utils.ts");
     const r2 = runPush(env, "Second export");
     assertEqual(r2.status, 0, "second push should succeed");
 
-    // Walk ALL commits on the shadow branch (first-parent = the shadow's own lineage)
+    // Walk ALL commits on the external's shadow branch
     // and verify secret.env never appears in any tree.
-    git("fetch origin shadow/frontend/main", env.localRepo);
+    git(`fetch ${env.remoteName} shadow/main`, env.localRepo);
     const commits = git(
-      "log origin/shadow/frontend/main --first-parent --format=%H",
+      `log ${env.remoteName}/shadow/main --format=%H`,
       env.localRepo,
     ).split("\n").filter(Boolean);
 

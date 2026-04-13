@@ -1,127 +1,106 @@
 #!/usr/bin/env ts-node
 /**
- * shadow-ci-forward.ts — GitHub Actions entrypoint for forwarding shadow branch
- * state to external remotes.
+ * shadow-ci-forward.ts — Forward local commits to external remotes.
  *
- * Triggered when shadow/** branches are pushed to origin. Parses the branch
- * name to identify the remote + branch, takes a snapshot of the {dir}/ content
- * (stripping the dir prefix), and pushes to the external remote.
+ * For each configured remote, replays local commits (that touch dir/) to a
+ * shadow branch on the external repo, stripping the dir/ prefix. The external
+ * team can `git merge` the shadow branch to pull in changes.
  *
- * The shadow branch and external remote stay in sync — no filtering is applied
- * here (.shadowignore is applied during shadow-export, before content reaches
- * the shadow branch).
+ * This is the mirror of ci-sync: ci-sync adds a prefix, ci-forward strips it.
  *
+ * Can run in CI (GitHub Actions) or locally.
+ *
+ * Usage:
+ *   npx tsx shadow-ci-forward.ts              # forward all remotes
+ *   npx tsx shadow-ci-forward.ts -r backend   # forward one remote
  */
-import * as fs from "fs";
-import * as os from "os";
+import { parseArgs } from "util";
 import * as path from "path";
 import {
-  REMOTES, SHADOW_BRANCH_PREFIX, FORWARD_TRAILER,
-  git, refExists, appendTrailer,
-  validateName, die,
+  REMOTES, SHADOW_BRANCH_PREFIX,
+  git, replayCommitsToExternal,
+  getCurrentBranch, validateName, die,
 } from "./shadow-common";
 
+const { values } = parseArgs({
+  options: {
+    remote: { type: "string", short: "r" },
+    branch: { type: "string", short: "b" },
+  },
+  strict: true,
+});
 
-// ── Determine which shadow branch was pushed ─────────────────────────────────
+const remotesToForward = values.remote
+  ? REMOTES.filter(r => r.remote === values.remote)
+  : REMOTES;
 
-const refName = process.env.GITHUB_REF_NAME;
-if (!refName) {
-  die("GITHUB_REF_NAME is not set. This script must run in GitHub Actions.");
+if (values.remote && remotesToForward.length === 0) {
+  die(`Remote '${values.remote}' not found in config.`);
 }
 
-const prefix = `${SHADOW_BRANCH_PREFIX}/`;
-if (!refName.startsWith(prefix)) {
-  die(`Branch '${refName}' does not start with '${prefix}'. Nothing to forward.`);
-}
+const localBranch = values.branch ?? getCurrentBranch();
+const shadowIgnoreFile = path.join(__dirname, ".shadowignore");
+let failed = 0;
 
-// Parse: shadow/{dir}/{branch} → dir="backend", branch="main" (or "feature/foo")
-const rest = refName.slice(prefix.length);
-const slashIdx = rest.indexOf("/");
-if (slashIdx === -1) {
-  die(`Cannot parse shadow branch name '${refName}'. Expected format: ${prefix}{dir}/{branch}`);
-}
-const dir = rest.slice(0, slashIdx);
-const externalBranch = rest.slice(slashIdx + 1);
-validateName(dir, "Directory");
-validateName(externalBranch, "External branch");
-
-// Find the matching remote config entry
-const remoteEntry = REMOTES.find(r => r.dir === dir);
-if (!remoteEntry) {
-  die(`No remote configured for directory '${dir}'. Check shadow-config.json.`);
-}
-const remote = remoteEntry.remote;
-const resolvedUrl = remoteEntry.url;
-
-console.log(`Shadow branch : ${refName}`);
-console.log(`Remote        : ${remote}`);
-console.log(`Directory     : ${dir}/`);
-console.log(`External branch   : ${externalBranch}`);
-console.log();
-
-// ── Add external remote and fetch ────────────────────────────────────────────
-
-const existing = git(["remote", "get-url", remote], { safe: true });
-if (!existing.ok) {
-  git(["remote", "add", remote, resolvedUrl]);
-} else if (existing.stdout !== resolvedUrl) {
-  git(["remote", "set-url", remote, resolvedUrl]);
-}
-
-console.log(`Fetching from '${remote}'...`);
-git(["fetch", remote]);
-
-// ── Build tree and push to external remote ───────────────────────────────────
-
-const externalRef = `${remote}/${externalBranch}`;
-const externalExists = refExists(externalRef);
-
-const tmpIndex = path.join(os.tmpdir(), `shadow-fwd-idx-${Date.now()}`);
-process.env.GIT_INDEX_FILE = tmpIndex;
-
-try {
-  // Read dir/ from shadow branch at root level (strips the prefix)
-  console.log(`Building tree from ${dir}/ on shadow branch...`);
-  git(["read-tree", "--empty"]);
-  const treeCheck = git(["rev-parse", `origin/${refName}:${dir}`], { safe: true });
-  if (!treeCheck.ok) {
-    console.log(`No files under ${dir}/ on shadow branch. Nothing to forward.`);
-    process.exit(0);
+// Refuse if working tree has uncommitted changes to any dir we're forwarding
+for (const { dir } of remotesToForward) {
+  const dirty = !git(["diff", "--cached", "--quiet", "--", `${dir}/`], { safe: true, plain: true }).ok
+    || !git(["diff", "--quiet", "HEAD", "--", `${dir}/`], { safe: true, plain: true }).ok;
+  if (dirty) {
+    console.error(`✘ '${dir}/' has uncommitted changes. Commit or stash them first.`);
+    process.exit(1);
   }
-  git(["read-tree", `origin/${refName}:${dir}`]);
-  const tree = git(["write-tree"]);
+}
 
-  // Check if anything changed
-  if (externalExists) {
-    const externalTree = git(["rev-parse", `${externalRef}^{tree}`]);
-    if (tree === externalTree) {
-      console.log("External remote is already up to date. Nothing to forward.");
-      process.exit(0);
+for (const { remote, dir, url } of remotesToForward) {
+  validateName(remote, "Remote name");
+  validateName(dir, "Directory");
+
+  // Add or update the git remote
+  const existing = git(["remote", "get-url", remote], { safe: true });
+  if (!existing.ok) {
+    git(["remote", "add", remote, url]);
+  } else if (existing.stdout !== url) {
+    git(["remote", "set-url", remote, url]);
+  }
+
+  console.log(`\n══ Forwarding to '${remote}' ══`);
+  git(["fetch", remote]);
+
+  const externalBranch = localBranch;
+  const extShadowBranch = `${SHADOW_BRANCH_PREFIX}/${externalBranch}`;
+
+  try {
+    const result = replayCommitsToExternal({
+      remote, dir, localBranch, externalBranch, shadowIgnoreFile,
+    });
+
+    if (result.upToDate) {
+      console.log("  Already up to date.");
+      continue;
     }
+
+    if (result.tipSHA) {
+      console.log(`  Pushing to ${remote}/${extShadowBranch}...`);
+      const pushResult = git(
+        ["push", remote, `${result.tipSHA}:refs/heads/${extShadowBranch}`],
+        { safe: true },
+      );
+      if (!pushResult.ok) {
+        console.error(pushResult.stderr);
+        throw new Error(`Push to ${remote}/${extShadowBranch} failed.`);
+      }
+      console.log(`  ✓ Pushed ${result.mirrored} commit(s).`);
+    }
+  } catch (err: any) {
+    console.error(`  ✘ Failed to forward to ${remote}: ${err.message}`);
+    failed++;
   }
-
-  // Build commit message from the shadow branch merge commit.
-  // Strip existing Shadow-* trailers to prevent accumulation across round-trips.
-  // Add our own trailer so CI sync recognizes it and skips it on pull-back.
-  const shadowHash = git(["rev-parse", `origin/${refName}`]);
-  const rawMessage = git(["log", "-1", "--format=%B", `origin/${refName}`]);
-  const cleanMessage = rawMessage.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
-  const message = appendTrailer(cleanMessage, `${FORWARD_TRAILER}: ${shadowHash}`);
-
-  // Create commit (with external branch tip as parent if it exists)
-  const parentArgs = externalExists ? ["-p", git(["rev-parse", externalRef])] : [];
-  const newCommit = git(["commit-tree", tree, ...parentArgs, "-m", message]);
-
-  // Push to external remote
-  console.log(`\nPushing to ${remote}/${externalBranch}...`);
-  const pushResult = git(["push", remote, `${newCommit}:refs/heads/${externalBranch}`], { safe: true });
-  if (!pushResult.ok) {
-    console.error(pushResult.stderr);
-    die(`git push to ${remote}/${externalBranch} failed.`);
-  }
-
-  console.log(`\n✓ Done. Forwarded shadow/${dir}/${externalBranch} → ${remote}/${externalBranch}.`);
-} finally {
-  delete process.env.GIT_INDEX_FILE;
-  fs.rmSync(tmpIndex, { force: true });
 }
+
+if (failed > 0) {
+  console.error(`\n${failed} forward(s) failed.`);
+  process.exit(1);
+}
+
+console.log("\n✓ All forwards completed successfully.");

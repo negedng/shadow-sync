@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile, getShadowLogFull } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile, getExternalShadowLogFull } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 export default function run() {
@@ -20,14 +20,14 @@ export default function run() {
 
     // Verify on the shadow branch
     assertEqual(
-      readShadowFile(env, "new-feature.ts"),
+      readExternalShadowFile(env, "new-feature.ts"),
       "export function feat() {}\n",
       "new-feature.ts should appear on shadow branch",
     );
 
     // Shadow commit should have the commit message
-    const shadowLog = getShadowLogFull(env);
-    assertIncludes(shadowLog, "Add new feature from internal repo", "shadow commit should have the message");
+    const shadowLog = getExternalShadowLogFull(env);
+    assertIncludes(shadowLog, "Add new feature", "shadow commit should have the original commit message");
   } finally {
     env.cleanup();
   }

@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 /** Test: push syncs deeply nested directory structures to shadow branch. */
@@ -21,12 +21,12 @@ export default function run() {
     assertEqual(r2.status, 0, "push should succeed");
 
     assertEqual(
-      readShadowFile(env, "src/components/Button.tsx"),
+      readExternalShadowFile(env, "src/components/Button.tsx"),
       "export const Button = () => {};\n",
       "nested tsx file on shadow branch",
     );
     assertEqual(
-      readShadowFile(env, "src/utils/helpers/format.ts"),
+      readExternalShadowFile(env, "src/utils/helpers/format.ts"),
       "export function format() {}\n",
       "triple nested file on shadow branch",
     );

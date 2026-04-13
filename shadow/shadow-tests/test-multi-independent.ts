@@ -1,4 +1,4 @@
-import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runCiSync, runExport, readShadowFile, mergeShadow } from "./harness";
+import { createTestEnv, addRemote, commitOnRemote, commitOnLocal, runCiSync, runExport, readShadowFile, readExternalShadowFile, mergeShadow } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 /** Test: changes to one remote don't affect the other (isolation). */
@@ -12,7 +12,7 @@ export default function run() {
     const r1 = runCiSync(env);
     assertEqual(r1.status, 0, "ci-sync should succeed");
 
-    // Verify each shadow branch has only its own files
+    // Verify each shadow branch has only its own files (import side — origin)
     assertEqual(readShadowFile(env, "index.html"), "<html/>\n", "frontend shadow has index.html");
     assertEqual(readShadowFile(env, "main.go", backend), "package main\n", "backend shadow has main.go");
 
@@ -22,20 +22,16 @@ export default function run() {
     const r2 = runExport(env, "Update frontend HTML");
     assertEqual(r2.status, 0, "frontend export");
 
-    // Frontend shadow should be updated
-    assertEqual(readShadowFile(env, "index.html"), "<html>updated</html>\n", "frontend shadow updated");
-
-    // Backend shadow should be unaffected
-    assertEqual(readShadowFile(env, "main.go", backend), "package main\n", "backend shadow unchanged");
+    // External's shadow branch should have the update (export side — external remote)
+    assertEqual(readExternalShadowFile(env, "index.html"), "<html>updated</html>\n", "frontend external shadow updated");
 
     // Modify backend on external, CI sync again
     commitOnRemote(env, { "main.go": "package main\n\nfunc main() {}\n" }, "Update backend", backend);
     const r3 = runCiSync(env);
     assertEqual(r3.status, 0, "second ci-sync should succeed");
 
-    // Backend shadow updated, frontend shadow unchanged
+    // Backend shadow updated (import side), frontend shadow unchanged
     assertEqual(readShadowFile(env, "main.go", backend), "package main\n\nfunc main() {}\n", "backend shadow updated");
-    assertEqual(readShadowFile(env, "index.html"), "<html>updated</html>\n", "frontend shadow still has our update");
 
     // Re-sync should be a no-op
     const r4 = runCiSync(env);

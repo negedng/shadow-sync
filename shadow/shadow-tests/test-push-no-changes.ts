@@ -17,7 +17,7 @@ export default function run() {
     // Second push without any new local changes — should report no changes
     const r3 = runPush(env, "Nothing changed");
     assertEqual(r3.status, 0, "push should exit cleanly");
-    assertIncludes(r3.stdout, "No changes to export", "should report no changes");
+    assertIncludes(r3.stdout, "up to date", "should report no changes");
   } finally {
     env.cleanup();
   }

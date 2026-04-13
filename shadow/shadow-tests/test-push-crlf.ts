@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -33,7 +33,7 @@ export default function run() {
     assertEqual(r.status, 0, `push of CRLF file should succeed: ${r.stderr.slice(0, 300)}`);
 
     // Verify file exists on shadow branch
-    const shadowContent = readShadowFile(env, "crlf-local.txt");
+    const shadowContent = readExternalShadowFile(env, "crlf-local.txt");
     assertEqual(shadowContent !== null, true, "CRLF file should be on shadow branch");
   } finally {
     env.cleanup();

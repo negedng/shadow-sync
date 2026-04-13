@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
 import { assertEqual } from "./assert";
 
 // Verify that ** glob patterns in .shadowignore exclude files at any depth.
@@ -31,11 +31,11 @@ export default function run() {
     assertEqual(r2.status, 0, "push should succeed");
 
     // Verify shadow branch
-    assertEqual(readShadowFile(env, "app.ts"), "export const app = true;\n", "app.ts should be on shadow branch");
-    assertEqual(readShadowFile(env, "src/deep/real.ts"), "export const real = 1;\n", "real.ts should be on shadow branch");
-    assertEqual(readShadowFile(env, "CLAUDE.md"), null, "root CLAUDE.md should NOT be on shadow branch");
-    assertEqual(readShadowFile(env, "src/CLAUDE.md"), null, "nested CLAUDE.md should NOT be on shadow branch");
-    assertEqual(readShadowFile(env, "src/deep/CLAUDE.md"), null, "deeply nested CLAUDE.md should NOT be on shadow branch");
+    assertEqual(readExternalShadowFile(env, "app.ts"), "export const app = true;\n", "app.ts should be on shadow branch");
+    assertEqual(readExternalShadowFile(env, "src/deep/real.ts"), "export const real = 1;\n", "real.ts should be on shadow branch");
+    assertEqual(readExternalShadowFile(env, "CLAUDE.md"), null, "root CLAUDE.md should NOT be on shadow branch");
+    assertEqual(readExternalShadowFile(env, "src/CLAUDE.md"), null, "nested CLAUDE.md should NOT be on shadow branch");
+    assertEqual(readExternalShadowFile(env, "src/deep/CLAUDE.md"), null, "deeply nested CLAUDE.md should NOT be on shadow branch");
   } finally {
     env.cleanup();
   }

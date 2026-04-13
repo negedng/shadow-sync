@@ -1,16 +1,21 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, runImport, readLocalFile } from "./harness";
+import { execSync, spawnSync } from "child_process";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, readLocalFile } from "./harness";
 import { assertEqual, assertIncludes, assertExitCode } from "./assert";
 
+function git(cmd: string, cwd: string): string {
+  return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+}
+
+function gitSafe(args: string[], cwd: string) {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
 /**
- * Test: import detects merge conflicts and lets the user resolve them,
+ * Test: git merge detects conflicts and lets the user resolve them,
  * and files outside {dir}/ are not affected by the merge.
- *
- * Scenario: both external and local modify the same file in the same place.
- * Import should exit with code 1 and report the conflicting file, leaving
- * conflict markers in the working tree for the user to resolve.
- * A file outside the target directory should remain unchanged.
  */
 export default function run() {
   const env = createTestEnv("import-conflict");
@@ -20,16 +25,14 @@ export default function run() {
     const r1 = runCiSync(env);
     assertExitCode(r1, 0, "ci-sync should succeed");
 
-    // Import and commit so local has the file
-    const r2 = runImport(env);
-    assertExitCode(r2, 0, "initial import should succeed");
+    // Import via git merge
+    mergeShadow(env);
 
     // Add a file outside {dir}/ on the local branch
     const outsideFile = path.join(env.localRepo, "root-file.txt");
     fs.writeFileSync(outsideFile, "should not be touched\n");
-    const { spawnSync } = require("child_process");
-    spawnSync("git", ["add", "root-file.txt"], { cwd: env.localRepo, encoding: "utf8" });
-    spawnSync("git", ["commit", "-m", "Add root-file.txt"], { cwd: env.localRepo, encoding: "utf8" });
+    git("add root-file.txt", env.localRepo);
+    git('commit -m "Add root-file.txt"', env.localRepo);
 
     // External modifies the file
     commitOnRemote(env, { "shared.ts": "line 1\nexternal change\nline 3\n" }, "External edit");
@@ -39,10 +42,18 @@ export default function run() {
     // Local modifies the same line in the same file
     commitOnLocal(env, { "shared.ts": "line 1\nlocal change\nline 3\n" }, "Local edit");
 
-    // Import should detect the conflict and exit with code 1
-    const r4 = runImport(env);
-    assertExitCode(r4, 1, "import should fail with merge conflict");
-    assertIncludes(r4.stdout + r4.stderr, "shared.ts", "should report the conflicting file");
+    // git merge should detect the conflict
+    git(`fetch origin shadow/${env.subdir}/main`, env.localRepo);
+    const mergeResult = gitSafe(
+      ["merge", "--no-ff", `origin/shadow/${env.subdir}/main`],
+      env.localRepo,
+    );
+    assertEqual(mergeResult.status !== 0, true, "merge should fail with conflict");
+    assertIncludes(
+      mergeResult.stdout + mergeResult.stderr,
+      "shared.ts",
+      "should report the conflicting file",
+    );
 
     // The working tree should have conflict markers
     const content = readLocalFile(env, "shared.ts")!;
@@ -51,7 +62,7 @@ export default function run() {
 
     // File outside {dir}/ should be untouched
     const outsideContent = fs.readFileSync(outsideFile, "utf8");
-    assertEqual(outsideContent, "should not be touched\n", "root-file.txt should not be affected by import");
+    assertEqual(outsideContent, "should not be touched\n", "root-file.txt should not be affected by merge");
   } finally {
     env.cleanup();
   }
