@@ -383,7 +383,7 @@ shadow-sync --from a</code></pre>
     <tr>
       <td style="background:var(--accent-light);padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoB</strong><br><code>main</code>, <code>feature/x</code></td>
       <td style="padding:0 1rem">&xrarr;<br><small>fetch</small></td>
-      <td style="background:#ede9fe;padding:0.8rem 1.2rem;border-radius:8px"><strong>Replay engine</strong><br>per-commit, topo order<br><small>strip <code>b.dir</code> &rarr; add <code>a.dir</code></small><br><small>+ <code>Shadow-synced-from</code> trailer</small></td>
+      <td style="background:#ede9fe;padding:0.8rem 1.2rem;border-radius:8px"><strong>Replay engine</strong><br>per-commit, topo order<br><small>strip <code>b.dir</code> &rarr; add <code>a.dir</code></small><br><small>+ <code>Shadow-replayed: {b.remote}</code> trailer</small></td>
       <td style="padding:0 1rem">&xrarr;<br><small>push</small></td>
       <td style="background:#dcfce7;padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoA</strong><br><code>shadow/backend/main</code><br><code>shadow/backend/feature/x</code></td>
     </tr>
@@ -397,7 +397,7 @@ shadow-sync --from a</code></pre>
     <tr>
       <td style="background:#dcfce7;padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoA</strong><br><code>main</code> (commits touching <code>backend/</code>)</td>
       <td style="padding:0 1rem">&xrarr;<br><small>fetch</small></td>
-      <td style="background:#ede9fe;padding:0.8rem 1.2rem;border-radius:8px"><strong>Replay engine</strong><br>per-commit, topo order<br><small>strip <code>a.dir</code> &rarr; add <code>b.dir</code></small><br><small>+ <code>Shadow-forwarded-from</code> trailer</small></td>
+      <td style="background:#ede9fe;padding:0.8rem 1.2rem;border-radius:8px"><strong>Replay engine</strong><br>per-commit, topo order<br><small>strip <code>a.dir</code> &rarr; add <code>b.dir</code></small><br><small>+ <code>Shadow-replayed: {a.remote}</code> trailer</small></td>
       <td style="padding:0 1rem">&xrarr;<br><small>push</small></td>
       <td style="background:var(--accent-light);padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoB</strong><br><code>shadow/backend/main</code></td>
     </tr>
@@ -430,10 +430,8 @@ shadow-sync --from a</code></pre>
     }
   ],
   "trailers": {
-    "sync": "Shadow-synced-from",
+    "replayed": "Shadow-replayed",
     "seed": "Shadow-seed",
-    "forward": "Shadow-forwarded-from",
-    "export": "Shadow-export"
   },
   "gitConfigOverrides": {
     "core.autocrlf": "false"
@@ -573,22 +571,22 @@ shadow-sync --from a</code></pre>
 
 <div class="grid-2">
   <div class="card">
-    <h3><span class="tag tag-blue">B &rarr; A</span> Shadow-synced-from</h3>
+    <h3><span class="tag tag-blue">B &rarr; A</span> Shadow-replayed: {b.remote}</h3>
     <p>
       Added to every commit replayed from B into A. Records the original commit hash from RepoB.
     </p>
-    <pre><code>Shadow-synced-from: a1b2c3d</code></pre>
+    <pre><code>Shadow-replayed: repo-b a1b2c3d</code></pre>
     <p>
       When syncing A&rarr;B, any commit carrying this trailer is <strong>skipped</strong> &mdash; it
       originated in B and should not be sent back.
     </p>
   </div>
   <div class="card">
-    <h3><span class="tag tag-purple">A &rarr; B</span> Shadow-forwarded-from</h3>
+    <h3><span class="tag tag-purple">A &rarr; B</span> Shadow-replayed: {a.remote}</h3>
     <p>
       Added to every commit replayed from A into B. Records the original commit hash from RepoA.
     </p>
-    <pre><code>Shadow-forwarded-from: e4f5g6h</code></pre>
+    <pre><code>Shadow-replayed: repo-a e4f5g6h</code></pre>
     <p>
       When syncing B&rarr;A, any commit carrying this trailer is <strong>skipped</strong> &mdash; it
       originated in A and should not be sent back.
@@ -600,8 +598,8 @@ shadow-sync --from a</code></pre>
   <h3>Direction config (inside <code>replayCommits</code>)</h3>
   <table>
     <tr><th>Direction</th><th>addTrailer</th><th>skipTrailer</th></tr>
-    <tr><td>A &rarr; B (<code>--from a</code>)</td><td><code>Shadow-forwarded-from</code></td><td><code>Shadow-synced-from</code></td></tr>
-    <tr><td>B &rarr; A (<code>--from b</code>)</td><td><code>Shadow-synced-from</code></td><td><code>Shadow-forwarded-from</code></td></tr>
+    <tr><td>A &rarr; B (<code>--from a</code>)</td><td><code>Shadow-replayed: {a.remote}</code></td><td><code>Shadow-replayed: {b.remote}</code></td></tr>
+    <tr><td>B &rarr; A (<code>--from b</code>)</td><td><code>Shadow-replayed: {b.remote}</code></td><td><code>Shadow-replayed: {a.remote}</code></td></tr>
   </table>
 </div>
 
@@ -619,10 +617,10 @@ shadow-sync --from a</code></pre>
 </div>
 
 <div class="card">
-  <h3><span class="tag tag-orange">Export</span> Shadow-export trailer</h3>
+  
   <p>
     Used in CI workflows. The <code>shadow-forward.yml</code> workflow only processes pushes to shadow branches
-    that contain commits with the <code>Shadow-export:</code> trailer. This prevents the forward workflow from
+    Both directions run on independent cron schedules. This prevents cascade loops where
     triggering on every shadow branch update and limits it to intentional exports.
   </p>
 </div>
@@ -731,7 +729,7 @@ coverage/</code></pre>
     </tr>
     <tr>
       <td><code>shadow-tests/</code></td>
-      <td>38 automated tests covering pull, push, multi-pair, and edge-case scenarios.</td>
+      <td>39 automated tests covering pull, push, multi-pair, cascade prevention, and edge-case scenarios.</td>
     </tr>
     <tr>
       <td><code>.github/workflows/shadow-sync.yml</code></td>
@@ -739,7 +737,7 @@ coverage/</code></pre>
     </tr>
     <tr>
       <td><code>.github/workflows/shadow-forward.yml</code></td>
-      <td>CI push workflow: triggers on shadow branch pushes with <code>Shadow-export:</code> trailer.</td>
+      <td>CI push workflow: CI push workflow: runs on a cron schedule to push changes to the other repo.</td>
     </tr>
   </table>
 </div>
@@ -921,7 +919,7 @@ npx ts-node shadow-setup.ts --pair backend</code></pre>
 <!-- ================================================================ -->
 <!-- 12. TEST SUITE                                                   -->
 <!-- ================================================================ -->
-<h2 id="tests">12. Test Suite <span class="badge-count">38</span></h2>
+<h2 id="tests">12. Test Suite <span class="badge-count">39</span></h2>
 
 <div class="card">
   <h3><span class="tag tag-blue">Pull</span> Pull tests (B &rarr; A) <span class="badge-count">17</span></h3>
@@ -1012,7 +1010,7 @@ npx ts-node shadow-setup.ts --pair backend</code></pre>
   <div class="card">
     <h3><span class="tag tag-green">Push</span> shadow-forward.yml</h3>
     <p><strong>Trigger:</strong> Push to <code>shadow/**</code> branches.</p>
-    <p><strong>Guard:</strong> Only processes commits that contain the <code>Shadow-export:</code> trailer.
+    <p><strong>Guard:</strong> Only processes commits that contain the <code>Shadow-replayed (</code> trailer.
     This prevents the workflow from triggering on every shadow branch update.</p>
     <p><strong>Action:</strong> Runs <code>shadow-sync.ts --from a</code> to push commits to the external repo.</p>
     <p><strong>Secret:</strong> Requires <code>EXTERNAL_REPO_TOKEN</code> (a fine-grained PAT) to authenticate

@@ -123,7 +123,7 @@ Cron every 15 min. Runs `shadow-sync.ts --from b` for all pairs.
 
 ### Shadow Forward (Push) — `.github/workflows/shadow-forward.yml`
 
-Triggers on push to `shadow/**` branches (only for commits with `Shadow-export:` trailer). Runs `shadow-sync.ts --from a`.
+Runs on a cron schedule (same as pull, separate job). Runs `shadow-sync.ts --from a`.
 
 Requires `EXTERNAL_REPO_TOKEN` secret (fine-grained PAT with Contents: Read and write).
 
@@ -180,6 +180,6 @@ npm --prefix shadow test
 | `shadow/shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `shadow/.shadowignore` | Default ignore patterns |
 | `shadow/shadow-sync-explained.html` | Detailed technical documentation |
-| `shadow/shadow-tests/` | 38 automated tests |
+| `shadow/shadow-tests/` | 39 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron) |
 | `.github/workflows/shadow-forward.yml` | CI push workflow (on shadow branch push) |
