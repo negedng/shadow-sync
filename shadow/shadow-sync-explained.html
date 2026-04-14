@@ -328,13 +328,30 @@ shadow-sync --from a</code></pre>
       The tool runs from inside one of the two repos. That repo is "origin" (no URL needed in config).
       The other repo is added as a remote. This is the typical setup for a developer or CI environment.
     </p>
+    <pre><code>RepoA (your workspace)              RepoB (remote)
+├── backend/                         ├── src/app.ts
+│   └── src/app.ts                   └── README.md
+├── frontend/
+└── shadow/            &larr; tool lives here
+    ├── shadow-sync.ts
+    ├── shadow-common.ts
+    └── shadow-config.json
+        a: { remote: "origin", dir: "backend" }      &larr; no url, it's the workspace
+        b: { remote: "repo-b", url: "...", dir: "" }  &larr; url needed, it's a remote</code></pre>
   </div>
   <div class="card">
     <h3><span class="tag tag-purple">Mode</span> Orchestrator mode</h3>
     <p>
       The tool runs from a separate, standalone git repository. Both endpoints have URLs configured.
-      This is useful for centralized CI where neither repo is the "home" repo.
+      Neither repo is the "home" repo &mdash; the orchestrator is a neutral third party.
     </p>
+    <pre><code>Orchestrator (standalone)            RepoA (remote)         RepoB (remote)
+├── shadow-sync.ts                   ├── backend/           ├── src/app.ts
+├── shadow-common.ts                 │   └── src/app.ts     └── README.md
+├── shadow-config.json               └── frontend/
+└── package.json
+    a: { remote: "repo-a", url: "...", dir: "backend" }   &larr; both have urls
+    b: { remote: "repo-b", url: "...", dir: "" }</code></pre>
   </div>
 </div>
 

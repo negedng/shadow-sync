@@ -22,6 +22,34 @@ shadow-sync --from b:  RepoB → shadow/backend/main on RepoA → git merge → 
 shadow-sync --from a:  RepoA → shadow/backend/main on RepoB → git merge → RepoB's main
 ```
 
+### Where does the tool run?
+
+The tool needs a git repo as its workspace (for the git object database). Two modes:
+
+**From inside one of the repos** — simplest setup. The tool lives in the repo (e.g. RepoA's `shadow/` folder). That repo is `origin`, the other is added as a remote.
+
+```
+RepoA (your workspace)              RepoB (remote)
+├── backend/                         ├── src/app.ts
+│   └── src/app.ts                   └── README.md
+├── frontend/
+└── shadow/            ← tool lives here
+    ├── shadow-sync.ts
+    └── shadow-config.json
+```
+
+**Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes.
+
+```
+Orchestrator (standalone)            RepoA (remote)         RepoB (remote)
+├── shadow-sync.ts                   ├── backend/           ├── src/app.ts
+├── shadow-common.ts                 │   └── src/app.ts     └── README.md
+├── shadow-config.json               └── frontend/
+└── package.json
+```
+
+Both modes use the same code and config. The only difference is whether one endpoint uses `"remote": "origin"` (no url needed) or both have explicit urls.
+
 ## Configuration
 
 Each **pair** connects two repos (**a** and **b**) with a path mapping:
