@@ -18,7 +18,7 @@ import { parseArgs } from "util";
 import * as path from "path";
 import {
   REMOTES, SHADOW_BRANCH_PREFIX,
-  git, replayCommitsToExternal,
+  git, replayCommitsOutgoing,
   getCurrentBranch, validateName, die,
 } from "./shadow-common";
 
@@ -71,7 +71,7 @@ for (const { remote, dir, url } of remotesToForward) {
   const extShadowBranch = `${SHADOW_BRANCH_PREFIX}/${externalBranch}`;
 
   try {
-    const result = replayCommitsToExternal({
+    const result = replayCommitsOutgoing({
       remote, dir, localBranch, externalBranch, shadowIgnoreFile,
     });
 

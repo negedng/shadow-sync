@@ -14,7 +14,7 @@ import {
   REMOTES,
   git, refExists, listExternalBranches,
   shadowBranchName,
-  replayCommitsTopological, preflightChecks, handlePreflightResults,
+  replayCommitsIncoming, preflightChecks, handlePreflightResults,
   validateName,
 } from "./shadow-common";
 
@@ -79,7 +79,7 @@ for (const { remote, dir, url } of remotesToSync) {
   // This preserves shared ancestors so shadow branches have correct DAG topology.
   try {
     console.log(`\n── Replaying commits for ${remote} (${validBranches.length} branch(es)) ──`);
-    const result = replayCommitsTopological({ remote, dir, branches: validBranches });
+    const result = replayCommitsIncoming({ remote, dir, branches: validBranches });
 
     // Update each shadow branch ref and push
     for (const branch of validBranches) {

@@ -5,7 +5,6 @@
   "private": true,
   "scripts": {
     "setup": "tsx shadow-setup.ts",
-    "import": "tsx shadow-import.ts",
     "ci-sync": "tsx shadow-ci-sync.ts",
     "ci-forward": "tsx shadow-ci-forward.ts",
     "test": "tsx shadow-tests/run-all.ts"

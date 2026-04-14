@@ -1,7 +1,6 @@
 import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import * as crypto from "crypto";
 import * as os from "os";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -49,8 +48,8 @@ const config = loadConfig();
 export const REMOTES: RemoteConfig[] = [...config.remotes];
 const SYNC_TRAILER    = config.trailers.sync;
 export const SEED_TRAILER    = config.trailers.seed;
-export const FORWARD_TRAILER = config.trailers.forward;
-export const EXPORT_TRAILER  = config.trailers.exp;
+const FORWARD_TRAILER = config.trailers.forward;
+const EXPORT_TRAILER  = config.trailers.exp;
 export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
 // Allow tests to inject config via environment variable (JSON array of RemoteConfig).
@@ -62,7 +61,6 @@ if (process.env.SHADOW_TEST_REMOTES) {
 // ── Core utilities ───────────────────────────────────────────────────────────
 
 const MAX_BUFFER = config.maxBuffer;
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /** Repo root — ensures git commands use paths relative to the repo, not the cwd.
  *  When invoked via `npm --prefix shadow`, cwd is shadow/ which breaks path-based commands. */
@@ -156,70 +154,6 @@ export function appendTrailer(message: string, trailer: string): string {
     return `${trimmed}\n\n${trailer}\n`;
   }
   return result.stdout;
-}
-
-// ── Lockfile ──────────────────────────────────────────────────────────────────
-
-/**
- * Prevent concurrent runs of the same script by creating a PID-based lock file
- * in the OS temp directory. If a stale lock exists (process no longer alive),
- * it is removed automatically. The lock is released on exit, SIGINT, or SIGTERM.
- * Uses exclusive file creation (wx flag) to avoid races between the existence
- * check and lock acquisition.
- */
-export function acquireLock(scriptDir: string, name: string): void {
-  const key   = crypto.createHash("md5").update(scriptDir).digest("hex").slice(0, 8);
-  const lock  = path.join(os.tmpdir(), `${name}-${key}.lock`);
-  const myPid = process.pid.toString();
-
-  if (fs.existsSync(lock)) {
-    const existingPid = fs.readFileSync(lock, "utf8").trim();
-    let alive = false;
-    if (/^\d+$/.test(existingPid)) {
-      if (process.platform === "win32") {
-        const r = spawnSync("tasklist", ["/FI", `PID eq ${existingPid}`, "/NH"], {
-          encoding: "utf8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        alive = (r.stdout ?? "").includes(existingPid);
-      } else {
-        const r = spawnSync("kill", ["-0", existingPid], {
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        alive = r.status === 0;
-      }
-    }
-    if (alive) die(`Another ${name} is already running (PID ${existingPid}).`);
-    try { fs.unlinkSync(lock); } catch (e: any) {
-      if (e.code !== "ENOENT") throw e;
-    }
-  }
-
-  try {
-    fs.writeFileSync(lock, myPid, { flag: "wx" });
-  } catch (e: any) {
-    if (e.code === "EEXIST") {
-      die(`Another ${name} is already running (lock file appeared during race).`);
-    }
-    throw e;
-  }
-
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    try {
-      if (fs.existsSync(lock) && fs.readFileSync(lock, "utf8").trim() === myPid) {
-        fs.unlinkSync(lock);
-      }
-    } catch (e: any) {
-      if (e.code !== "ENOENT") console.warn(`Warning: failed to release lock: ${e.message}`);
-    }
-  };
-
-  process.on("exit",    release);
-  process.on("SIGINT",  () => { release(); process.exit(130); });
-  process.on("SIGTERM", () => { release(); process.exit(143); });
 }
 
 // ── Pre-flight checks ─────────────────────────────────────────────────────────
@@ -326,57 +260,27 @@ function getCommitMeta(hash: string): CommitMeta {
   };
 }
 
-function diffForCommit(meta: CommitMeta): string {
-  const { hash, parentCount } = meta;
-  const diffArgs = ["-c", "core.filemode=false",
-    "diff", "--binary", "-M", "--no-ext-diff", "--no-textconv"];
-  if (parentCount === 0) {
-    return git([...diffArgs, EMPTY_TREE, hash], { raw: true });
-  }
-  const parentHash = git(["rev-parse", `${hash}^1`]);
-  return git([...diffArgs, parentHash, hash], { raw: true });
+/** Build the GIT_AUTHOR/COMMITTER env vars from commit metadata. */
+function commitEnv(meta: CommitMeta): Record<string, string> {
+  return {
+    GIT_AUTHOR_NAME:      meta.authorName,
+    GIT_AUTHOR_EMAIL:     meta.authorEmail,
+    GIT_AUTHOR_DATE:      meta.authorDate,
+    GIT_COMMITTER_NAME:   meta.committerName,
+    GIT_COMMITTER_EMAIL:  meta.committerEmail,
+    GIT_COMMITTER_DATE:   meta.committerDate,
+  };
 }
 
-function commitWithMeta(meta: CommitMeta, message: string, allowEmpty = false): void {
-  git(["commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message], {
-    env: {
-      GIT_AUTHOR_NAME:      meta.authorName,
-      GIT_AUTHOR_EMAIL:     meta.authorEmail,
-      GIT_AUTHOR_DATE:      meta.authorDate,
-      GIT_COMMITTER_NAME:   meta.committerName,
-      GIT_COMMITTER_EMAIL:  meta.committerEmail,
-      GIT_COMMITTER_DATE:   meta.committerDate,
-    },
-  });
-}
-
-function filesForCommit(meta: CommitMeta, subdir: string): string[] {
-  const { hash, parentCount } = meta;
-  const nameArgs = ["-c", "core.filemode=false",
-    "diff", "--name-only", "-M", "--no-ext-diff", "--no-textconv"];
-  const raw = parentCount === 0
-    ? git([...nameArgs, EMPTY_TREE, hash])
-    : git([...nameArgs, `${hash}^1`, hash]);
-  return raw.split("\n").filter(Boolean).map(f => `${subdir}/${f}`);
+/** Strip all Shadow-* trailers from a commit message. */
+function stripTrailers(message: string): string {
+  const trailerPrefixes = [SYNC_TRAILER, SEED_TRAILER, FORWARD_TRAILER, EXPORT_TRAILER];
+  return message.split("\n")
+    .filter(l => !trailerPrefixes.some(t => l.startsWith(`${t}:`)))
+    .join("\n").trimEnd();
 }
 
 const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
-
-function buildAlreadySyncedSetFor(dir: string, seedHash?: string): Set<string> {
-  const synced = new Set<string>();
-  const log = git(
-    ["log", `--grep=^${SYNC_TRAILER}:`, "--format=%B",
-     ...(seedHash ? [`${seedHash}..HEAD`] : []),
-     "--", `${dir}/`], { safe: true }
-  );
-  if (!log.ok || !log.stdout) return synced;
-
-  for (const line of log.stdout.split("\n")) {
-    const match = line.match(SYNCED_HASH_RE);
-    if (match) synced.add(match[1]);
-  }
-  return synced;
-}
 
 const SEED_HASH_RE = new RegExp(`^${SEED_TRAILER}:\\s*(\\S+)\\s+([0-9a-f]{7,40})`);
 
@@ -410,165 +314,68 @@ function findSeedCommit(dir: string): string | null {
   return null;
 }
 
-function collectExternalCommits(
-  externalRef: string,
-  seedHash?: string,
-): string[] {
-  const args = ["log", "--reverse", "--format=%H"];
-  if (seedHash) {
-    args.push(`${seedHash}..${externalRef}`);
-  } else {
-    args.push(externalRef);
-  }
-  const commits = git(args, { safe: true });
-  if (!commits.ok || !commits.stdout) return [];
-  return commits.stdout.split("\n").filter(Boolean);
-}
-
-/**
- * Replay new commits from a remote ref into a local subdirectory.
- *
- * Assumes the caller has already:
- *   1. Fetched the remote
- *   2. Checked out the correct local branch
- *
- * Throws on unrecoverable errors instead of calling process.exit().
- */
-export function replayCommits(opts: {
-  remote: string;
-  dir: string;
-  externalBranch: string;
-}): { mirrored: number; upToDate: boolean } {
-  const { remote, dir, externalBranch } = opts;
-  const externalRef = `${remote}/${externalBranch}`;
-
-  // A seed marks the starting point for sync — all commits before it are skipped.
-  const seedHash = findSeedHash(dir);
-  if (seedHash) {
-    console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
-  }
-
-  // Scans local git log for Shadow-synced-from trailers to avoid re-replaying commits.
-  // When a seed exists, only scan commits after it.
-  console.log("Scanning local history for already-mirrored commits...");
-  const alreadySynced = buildAlreadySyncedSetFor(dir, seedHash ?? undefined);
-  console.log(`Found ${alreadySynced.size} previously mirrored commit(s).`);
-
-  // Collect new commits to replay
-  const allExternalCommits = collectExternalCommits(externalRef, seedHash ?? undefined);
-
-  const newCommits: string[] = [];
-  for (const hash of allExternalCommits) {
-    if (alreadySynced.has(hash)) continue;
-    newCommits.push(hash);
-  }
-
-  if (newCommits.length === 0) {
-    console.log("Already up to date. Nothing to mirror.");
-    return { mirrored: 0, upToDate: true };
-  }
-
-  console.log(`Found ${newCommits.length} new commit(s) to mirror.\n`);
-
-  // Replay each commit
-  for (const hash of newCommits) {
-    const meta = getCommitMeta(hash);
-
-    // Skip commits that were forwarded by us (they have a forward trailer).
-    if (meta.message.includes(`${FORWARD_TRAILER}:`)) {
-      console.log(`  Skipping ${meta.short} (forwarded by us).`);
-      alreadySynced.add(hash);
-      const trailerPrefixes = [SYNC_TRAILER, SEED_TRAILER, FORWARD_TRAILER, EXPORT_TRAILER];
-      const cleanMsg = meta.message.split("\n").filter(l => !trailerPrefixes.some(t => l.startsWith(`${t}:`))).join("\n").trimEnd();
-      const syncedMessage = appendTrailer(cleanMsg, `${SYNC_TRAILER}: ${hash}`);
-      commitWithMeta(meta, syncedMessage, true);
-      continue;
-    }
-
-    const label = meta.parentCount > 1
-      ? `merge commit ${meta.short} (diffing against first parent)`
-      : meta.parentCount === 0
-        ? `root commit ${meta.short}`
-        : meta.short;
-
-    console.log(`  Applying ${label}...`);
-
-    // Generate a diff for this commit and apply it under the subdirectory.
-    // The patch maps external repo root paths into {dir}/ in the monorepo.
-    const patch = diffForCommit(meta);
-    // Apply patch via stdin, normalizing CRLF → LF for cross-OS consistency
-    const result = git(["apply", "--directory", dir, "--ignore-whitespace"],
-      { safe: true, input: patch.replace(/\r\n/g, "\n") }).ok;
-
-    if (!result) {
-      throw new Error(`Could not apply patch for ${meta.short}. Shadow branch may be out of sync.`);
-    }
-
-    // Stage only the files touched by this patch (not the whole dir).
-    const patchFiles = filesForCommit(meta, dir);
-    if (patchFiles.length > 0) {
-      git(["add", "--", ...patchFiles]);
-    }
-
-    // Commit with the original author/committer metadata preserved, plus a
-    // sync trailer recording the external commit hash for deduplication.
-    const hasStagedChanges = !git(["diff", "--cached", "--quiet"], { safe: true }).ok;
-    const syncedMessage    = appendTrailer(meta.message, `${SYNC_TRAILER}: ${hash}`);
-
-    // If the patch produced no actual changes (e.g. the file was already
-    // identical), record an empty commit so we skip it on future runs.
-    if (!hasStagedChanges) {
-      console.log("    (no changes after apply — recording as synced)");
-      commitWithMeta(meta, syncedMessage, /* allowEmpty */ true);
-      console.log("  ✓ Recorded (empty).");
-      continue;
-    }
-
-    commitWithMeta(meta, syncedMessage);
-    console.log("  ✓ Mirrored.");
-  }
-
-  console.log();
-  console.log(
-    `Done. ${newCommits.length} commit(s) from '${remote}/${externalBranch}' mirrored into '${dir}/' on current branch.`
-  );
-
-  return { mirrored: newCommits.length, upToDate: false };
-}
-
-// ── Topology-preserving replay engine ────────────────────────────────────────
+// ── Shared replay helpers ────────────────────────────────────────────────────
 
 interface TopoCommit {
   hash: string;
   parents: string[];
 }
 
+/** Parse `git rev-list --parents` output into TopoCommit[]. */
+function parseRevList(output: string): TopoCommit[] {
+  return output.split("\n").filter(Boolean).map(line => {
+    const parts = line.split(/\s+/);
+    return { hash: parts[0], parents: parts.slice(1) };
+  });
+}
+
 /**
- * Build a mapping of external SHA → local SHA from existing synced commits.
- * Scans ALL branches (--all) so the mapping is global across shadow branches.
+ * Scan git log for trailer-based SHA mappings.
+ * Returns a Map keyed by the first capture group of trailerRe, valued by the
+ * commit hash that contained the trailer. Used by both import and export to
+ * track which commits have already been replayed.
  */
-function buildSyncedMapping(dir: string): Map<string, string> {
+function buildTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
   const mapping = new Map<string, string>();
-  const MARKER = "SHADOWMAP ";
-  const log = git(
-    ["log", "--all", `--grep=^${SYNC_TRAILER}:`, `--format=${MARKER}%H%n%B`, "--", `${dir}/`],
-    { safe: true },
-  );
+  const MARKER = "TMAP ";
+  const log = git([...logArgs, `--format=${MARKER}%H%n%B`], { safe: true });
   if (!log.ok || !log.stdout) return mapping;
 
-  let currentLocal: string | null = null;
+  let currentHash: string | null = null;
   for (const line of log.stdout.split("\n")) {
     if (line.startsWith(MARKER)) {
-      currentLocal = line.slice(MARKER.length).trim();
+      currentHash = line.slice(MARKER.length).trim();
       continue;
     }
-    const match = line.match(SYNCED_HASH_RE);
-    if (match && currentLocal) {
-      mapping.set(match[1], currentLocal);
+    const match = line.match(trailerRe);
+    if (match && currentHash) {
+      mapping.set(match[1], currentHash);
     }
   }
   return mapping;
 }
+
+/**
+ * Map source commit parents → target parents via shaMapping, falling back to
+ * graftBase when no parents resolve (root commits or first commit after seed).
+ */
+function resolveParents(
+  commit: TopoCommit,
+  shaMapping: Map<string, string>,
+  graftBase: string | null,
+): string[] {
+  const parents: string[] = [];
+  for (const parentHash of commit.parents) {
+    const mapped = shaMapping.get(parentHash);
+    if (mapped) parents.push(mapped);
+  }
+  if (parents.length === 0 && graftBase) {
+    parents.push(graftBase);
+  }
+  return parents;
+}
+
+// ── Topology-preserving replay engine ────────────────────────────────────────
 
 /**
  * Collect all commits across multiple branches in topological order (parents first).
@@ -589,11 +396,7 @@ function collectAllExternalCommits(
 
   const result = git(args, { safe: true });
   if (!result.ok || !result.stdout) return [];
-
-  return result.stdout.split("\n").filter(Boolean).map(line => {
-    const parts = line.split(/\s+/);
-    return { hash: parts[0], parents: parts.slice(1) };
-  });
+  return parseRevList(result.stdout);
 }
 
 /**
@@ -624,7 +427,7 @@ function buildBranchMapping(
  *
  * Returns a branchMapping so the caller can update each shadow branch ref.
  */
-export function replayCommitsTopological(opts: {
+export function replayCommitsIncoming(opts: {
   remote: string;
   dir: string;
   branches: string[];
@@ -632,7 +435,10 @@ export function replayCommitsTopological(opts: {
   const { remote, dir, branches } = opts;
 
   console.log("Scanning local history for already-mirrored commits...");
-  const shaMapping = buildSyncedMapping(dir);
+  const shaMapping = buildTrailerMapping(
+    ["log", "--all", `--grep=^${SYNC_TRAILER}:`, "--", `${dir}/`],
+    SYNCED_HASH_RE,
+  );
   console.log(`Found ${shaMapping.size} previously mirrored commit(s).`);
 
   const seedHash = findSeedHash(dir);
@@ -675,19 +481,7 @@ export function replayCommitsTopological(opts: {
         console.log(`  Applying ${label}...`);
       }
 
-      // Map external parents → local parents (must happen before tree construction)
-      const localParents: string[] = [];
-      for (const parentHash of commit.parents) {
-        const localParent = shaMapping.get(parentHash);
-        if (localParent) {
-          localParents.push(localParent);
-        }
-      }
-
-      // Graft root commits (no mapped parents) onto seed commit
-      if (localParents.length === 0 && graftBase) {
-        localParents.push(graftBase);
-      }
+      const localParents = resolveParents(commit, shaMapping, graftBase);
 
       // Build full-repo tree: always use the seed commit tree as the base, then
       // overlay dir/ from external. This ensures shadow commits carry the full
@@ -715,8 +509,7 @@ export function replayCommitsTopological(opts: {
       // Build commit message with sync trailer
       let message: string;
       if (isForwarded) {
-        const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
-        message = appendTrailer(cleanMsg, `${SYNC_TRAILER}: ${commit.hash}`);
+        message = appendTrailer(stripTrailers(meta.message), `${SYNC_TRAILER}: ${commit.hash}`);
       } else {
         message = appendTrailer(meta.message, `${SYNC_TRAILER}: ${commit.hash}`);
       }
@@ -724,14 +517,7 @@ export function replayCommitsTopological(opts: {
       // Create commit with explicit parents via git plumbing
       const parentArgs = localParents.flatMap(p => ["-p", p]);
       const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", message], {
-        env: {
-          GIT_AUTHOR_NAME:      meta.authorName,
-          GIT_AUTHOR_EMAIL:     meta.authorEmail,
-          GIT_AUTHOR_DATE:      meta.authorDate,
-          GIT_COMMITTER_NAME:   meta.committerName,
-          GIT_COMMITTER_EMAIL:  meta.committerEmail,
-          GIT_COMMITTER_DATE:   meta.committerDate,
-        },
+        env: commitEnv(meta),
       });
 
       shaMapping.set(commit.hash, newSHA);
@@ -754,36 +540,6 @@ export function replayCommitsTopological(opts: {
 const FORWARD_HASH_RE = new RegExp(`^${FORWARD_TRAILER}:\\s*([0-9a-f]{7,40})`);
 
 /**
- * Build a mapping of local SHA → external SHA from commits on the external
- * remote that have a Shadow-forwarded-from trailer.
- */
-function buildForwardedMapping(remote: string, branches: string[]): Map<string, string> {
-  const mapping = new Map<string, string>();
-  const MARKER = "FWDMAP ";
-  const refs = branches.map(b => `${remote}/${b}`).filter(r => refExists(r));
-  if (refs.length === 0) return mapping;
-
-  const log = git(
-    ["log", ...refs, `--grep=^${FORWARD_TRAILER}:`, `--format=${MARKER}%H%n%B`],
-    { safe: true },
-  );
-  if (!log.ok || !log.stdout) return mapping;
-
-  let currentExternal: string | null = null;
-  for (const line of log.stdout.split("\n")) {
-    if (line.startsWith(MARKER)) {
-      currentExternal = line.slice(MARKER.length).trim();
-      continue;
-    }
-    const match = line.match(FORWARD_HASH_RE);
-    if (match && currentExternal) {
-      mapping.set(match[1], currentExternal);  // local SHA → external SHA
-    }
-  }
-  return mapping;
-}
-
-/**
  * Collect local commits that touch dir/ in topological order.
  * Uses git rev-list on the local branch, filtering to commits that touch dir/.
  */
@@ -798,21 +554,16 @@ function collectLocalCommitsForDir(
   } else {
     args.push(branch);
   }
-  // Only commits that touch dir/
   args.push("--", `${dir}/`);
 
   const result = git(args, { safe: true });
   if (!result.ok || !result.stdout) return [];
-
-  return result.stdout.split("\n").filter(Boolean).map(line => {
-    const parts = line.split(/\s+/);
-    return { hash: parts[0], parents: parts.slice(1) };
-  });
+  return parseRevList(result.stdout);
 }
 
 /**
  * Replay local commits to an external remote, stripping the dir/ prefix.
- * This is the reverse of replayCommitsTopological — instead of adding a prefix,
+ * This is the reverse of replayCommitsIncoming — instead of adding a prefix,
  * we strip it. The result is pushed to a shadow branch on the external repo
  * so the external team can `git merge` to pull in changes.
  *
@@ -822,7 +573,7 @@ function collectLocalCommitsForDir(
  *
  * Skips commits that have a SYNC_TRAILER (they came from external, no echo-back).
  */
-export function replayCommitsToExternal(opts: {
+export function replayCommitsOutgoing(opts: {
   remote: string;
   dir: string;
   localBranch: string;
@@ -836,7 +587,10 @@ export function replayCommitsToExternal(opts: {
   const extShadowBranch = `${SHADOW_BRANCH_PREFIX}/${externalBranch}`;
 
   console.log("Scanning external history for already-forwarded commits...");
-  const shaMapping = buildForwardedMapping(remote, [extShadowBranch]);
+  const refs = [`${remote}/${extShadowBranch}`].filter(r => refExists(r));
+  const shaMapping = refs.length > 0
+    ? buildTrailerMapping(["log", ...refs, `--grep=^${FORWARD_TRAILER}:`], FORWARD_HASH_RE)
+    : new Map<string, string>();
   console.log(`Found ${shaMapping.size} previously forwarded commit(s).`);
 
   // Find the seed commit (on local main) and the seed hash (external tip at seed time)
@@ -904,34 +658,14 @@ export function replayCommitsToExternal(opts: {
 
       const tree = git(["write-tree"], { env: { GIT_INDEX_FILE: tmpIndex } });
 
-      // Map local parents → external parents
-      const extParents: string[] = [];
-      for (const parentHash of commit.parents) {
-        const extParent = shaMapping.get(parentHash);
-        if (extParent) {
-          extParents.push(extParent);
-        }
-      }
-
-      // Graft root commits onto the external seed hash
-      if (extParents.length === 0 && graftBase) {
-        extParents.push(graftBase);
-      }
+      const extParents = resolveParents(commit, shaMapping, graftBase);
 
       // Build commit message with forward trailer
-      const cleanMsg = meta.message.split("\n").filter(l => !l.match(/^Shadow-/)).join("\n").trimEnd();
-      const message = appendTrailer(cleanMsg, `${FORWARD_TRAILER}: ${commit.hash}`);
+      const message = appendTrailer(stripTrailers(meta.message), `${FORWARD_TRAILER}: ${commit.hash}`);
 
       const parentArgs = extParents.flatMap(p => ["-p", p]);
       const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", message], {
-        env: {
-          GIT_AUTHOR_NAME:      meta.authorName,
-          GIT_AUTHOR_EMAIL:     meta.authorEmail,
-          GIT_AUTHOR_DATE:      meta.authorDate,
-          GIT_COMMITTER_NAME:   meta.committerName,
-          GIT_COMMITTER_EMAIL:  meta.committerEmail,
-          GIT_COMMITTER_DATE:   meta.committerDate,
-        },
+        env: commitEnv(meta),
       });
 
       shaMapping.set(commit.hash, newSHA);
