@@ -391,6 +391,20 @@ shadow-sync --from a</code></pre>
   <p style="text-align:center;margin-top:1rem;color:var(--muted)">Then on RepoA: <code>git merge origin/shadow/backend/main</code></p>
 </div>
 
+<div class="card" style="overflow-x:auto">
+  <h3 style="text-align:center;margin-bottom:1rem"><code>shadow-sync --from a</code> &mdash; replay RepoA &rarr; RepoB</h3>
+  <table style="margin:0 auto;border-collapse:separate;border-spacing:0.5rem;text-align:center">
+    <tr>
+      <td style="background:#dcfce7;padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoA</strong><br><code>main</code> (commits touching <code>backend/</code>)</td>
+      <td style="padding:0 1rem">&xrarr;<br><small>fetch</small></td>
+      <td style="background:#ede9fe;padding:0.8rem 1.2rem;border-radius:8px"><strong>Replay engine</strong><br>per-commit, topo order<br><small>strip <code>a.dir</code> &rarr; add <code>b.dir</code></small><br><small>+ <code>Shadow-forwarded-from</code> trailer</small></td>
+      <td style="padding:0 1rem">&xrarr;<br><small>push</small></td>
+      <td style="background:var(--accent-light);padding:0.8rem 1.2rem;border-radius:8px"><strong>RepoB</strong><br><code>shadow/backend/main</code></td>
+    </tr>
+  </table>
+  <p style="text-align:center;margin-top:1rem;color:var(--muted)">Then on RepoB: <code>git merge origin/shadow/backend/main</code></p>
+</div>
+
 <!-- ================================================================ -->
 <!-- 3. CONFIGURATION                                                 -->
 <!-- ================================================================ -->
