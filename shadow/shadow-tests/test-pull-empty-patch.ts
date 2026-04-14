@@ -25,7 +25,7 @@ export default function run() {
 
     // Should record it as synced (empty)
     const log = getShadowLogFull(env);
-    assertIncludes(log, "Shadow-synced-from:", "should still track the commit");
+    assertIncludes(log, "Shadow-replayed (", "should still track the commit");
   } finally {
     env.cleanup();
   }

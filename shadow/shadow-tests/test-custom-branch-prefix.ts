@@ -37,7 +37,7 @@ export default function run() {
 
     // Export commit should have the forward trailer
     const shadowLog = getExternalShadowLogFull(env);
-    assertIncludes(shadowLog, "Shadow-forwarded-from:", "shadow commit should have forward trailer");
+    assertIncludes(shadowLog, "Shadow-replayed (", "shadow commit should have replay trailer");
   } finally {
     env.cleanup();
   }

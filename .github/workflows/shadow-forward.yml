@@ -1,23 +1,21 @@
-name: Shadow Forward (Push)
+name: Shadow Sync (Push from A)
 
 on:
-  push:
-    branches:
-      # Must match shadowBranchPrefix in shadow/shadow-config.json.
-      - 'shadow/**'
+  # Disabled until real repo URLs are configured in shadow/shadow-config.json.
+  # Uncomment the cron schedule when ready:
+  # schedule:
+  #   - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 concurrency:
-  group: shadow-forward-${{ github.ref }}
+  group: shadow-sync-push
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  forward:
-    # Only forward export commits, not sync-replayed commits.
-    # Must match trailers.export in shadow/shadow-config.json.
-    if: contains(github.event.head_commit.message, 'Shadow-export:')
+  sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,5 +35,5 @@ jobs:
           git config --global user.email "shadow-sync@users.noreply.github.com"
           git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
-      - name: Push to other repos
+      - name: Push from A into shadow branches on B
         run: npx --prefix shadow tsx shadow/shadow-sync.ts --from a

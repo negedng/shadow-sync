@@ -26,7 +26,7 @@ export interface SyncPair {
 
 interface ShadowSyncConfig {
   pairs: SyncPair[];
-  trailers: { sync: string; seed: string; forward: string; exp: string };
+  trailers: { replayed: string; seed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
   shadowBranchPrefix: string;
@@ -39,10 +39,8 @@ function loadConfig(): ShadowSyncConfig {
   const doc = JSON.parse(raw) as Record<string, unknown>;
 
   const trailers = {
-    sync: ((doc.trailers as Record<string, string>)?.sync) ?? "Shadow-synced-from",
+    replayed: ((doc.trailers as Record<string, string>)?.replayed) ?? "Shadow-replayed",
     seed: ((doc.trailers as Record<string, string>)?.seed) ?? "Shadow-seed",
-    forward: ((doc.trailers as Record<string, string>)?.forward) ?? "Shadow-forwarded-from",
-    exp: ((doc.trailers as Record<string, string>)?.export) ?? "Shadow-export",
   };
   const gitConfigOverrides = (doc.gitConfigOverrides as Record<string, string>) ?? {};
   const maxBuffer = (doc.maxBuffer as number) ?? 50 * 1024 * 1024;
@@ -61,10 +59,8 @@ function loadConfig(): ShadowSyncConfig {
 const config = loadConfig();
 
 export const PAIRS: SyncPair[] = [...config.pairs];
-const SYNC_TRAILER    = config.trailers.sync;
-export const SEED_TRAILER    = config.trailers.seed;
-const FORWARD_TRAILER = config.trailers.forward;
-const EXPORT_TRAILER  = config.trailers.exp;
+const REPLAYED_TRAILER = config.trailers.replayed;
+export const SEED_TRAILER = config.trailers.seed;
 export const SHADOW_BRANCH_PREFIX = config.shadowBranchPrefix;
 
 // Allow tests to inject config via environment variable.
@@ -280,14 +276,18 @@ function commitEnv(meta: CommitMeta): Record<string, string> {
 }
 
 function stripTrailers(message: string): string {
-  const trailerPrefixes = [SYNC_TRAILER, SEED_TRAILER, FORWARD_TRAILER, EXPORT_TRAILER];
+  const trailerPrefixes = [REPLAYED_TRAILER, SEED_TRAILER];
   return message.split("\n")
-    .filter(l => !trailerPrefixes.some(t => l.startsWith(`${t}:`)))
+    .filter(l => !trailerPrefixes.some(t => l.startsWith(t)))
     .join("\n").trimEnd();
 }
 
-const SYNCED_HASH_RE = new RegExp(`^${SYNC_TRAILER}:\\s*([0-9a-f]{7,40})`);
-const FORWARD_HASH_RE = new RegExp(`^${FORWARD_TRAILER}:\\s*([0-9a-f]{7,40})`);
+/** Build a regex to match replay trailers: Shadow-replayed ({remote}): {hash} */
+function replayedHashRe(remote: string): RegExp {
+  const esc = remote.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${REPLAYED_TRAILER} \\(${esc}\\):\\s*([0-9a-f]{7,40})`);
+}
+
 const SEED_HASH_RE = new RegExp(`^${SEED_TRAILER}:\\s*(\\S+)\\s+([0-9a-f]{7,40})`);
 
 function findSeedHash(pairName: string): string | null {
@@ -473,33 +473,21 @@ function buildBranchMapping(
 // ── Unified replay ──────────────────────────────────────────────────────────
 
 /**
- * Direction config for replay: which trailers to use and which to skip.
- * "a→b" uses FORWARD trailer, skips SYNC (came from b).
- * "b→a" uses SYNC trailer, skips FORWARD (came from a).
+ * Build direction config from remote names.
+ * Trailer format: "Shadow-replayed: {sourceRemote} {hash}"
+ * When replaying from source, skip commits tagged with the target's remote
+ * (they originated from the target and were already replayed back).
  */
-interface DirectionConfig {
-  addTrailer: string;
-  addTrailerRe: RegExp;
-  skipTrailer: string;
-  scanTrailer: string;
-  scanTrailerRe: RegExp;
+function directionConfig(sourceRemote: string, targetRemote: string) {
+  return {
+    /** Trailer key to add: "Shadow-replayed ({sourceRemote})" — value is the hash */
+    addTrailerKey: `${REPLAYED_TRAILER} (${sourceRemote})`,
+    /** Regex to scan for already-replayed commits from this source */
+    scanRe: replayedHashRe(sourceRemote),
+    /** Trailer prefix to skip: commits tagged with the target's remote came from there */
+    skipPrefix: `${REPLAYED_TRAILER} (${targetRemote})`,
+  };
 }
-
-const DIR_A_TO_B: DirectionConfig = {
-  addTrailer: FORWARD_TRAILER,
-  addTrailerRe: FORWARD_HASH_RE,
-  skipTrailer: SYNC_TRAILER,
-  scanTrailer: FORWARD_TRAILER,
-  scanTrailerRe: FORWARD_HASH_RE,
-};
-
-const DIR_B_TO_A: DirectionConfig = {
-  addTrailer: SYNC_TRAILER,
-  addTrailerRe: SYNCED_HASH_RE,
-  skipTrailer: FORWARD_TRAILER,
-  scanTrailer: SYNC_TRAILER,
-  scanTrailerRe: SYNCED_HASH_RE,
-};
 
 /**
  * Replay commits from one side of a pair to the other.
@@ -518,7 +506,7 @@ export function replayCommits(opts: {
   const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
-  const dir    = from === "a" ? DIR_A_TO_B : DIR_B_TO_A;
+  const dc = directionConfig(source.remote, target.remote);
 
   // 1. Scan target history for already-replayed commits
   console.log("Scanning history for already-replayed commits...");
@@ -531,14 +519,14 @@ export function replayCommits(opts: {
   let shaMapping: Map<string, string>;
   if (shadowRefs.length > 0) {
     shaMapping = buildTrailerMapping(
-      ["log", ...shadowRefs, `--grep=^${dir.scanTrailer}:`],
-      dir.scanTrailerRe,
+      ["log", ...shadowRefs, `--grep=^${dc.addTrailerKey}`],
+      dc.scanRe,
     );
   } else {
     // Fallback: scan all history (for shadow branches on our side)
-    const logArgs = ["log", "--all", `--grep=^${dir.scanTrailer}:`];
+    const logArgs = ["log", "--all", `--grep=^${dc.addTrailerKey}`];
     if (target.dir) logArgs.push("--", `${target.dir}/`);
-    shaMapping = buildTrailerMapping(logArgs, dir.scanTrailerRe);
+    shaMapping = buildTrailerMapping(logArgs, dc.scanRe);
   }
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
@@ -579,7 +567,7 @@ export function replayCommits(opts: {
   const newCommits = allCommits.filter(c => {
     if (shaMapping.has(c.hash)) return false;
     const meta = getCommitMeta(c.hash);
-    if (meta.message.includes(`${dir.skipTrailer}:`)) return false;
+    if (meta.message.includes(`${dc.skipPrefix}`)) return false;
     return true;
   });
 
@@ -632,7 +620,7 @@ export function replayCommits(opts: {
 
       // Commits that carry the skip trailer came from the other direction
       // (e.g. forwarded by us then echoed back) — record but don't replay content
-      const isEcho = meta.message.includes(`${dir.addTrailer}:`);
+      const isEcho = meta.message.includes(`${dc.addTrailerKey}`);
 
       if (isEcho) {
         console.log(`  Skipping ${meta.short} (echo from other direction).`);
@@ -668,8 +656,8 @@ export function replayCommits(opts: {
       }
 
       const msg = isEcho
-        ? appendTrailer(stripTrailers(meta.message), `${dir.addTrailer}: ${commit.hash}`)
-        : appendTrailer(meta.message, `${dir.addTrailer}: ${commit.hash}`);
+        ? appendTrailer(stripTrailers(meta.message), `${dc.addTrailerKey}: ${commit.hash}`)
+        : appendTrailer(meta.message, `${dc.addTrailerKey}: ${commit.hash}`);
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
       const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", msg], {

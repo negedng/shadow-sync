@@ -8,10 +8,8 @@
   ],
 
   "trailers": {
-    "sync": "Shadow-synced-from",
-    "seed": "Shadow-seed",
-    "forward": "Shadow-forwarded-from",
-    "export": "Shadow-export"
+    "replayed": "Shadow-replayed",
+    "seed": "Shadow-seed"
   },
 
   "gitConfigOverrides": {

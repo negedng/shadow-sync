@@ -1,14 +1,14 @@
-name: Shadow Sync (Pull)
+name: Shadow Sync (Pull from B)
 
 on:
   # Disabled until real repo URLs are configured in shadow/shadow-config.json.
   # Uncomment the cron schedule when ready:
   # schedule:
   #   - cron: '*/15 * * * *'
-  workflow_dispatch:          # Manual trigger only
+  workflow_dispatch:
 
 concurrency:
-  group: shadow-sync
+  group: shadow-sync-pull
   cancel-in-progress: false
 
 permissions:
@@ -28,5 +28,5 @@ jobs:
 
       - run: npm --prefix shadow ci
 
-      - name: Pull from other repos
+      - name: Pull from B into shadow branches on A
         run: npx --prefix shadow tsx shadow/shadow-sync.ts --from b

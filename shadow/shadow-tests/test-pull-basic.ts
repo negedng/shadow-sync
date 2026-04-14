@@ -19,7 +19,7 @@ export default function run() {
 
     // Commit messages have sync trailers
     const log = getShadowLogFull(env);
-    assertIncludes(log, "Shadow-synced-from:", "should have sync trailer");
+    assertIncludes(log, "Shadow-replayed (", "should have replay trailer");
 
     // Re-run is a no-op
     const r2 = runCiSync(env);

@@ -24,7 +24,7 @@ export default function run() {
 
     // Verify both have sync trailers
     const log = getShadowLogFull(env);
-    assertIncludes(log, "Shadow-synced-from:", "should have sync trailers");
+    assertIncludes(log, "Shadow-replayed (", "should have replay trailers");
 
     // Verify each subdir only has its own files
     assertEqual(readShadowFile(env, "server.ts"), null, "backend file should NOT be in frontend/");

@@ -37,7 +37,7 @@ export default function run() {
 
     // Commit message should have the forward trailer
     const msg = git(`log -1 --format=%B ${env.remoteName}/shadow/${env.subdir}/main`, env.localRepo);
-    assertIncludes(msg, "Shadow-forwarded-from:", "commit should have forward trailer");
+    assertIncludes(msg, "Shadow-replayed (", "commit should have replay trailer");
   } finally {
     env.cleanup();
   }
