@@ -2,7 +2,7 @@
 
 Bi-directional git sync between two repositories with path prefix remapping. Commits are replayed individually to preserve authorship, timestamps, and history. Merge topology (branches, merge commits, shared ancestors) is preserved.
 
-For a detailed technical deep dive, see [`shadow/shadow-sync-explained.html`](shadow/shadow-sync-explained.html).
+For a detailed technical deep dive, see [`shadow-sync-explained.html`](shadow-sync-explained.html).
 
 ## How it works
 
@@ -26,33 +26,24 @@ shadow-sync --from a:  RepoA → shadow/backend/main on RepoB → git merge → 
 
 The tool needs a git repo as its workspace (for the git object database). Two modes:
 
-**From inside one of the repos** — simplest setup. The tool lives in the repo (e.g. RepoA's `shadow/` folder). That repo is `origin`, the other is added as a remote.
+**From inside one of the repos (workspace mode)** — install shadow-sync and run it directly. That repo is `origin`, the other is added as a remote.
 
-```
-RepoA (your workspace)              RepoB (remote)
-├── backend/                         ├── src/app.ts
-│   └── src/app.ts                   └── README.md
-├── frontend/
-└── shadow/            ← tool lives here
-    ├── shadow-sync.ts
-    └── shadow-config.json
+```bash
+npm install negedng/sht-main
 ```
 
-**Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes.
+**Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes. Set `SHADOW_CONFIG` to point at your config.
 
-```
-Orchestrator (standalone)            RepoA (remote)         RepoB (remote)
-├── shadow-sync.ts                   ├── backend/           ├── src/app.ts
-├── shadow-common.ts                 │   └── src/app.ts     └── README.md
-├── shadow-config.json               └── frontend/
-└── package.json
+```bash
+npm install negedng/sht-main
+cross-env SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts
 ```
 
 Both modes use the same code and config. The only difference is whether one endpoint uses `"remote": "origin"` (no url needed) or both have explicit urls.
 
 ## Configuration
 
-Each **pair** connects two repos (**a** and **b**) with a path mapping:
+Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 
 ```json
 {
@@ -78,16 +69,16 @@ One script, one command — direction is a flag:
 
 ```bash
 # Pull: replay b's commits into shadow branches on a
-npm --prefix shadow run sync -- --from b
+npm run sync -- --from b
 
 # Push: replay a's commits into shadow branches on b
-npm --prefix shadow run sync -- --from a
+npm run sync -- --from a
 
 # Target a specific pair
-npm --prefix shadow run sync -- --from b -r backend
+npm run sync -- --from b -r backend
 
 # Target a specific branch
-npm --prefix shadow run sync -- --from a -r backend -b feature/auth
+npm run sync -- --from a -r backend -b feature/auth
 ```
 
 After syncing, merge the shadow branch:
@@ -133,49 +124,50 @@ Requires `EXTERNAL_REPO_TOKEN` secret (fine-grained PAT with Contents: Read and 
 
 ## Setup
 
-1. Edit `shadow/shadow-config.json`:
-
-```json
-{
-  "pairs": [
-    {
-      "name": "backend",
-      "a": { "remote": "repo-a", "url": "https://github.com/org/repo-a.git", "dir": "backend" },
-      "b": { "remote": "repo-b", "url": "https://github.com/org/repo-b.git", "dir": "" }
-    }
-  ]
-}
-```
-
-2. Record a seed (tells sync where to start):
+1. Install:
 
 ```bash
-npm --prefix shadow run setup -- -r backend
+npm install negedng/sht-main
 ```
 
-3. Sync:
+2. Create `shadow-config.json` from the example:
 
 ```bash
-npm --prefix shadow run sync -- -r backend --from b
+cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
+# Edit shadow-config.json with your pair definitions
+```
+
+3. Record a seed (tells sync where to start):
+
+```bash
+SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-setup.ts -r backend
+```
+
+4. Sync:
+
+```bash
+SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts -r backend --from b
 git merge origin/shadow/backend/main
 ```
 
 ## Tests
 
 ```bash
-npm --prefix shadow test
+npm test
 ```
+
+39 automated tests covering pull, push, merge, branching, binary files, LFS, symlinks, submodules, and more.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `shadow/shadow-config.json` | Pair definitions, trailers, git config overrides |
-| `shadow/shadow-common.ts` | Config, git helpers, unified replay engine |
-| `shadow/shadow-setup.ts` | Bootstrap: records seed so sync skips existing history |
-| `shadow/shadow-sync.ts` | Single script for both directions (--from a or --from b) |
+| `shadow-config.example.json` | Example pair definitions, trailers, git config overrides |
+| `shadow-common.ts` | Config, git helpers, unified replay engine |
+| `shadow-setup.ts` | Bootstrap: records seed so sync skips existing history |
+| `shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `.shadowignore` | Ignore patterns (auto-discovered from source commit, like `.gitignore`) |
-| `shadow/shadow-sync-explained.html` | Detailed technical documentation |
-| `shadow/shadow-tests/` | 39 automated tests |
+| `shadow-sync-explained.html` | Detailed technical documentation |
+| `shadow-tests/` | 39 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron) |
 | `.github/workflows/shadow-forward.yml` | CI push workflow (on shadow branch push) |

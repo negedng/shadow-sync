@@ -354,10 +354,9 @@ shadow-sync --from a</code></pre>
 ├── backend/                         ├── src/app.ts
 │   └── src/app.ts                   └── README.md
 ├── frontend/
-└── shadow/            &larr; tool lives here
-    ├── shadow-sync.ts
-    ├── shadow-common.ts
-    └── shadow-config.json
+├── shadow-sync.ts     &larr; installed via npm
+├── shadow-common.ts
+└── shadow-config.json
         a: { remote: "origin", dir: "backend" }      &larr; no url, it's the workspace
         b: { remote: "repo-b", url: "...", dir: "" }  &larr; url needed, it's a remote</code></pre>
   </div>
@@ -1190,10 +1189,10 @@ cd repo-a
 npm install
 
 # Bootstrap the sync (records the seed)
-npx ts-node shadow/shadow-setup.ts --pair backend
+npx tsx shadow-setup.ts --pair backend
 
 # Run the first sync
-npx ts-node shadow/shadow-sync.ts --from b
+npx tsx shadow-sync.ts --from b
 
 # Verify shadow branches were created
 git branch | grep shadow/
