@@ -30,7 +30,7 @@ interface ShadowSyncConfig {
   shadowBranchPrefix: string;
 }
 
-const CONFIG_PATH = path.join(__dirname, "shadow-config.json");
+const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-config.json");
 
 function loadConfig(): ShadowSyncConfig {
   const raw = fs.readFileSync(CONFIG_PATH, "utf8");
@@ -140,7 +140,8 @@ export function listBranches(remote: string): string[] {
     .split("\n")
     .map(l => l.trim())
     .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
-    .map(l => l.replace(`${remote}/`, ""));
+    .map(l => l.replace(`${remote}/`, ""))
+    .filter(b => !b.startsWith(`${SHADOW_BRANCH_PREFIX}/`));
 }
 
 /** Build the canonical shadow branch name: shadow/{pairName}/{branch} */
@@ -288,17 +289,7 @@ function replayedHashRe(remote: string): RegExp {
 
 const SEED_HASH_RE = new RegExp(`^${SEED_TRAILER}:\\s*(\\S+)\\s+([0-9a-f]{7,40})`);
 
-function findSeedHash(pairName: string): string | null {
-  const log = git(["log", "--all", `--grep=^${SEED_TRAILER}:`, "--format=%B"], { safe: true });
-  if (!log.ok || !log.stdout) return null;
-  for (const line of log.stdout.split("\n")) {
-    const match = line.match(SEED_HASH_RE);
-    if (match && match[1] === pairName) return match[2];
-  }
-  return null;
-}
-
-function findSeedCommit(pairName: string): string | null {
+function findSeed(pairName: string): { seedHash: string; seedCommit: string } | null {
   const MARKER = "SEEDCOMMIT ";
   const log = git(
     ["log", "--all", `--grep=^${SEED_TRAILER}:`, `--format=${MARKER}%H%n%B`],
@@ -312,7 +303,9 @@ function findSeedCommit(pairName: string): string | null {
       continue;
     }
     const match = line.match(SEED_HASH_RE);
-    if (match && match[1] === pairName && currentCommit) return currentCommit;
+    if (match && match[1] === pairName && currentCommit) {
+      return { seedHash: match[2], seedCommit: currentCommit };
+    }
   }
   return null;
 }
@@ -538,9 +531,9 @@ export function replayCommits(opts: {
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   // 2. Find seed
-  const seedHash = findSeedHash(pair.name);
-  if (seedHash) {
-    console.log(`Found seed baseline: ${seedHash.slice(0, 10)} (skipping earlier history).`);
+  const seed = findSeed(pair.name);
+  if (seed) {
+    console.log(`Found seed baseline: ${seed.seedHash.slice(0, 10)} (skipping earlier history).`);
   }
 
   // 3. Collect commits from source.
@@ -551,19 +544,17 @@ export function replayCommits(opts: {
     : branches.map(b => `${source.remote}/${b}`);
 
   // Seed boundary: limits how far back we scan.
-  // For remote refs (--from b with remote source), use seedHash (the source's tip at seed time).
-  // For workspace branches (--from a with sourceBranch), use the seed commit if it's
-  // in the source's history; otherwise scan everything (dedup handles the rest).
+  // Only use the boundary if it's actually an ancestor of the source refs.
+  // The seed hash comes from whichever side was seeded and may not exist
+  // in the other side's history.
   let seedBoundary: string | undefined;
-  if (opts.sourceBranch) {
-    const sc = findSeedCommit(pair.name);
+  if (seed) {
+    const candidate = opts.sourceBranch ? seed.seedCommit : seed.seedHash;
     const ref = sourceRefs[0];
-    if (sc && git(["merge-base", "--is-ancestor", sc, ref], { safe: true }).ok) {
-      seedBoundary = sc;
+    if (git(["merge-base", "--is-ancestor", candidate, ref], { safe: true }).ok) {
+      seedBoundary = candidate;
     }
-    // No boundary = scan all commits on source branch (dedup handles the rest)
-  } else {
-    seedBoundary = seedHash ?? undefined;
+    // No boundary = scan all commits on source (dedup handles the rest)
   }
 
   const allCommits = source.dir
@@ -593,7 +584,6 @@ export function replayCommits(opts: {
   //   a) The seed commit in workspace history (when workspace IS the target repo)
   //   b) The target repo's main branch tip (when running from an orchestrator)
   //   c) The seed hash from the source side (when target.dir is empty)
-  const seedCommit = findSeedCommit(pair.name);
   let graftBase: string | null;
   let baseTreeSource: string | null;
 
@@ -601,15 +591,15 @@ export function replayCommits(opts: {
     // Target has a subdir — shadow commits need full-repo tree overlay.
     // Use seed commit if it exists in the target repo's history (workspace IS
     // the target). Otherwise fall back to the target's main branch tip (orchestrator).
-    const seedInTarget = seedCommit && refExists(`${target.remote}/main`)
-      && git(["merge-base", "--is-ancestor", seedCommit, `${target.remote}/main`], { safe: true }).ok;
+    const seedInTarget = seed && refExists(`${target.remote}/main`)
+      && git(["merge-base", "--is-ancestor", seed.seedCommit, `${target.remote}/main`], { safe: true }).ok;
     graftBase = seedInTarget
-      ? seedCommit
+      ? seed!.seedCommit
       : (refExists(`${target.remote}/main`) ? git(["rev-parse", `${target.remote}/main`]) : null);
     baseTreeSource = graftBase;
   } else {
     // Target is at root — no full-repo overlay needed.
-    graftBase = seedHash ?? null;
+    graftBase = seed?.seedHash ?? null;
     baseTreeSource = null;
   }
 

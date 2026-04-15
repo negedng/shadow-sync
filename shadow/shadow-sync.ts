@@ -189,9 +189,8 @@ for (const pair of pairsToSync) {
         }
       }
 
-      git(["update-ref", `refs/heads/${shadow}`, pushSHA]);
       console.log(`  Pushing to ${target.remote}/${shadow}...`);
-      git(["push", target.remote, `${shadow}:${shadow}`]);
+      git(["push", target.remote, `${pushSHA}:refs/heads/${shadow}`]);
       console.log(`  ✓ Pushed.`);
     }
   } catch (err: any) {
