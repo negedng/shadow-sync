@@ -1,7 +1,7 @@
 name: Shadow Sync (Pull from B)
 
 on:
-  # Disabled until real repo URLs are configured in shadow/shadow-config.json.
+  # Disabled until real repo URLs are configured in shadow-config.json.
   # Uncomment the cron schedule when ready:
   # schedule:
   #   - cron: '*/15 * * * *'
@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm --prefix shadow ci
+      - run: npm ci
 
       - name: Pull from B into shadow branches on A
-        run: npx --prefix shadow tsx shadow/shadow-sync.ts --from b
+        run: npx tsx shadow-sync.ts --from b
