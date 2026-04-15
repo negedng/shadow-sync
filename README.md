@@ -124,10 +124,19 @@ Requires `EXTERNAL_REPO_TOKEN` secret (fine-grained PAT with Contents: Read and 
 
 ## Setup
 
-1. Install:
+1. Install shadow-sync and add scripts to your `package.json`:
 
 ```bash
-npm install negedng/sht-main
+npm install negedng/test-main cross-env tsx
+```
+
+```json
+{
+  "scripts": {
+    "setup": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-setup.ts",
+    "sync": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-sync.ts"
+  }
+}
 ```
 
 2. Create `shadow-config.json` from the example:
@@ -137,17 +146,24 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 # Edit shadow-config.json with your pair definitions
 ```
 
-3. Record a seed (tells sync where to start):
+3. Record a seed from the monorepo side (tells sync where history starts):
 
 ```bash
-SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-setup.ts -r backend
+npm run setup -- -r backend --from a
 ```
 
-4. Sync:
+4. Create the external repo with the same content as your subdirectory:
 
 ```bash
-SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts -r backend --from b
-git merge origin/shadow/backend/main
+# Copy your-repo/backend/* into a new repo and push it
+```
+
+5. Sync and merge:
+
+```bash
+npm run sync -- -r backend --from a    # push monorepo changes to external
+npm run sync -- -r backend --from b    # pull external changes to monorepo
+git merge origin/shadow/backend/main   # merge the shadow branch
 ```
 
 ## Tests
