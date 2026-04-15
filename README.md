@@ -29,13 +29,13 @@ The tool needs a git repo as its workspace (for the git object database). Two mo
 **From inside one of the repos (workspace mode)** — install shadow-sync and run it directly. That repo is `origin`, the other is added as a remote.
 
 ```bash
-npm install negedng/sht-main
+npm install negedng/test-main
 ```
 
 **Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes. Set `SHADOW_CONFIG` to point at your config.
 
 ```bash
-npm install negedng/sht-main
+npm install negedng/test-main
 cross-env SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts
 ```
 
@@ -43,15 +43,31 @@ Both modes use the same code and config. The only difference is whether one endp
 
 ## Configuration
 
-Create a `shadow-config.json` (copy from `shadow-config.example.json`):
+Create a `shadow-config.json` (copy from `shadow-config.example.json`).
+
+**Workspace mode** — running from inside one of the repos:
 
 ```json
 {
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "repo-a", "url": "https://github.com/org/repo-a.git", "dir": "backend" },
-      "b": { "remote": "repo-b", "url": "https://github.com/org/repo-b.git", "dir": "" }
+      "a": { "remote": "origin", "dir": "backend" },
+      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git", "dir": "" }
+    }
+  ]
+}
+```
+
+**Orchestrator mode** — running from a standalone repo:
+
+```json
+{
+  "pairs": [
+    {
+      "name": "backend",
+      "a": { "remote": "main-repo", "url": "https://github.com/org/monorepo.git", "dir": "backend" },
+      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git", "dir": "" }
     }
   ]
 }
@@ -60,8 +76,6 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 - `a` and `b` are symmetric — direction is chosen at runtime with `--from`
 - `dir` is the path prefix in that repo (`""` for root, `"backend"` for a subdirectory)
 - `url` tells the tool how to reach the repo (omit if the remote already exists, e.g. `origin`)
-
-The tool runs from any git repo. Both sides are equal peers.
 
 ## Usage
 
@@ -152,10 +166,14 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 npm run setup -- -r backend --from a
 ```
 
-4. Create the external repo with the same content as your subdirectory:
+4. Create the external repo with the same content as your subdirectory. The external repo must start with the same files so both sides agree on the baseline:
 
 ```bash
-# Copy your-repo/backend/* into a new repo and push it
+mkdir backend-repo && cd backend-repo && git init
+cp -r ../your-monorepo/backend/* .
+git add -A && git commit -m "Initial backend (from monorepo)"
+git remote add origin https://github.com/org/backend.git
+git push -u origin main
 ```
 
 5. Sync and merge:
