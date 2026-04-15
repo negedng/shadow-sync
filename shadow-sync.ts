@@ -163,13 +163,6 @@ for (const pair of pairsToSync) {
           continue;
         }
 
-        // Detect tree-only changes
-        const oldTree = git(["rev-parse", `${currentSHA}^{tree}`]);
-        const newTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
-        if (oldTree === newTree) {
-          console.log(`  ${shadow}: no tree changes. Skipping push.`);
-          continue;
-        }
       }
 
       // Check fast-forward, create merge if diverged
