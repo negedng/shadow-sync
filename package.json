@@ -2,7 +2,6 @@
   "name": "shadow-sync",
   "version": "3.0.0",
   "description": "Bi-directional git sync between repositories with path prefix remapping",
-  "private": true,
   "scripts": {
     "setup": "tsx shadow-setup.ts",
     "sync": "tsx shadow-sync.ts",

@@ -89,7 +89,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
     fs.copyFileSync(path.join(scriptDir, f), path.join(localRepo, f));
   }
   // Copy config, overriding branchPrefix if non-default
-  const configSrc = path.join(scriptDir, "shadow-config.json");
+  const configSrc = path.join(scriptDir, "shadow-config.example.json");
   const configJson = JSON.parse(fs.readFileSync(configSrc, "utf8"));
   configJson.shadowBranchPrefix = branchPrefix;
   fs.writeFileSync(path.join(localRepo, "shadow-config.json"), JSON.stringify(configJson, null, 2));

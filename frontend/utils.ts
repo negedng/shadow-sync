@@ -1,2 +1,0 @@
-// Frontend utilities\nexport function formatDate(d: Date) {\n  return d.toISOString().split('T')[0];\n}\n\n// Auto-shadow test: frontend version helper\nexport function getVersion() {\n  return fetch('/api/version').then(r => r.json());\n}
-/* External author test 1774957075 */\n\n// Test cycle: timestamp formatter\nexport function relativeTime(d: Date) {\n  const diff = Date.now() - d.getTime();\n  return diff < 60000 ? 'just now' : `${Math.floor(diff / 60000)}m ago`;\n}

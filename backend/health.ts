@@ -1,1 +1,0 @@
-// Health check endpoint\nexport function healthCheck() {\n  return { status: "ok", timestamp: new Date().toISOString() };\n}\n\n// Test cycle: uptime tracker\nexport function uptime(startTime: Date) {\n  return Date.now() - startTime.getTime();\n}
