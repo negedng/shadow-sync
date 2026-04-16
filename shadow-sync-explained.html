@@ -400,7 +400,7 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     Branches with errors are skipped; warnings are logged and replay continues.
   </div></li>
   <li><span class="step-num">5</span><div>
-    <strong>Replay commits.</strong> <code>replayCommits()</code> in <code>shadow-common.ts</code> runs the six-phase
+    <strong>Replay commits.</strong> <code>replayCommits()</code> in <code>shadow-common.ts</code> runs the replay
     engine (see <a href="#engine">next section</a>).
   </div></li>
   <li><span class="step-num">6</span><div>
@@ -416,11 +416,11 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 
 <!-- ── 4. The Replay Engine ────────────────────────────────────────────── -->
 
-<h2 id="engine">4. The Replay Engine (Phases)</h2>
+<h2 id="engine">4. The Replay Engine</h2>
 
 <p>
-  <code>replayCommits()</code> in <code>shadow-common.ts</code> is organized into six explicit phases.
-  This is the core of the tool.
+  <code>replayCommits()</code> in <code>shadow-common.ts</code> is the core of the tool. It composes six named
+  helpers, each responsible for one step:
 </p>
 
 <ol class="step-list">
@@ -435,21 +435,23 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     commits are skipped.
   </div></li>
   <li><span class="step-num">3</span><div>
-    <strong>Collect commits in topological order.</strong> <code>git rev-list --topo-order --reverse</code>
-    starting from each branch tip, excluding commits before the seed and (where <code>dir</code> is non-empty)
-    narrowing to commits that touch the source subdirectory.
+    <strong>Collect commits in topological order.</strong> <code>collectSourceCommits()</code> runs
+    <code>git rev-list --topo-order --reverse</code> from each branch tip, excluding commits before the seed
+    boundary and (where <code>dir</code> is non-empty) narrowing to commits that touch the source subdirectory.
   </div></li>
   <li><span class="step-num">4</span><div>
-    <strong>Filter.</strong> Drop commits already in the mapping (skipped &mdash; already replayed) and echo commits
-    that carry the <em>target's</em> remote trailer (round-trip prevention &mdash; see <a href="#dedup">Deduplication</a>).
+    <strong>Filter.</strong> <code>filterNewCommits()</code> drops commits already in the mapping (skipped &mdash;
+    already replayed) and echo commits that carry the <em>target's</em> remote trailer (round-trip prevention &mdash;
+    see <a href="#dedup">Deduplication</a>).
   </div></li>
   <li><span class="step-num">5</span><div>
-    <strong>Seed mapping &amp; fallback parent.</strong> Record <code>seedTrailerHash &harr; seedCommitHash</code> in both
-    directions. Set <code>fallbackParent</code> to the target's main tip &mdash; any source parent that doesn't map
-    (seed boundary, path filter, orphan merge) falls back to this, so merge commits stay merges on the shadow side.
+    <strong>Seed mapping &amp; fallback parent.</strong> <code>seedShaMapping()</code> records
+    <code>seedTrailerHash &harr; seedCommitHash</code> in both directions. <code>fallbackParent</code> is set to the
+    target's main tip &mdash; any source parent that doesn't map (seed boundary, path filter, orphan merge) falls
+    back to this, so merge commits stay merges on the shadow side.
   </div></li>
   <li><span class="step-num">6</span><div>
-    <strong>Replay loop.</strong> For each remaining commit in topo order:
+    <strong>Replay loop.</strong> <code>runReplayLoop()</code> walks the remaining commits in topo order:
     load <code>.shadowignore</code> from the source tree, compute the diff (see section 5), build a remapped tree
     (section 6), resolve parents via the SHA mapping, and create a new commit preserving original author,
     committer, and timestamps. Record the new SHA in the mapping for subsequent commits to reference.
@@ -808,7 +810,7 @@ const result = runSync({ from: "b", pair: "backend" });
 
 <table>
   <tr><th>File</th><th>Purpose</th></tr>
-  <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine (6 phases), tree builder, trailer management, preflight checks</td></tr>
+  <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine, tree builder, trailer management, preflight checks</td></tr>
   <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, merge reconciliation. Also exports <code>runSync</code> for in-process use.</td></tr>
   <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: creates the empty commit with the <code>Shadow-seed</code> trailer</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
