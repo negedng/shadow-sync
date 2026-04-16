@@ -176,12 +176,10 @@ export function listBranches(remote: string): string[] {
     .filter(b => !b.startsWith(`${_shadowBranchPrefix}/`));
 }
 
-/** Build the canonical shadow branch name: shadow/{pairName}/{branch} */
 export function shadowBranchName(pairName: string, branch: string): string {
   return `${_shadowBranchPrefix}/${pairName}/${branch}`;
 }
 
-/** Append a trailer to a commit message using `git interpret-trailers`. */
 export function appendTrailer(message: string, trailer: string): string {
   const result = git(["interpret-trailers", "--trailer", trailer],
     { safe: true, input: message, raw: true });
@@ -268,8 +266,6 @@ interface CommitMeta {
   committerEmail: string;
   committerDate:  string;
   message:        string;
-  /** Parsed trailer block only, from git's own interpret-trailers. Empty
-   * if the commit has no recognized trailer block. */
   trailers:       string;
   short:          string;
   parentCount:    number;
@@ -317,16 +313,10 @@ function stripTrailers(message: string): string {
     .join("\n").trimEnd();
 }
 
-/** Sanitize an arbitrary string into a git trailer token. Git's parser only
- * accepts tokens matching `[A-Za-z0-9-]+`, so any other char (dot, underscore,
- * space, etc.) is collapsed to a hyphen. */
 function sanitizeTokenPart(s: string): string {
   return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
-/** Build the replay trailer key for a given source remote. The remote is
- * embedded in the key (not the value) so per-remote `--grep` works and git's
- * trailer parser recognizes it. Example: "Shadow-replayed-origin". */
 function replayedTrailerKey(remote: string): string {
   return `${REPLAYED_TRAILER}-${sanitizeTokenPart(remote)}`;
 }
@@ -400,10 +390,7 @@ function resolveParents(
   shaMapping: Map<string, string>,
   fallbackParent: string | null,
 ): string[] {
-  // Per-parent fallback: an unmapped parent is replaced with fallbackParent
-  // rather than dropped, so merge commits whose branch history was filtered
-  // out (seed boundary, path filter, orphan merges) still produce a merge
-  // on the shadow branch instead of a silent linear commit.
+  // Per-parent fallback: an unmapped parent is replaced with fallbackParent rather than dropped to keep merge commit status
   const parents: string[] = [];
   const seen = new Set<string>();
   for (const parentHash of commit.parents) {
@@ -416,10 +403,6 @@ function resolveParents(
   return parents;
 }
 
-/** Check whether a commit's parsed trailer block contains the given key.
- * Operates on git's own `%(trailers:only)` output — the key must therefore
- * be a valid git trailer token (see sanitizeTokenPart). Free-text mentions
- * of the key in the commit body are not matched. */
 function hasTrailerLine(trailers: string, key: string): boolean {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc}:`, "m").test(trailers);
@@ -600,7 +583,7 @@ function directionConfig(sourceRemote: string, targetRemote: string): DirectionC
 }
 
 /**
- * Phase 1: build the source→target SHA mapping from existing replayed commits
+ * Build the source→target SHA mapping from existing replayed commits
  * on the target side. Prefers scanning the target's own shadow branches when
  * they exist; otherwise falls back to our local history (scoped to target.dir
  * when present).
@@ -751,16 +734,11 @@ export function replayCommits(opts: {
   }
 
   // 3. Collect commits from source.
-  // If sourceBranch is set AND source has a url (it's a remote), use remote-tracking refs.
-  // If sourceBranch is set and source has no url (it's the workspace), use bare branch name.
   const sourceRefs = opts.sourceBranch
     ? [source.url ? `${source.remote}/${opts.sourceBranch}` : opts.sourceBranch]
     : branches.map(b => `${source.remote}/${b}`);
 
   // Seed boundary: limits how far back we scan.
-  // Only use the boundary if it's actually an ancestor of the source refs.
-  // The seed hash comes from whichever side was seeded and may not exist
-  // in the other side's history.
   let seedBoundary: string | undefined;
   if (seed) {
     const candidate = opts.sourceBranch ? seed.seedCommit : seed.seedHash;
@@ -792,19 +770,7 @@ export function replayCommits(opts: {
 
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
 
-  // 5. Seed the SHA mapping so the first replayed commit chains naturally
-  // to the target's history (shared ancestry for `git merge`).
-  // The seed records a two-way correspondence between the source tip at
-  // seed time (seedHash) and the local seed commit (seedCommit). We add
-  // both directions so whichever endpoint a source parent references, it
-  // maps to the target-side counterpart — this is what preserves merge
-  // structure for merges whose "main side" parent is the seed commit
-  // itself (e.g. --allow-unrelated-histories merges).
-  //
-  // For truly unmapped parents (history outside the replay set), fall
-  // back to the target's current main tip. That tip usually has the right
-  // tree for diff application (deletions etc. resolve against real
-  // content), while the seed would give an empty pre-sync tree.
+  // 5. Seed the SHA mapping so the first replayed commit chains naturally to the target's history (shared ancestry for `git merge`).
   if (seed) {
     shaMapping.set(seed.seedHash, seed.seedCommit);
     shaMapping.set(seed.seedCommit, seed.seedHash);
@@ -813,16 +779,12 @@ export function replayCommits(opts: {
     ? git(["rev-parse", `${target.remote}/main`])
     : null;
 
-  // 6. Replay loop — diff-based: each commit's tree is built by applying
-  //    only the changed files to the previous replayed tree.
+  // 6. Replay loop — diff-based
   const { lastSHA } = runReplayLoop({
     newCommits, shaMapping, fallbackParent, source, target, dc,
   });
 
-  // Defensive: lastSHA can remain null only if every commit in newCommits
-  // was skipped (buildRemappedTree returned null). Rev-list's path filter
-  // makes this effectively unreachable today, but emit an empty map instead
-  // of lying to the caller's Map<string, string> with a null value.
+  // lastSHA can remain null if every commit in newCommits was skipped (buildRemappedTree returned null).
   const branchMapping: Map<string, string> = opts.sourceBranch
     ? (lastSHA ? new Map([[branches[0] ?? "main", lastSHA]]) : new Map())
     : buildBranchMapping(source.remote, branches, shaMapping);
