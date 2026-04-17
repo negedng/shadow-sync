@@ -280,12 +280,12 @@
     <!-- Track labels (left) -->
     <text x="8"  y="70"  font-size="12" font-weight="600" fill="#1d60d9">A / feature</text>
     <text x="8"  y="133" font-size="12" font-weight="600" fill="#1d60d9">A / main</text>
-    <text x="8"  y="213" font-size="11" font-weight="600" fill="#1a8a3e">shadow / B / main</text>
+    <text x="8"  y="213" font-size="11" font-weight="600" fill="#1a8a3e">shadow / PairName / main</text>
     <text x="8"  y="227" font-size="10" fill="#666">(on A — mirrors B / main)</text>
     <text x="8"  y="330" font-size="12" font-weight="600" fill="#1a8a3e">B / main</text>
-    <text x="8"  y="400" font-size="11" font-weight="600" fill="#1d60d9">shadow / B / main</text>
+    <text x="8"  y="400" font-size="11" font-weight="600" fill="#1d60d9">shadow / PairName / main</text>
     <text x="8"  y="414" font-size="10" fill="#666">(on B — mirrors A / main)</text>
-    <text x="8"  y="483" font-size="11" font-weight="600" fill="#1d60d9">shadow / B / feature</text>
+    <text x="8"  y="483" font-size="11" font-weight="600" fill="#1d60d9">shadow / PairName / feature</text>
     <text x="8"  y="497" font-size="10" fill="#666">(on B — mirrors A / feature)</text>
 
     <!-- Pane labels (right) -->
@@ -308,12 +308,12 @@
     
     
     <line x1="130" y1="140" x2="200" y2="70" stroke="#1d60d9" stroke-width="2"/>
-    <line x1="200" y1="70" x2="1140" y2="70" stroke="#1d60d9" stroke-width="2.5"/>
+    <line x1="200" y1="70" x2="940" y2="70" stroke="#1d60d9" stroke-width="2.5"/>
     <!-- a/main -->
-    <line x1="75" y1="140" x2="1140" y2="140" stroke="#1d60d9" stroke-width="2.5"/>
+    <line x1="75" y1="140" x2="940" y2="140" stroke="#1d60d9" stroke-width="2.5"/>
     <line x1="300" y1="140" x2="360" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- shadow/backend/main on A  -->
-    <line x1="360" y1="220" x2="1140" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="360" y1="220" x2="940" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- SEED on a/main (black filled, blue rim) -->
     <circle cx="300" cy="140" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
     <circle cx="300" cy="70" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
@@ -321,25 +321,30 @@
 
     <line x1="130" y1="420" x2="200" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- b/main starts at the seed (pre-seed history identical to a/main) -->
-    <line x1="360" y1="320" x2="1140" y2="320" stroke="#1a8a3e" stroke-width="2.5"/>
+    <line x1="360" y1="320" x2="940" y2="320" stroke="#1a8a3e" stroke-width="2.5"/>
 
     <line x1="300" y1="420" x2="360" y2="320" stroke="#1a8a3e" stroke-width="2"/>
     <!-- shadow/backend/main on B (blue dashed) -->
-    <line x1="75" y1="420" x2="1140" y2="420" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="75" y1="420" x2="940" y2="420" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
 
     <!-- shadow/backend/feature on B (blue dashed) -->
-    <line x1="200" y1="490" x2="1140" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="200" y1="490" x2="940" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- SEED on b/main (black filled, green rim) -->
     <circle cx="300" cy="420" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
     <circle cx="300" cy="490" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
 
 
-    <circle cx="400" cy="320" r="6.5" fill="#1a8a3e"/>
-    <text x="400" y="343" font-size="13" font-weight="700" fill="#1a8a3e">a</text>
+    <circle cx="380" cy="320" r="6.5" fill="#1a8a3e"/>
+    <text x="380" y="343" font-size="13" font-weight="700" fill="#1a8a3e">a</text>
 
+
+    <!-- x (the commit that gets synced) -->
+    <circle cx="400" cy="140" r="6.5"  fill="none"  stroke="#1d60d9" stroke-width="2"/>
+    <text x="400" y="120" font-size="13" font-weight="700" fill="#1d60d9" >x</text>
+    <text x="370"  y="128" font-size="10" fill="#666">(out of scope)</text>
 
     <!-- Blue DOWN — shadow-sync --from a (main pair): b → b' -->
-        <!-- c (the commit that gets synced) -->
+    <!-- b (the commit that gets synced) -->
     <circle cx="440" cy="140" r="6.5" fill="#1d60d9"/>
     <text x="440" y="124" font-size="13" font-weight="700" fill="#1d60d9">b</text>
      
@@ -373,7 +378,7 @@
     <text x="705" y="210" font-size="13" font-weight="700" fill="#1a8a3e">m'</text>
     <line x1="700" y1="149" x2="700" y2="213" stroke="#1a8a3e" stroke-width="2" marker-end="url(#tip-green)"/>
     <text x="705" y="178" font-size="11" fill="#1a8a3e" font-weight="700">merge</text>
-    <text x="705"  y="190" font-size="10" fill="#666">(auto)</text>
+    <text x="705"  y="190" font-size="10" fill="#666">(auto, brings in x, b)</text>
 
     <circle cx="730" cy="220" r="6.5" fill="#1a8a3e"/>
     <text x="730" y="210" font-size="13" font-weight="700" fill="#1a8a3e">c'</text>
@@ -399,27 +404,47 @@
     <circle cx="920" cy="490" r="6.5" fill="#1d60d9"/>
     <text x="920" y="513" font-size="13" font-weight="700" fill="#1d60d9">e'</text>
 
+    <!-- ═══ Right panel: tree-shape illustrations ═══ -->
+    <!-- Divider between the commit-graph area and the tree panel -->
+    <line x1="955" y1="35" x2="955" y2="255" stroke="#b8c3d4" stroke-width="1" stroke-dasharray="2 3"/>
+    <line x1="955" y1="295" x2="955" y2="515" stroke="#b8c3d4" stroke-width="1" stroke-dasharray="2 3"/>
+
+    <!-- Repo A tree: shadow/backend/main on A keeps A's full layout -->
+    <text x="970" y="52" font-size="11" font-weight="700" fill="#1d60d9">Repo A (sync on backend/)</text>
+    <g font-family="'Cascadia Code','Consolas',monospace" font-size="10" fill="#333">
+      <text x="970" y="88">.</text>
+      <text x="970" y="102">├─ README.md</text>
+      <text x="970" y="116">├─ package.json</text>
+      <text x="970" y="130">├─ backend/</text>
+      <text x="1075" y="130" fill="#1a8a3e" font-style="italic">← all of B's root</text>
+      <text x="970" y="144">│   ├─ README.md</text>
+      <text x="970" y="158">│   ├─ package.json</text>
+      <text x="970" y="172">│   ├─ src/app.ts</text>
+      <text x="970" y="186">│   └─ tests/app.test.ts</text>
+      <text x="970" y="200">├─ frontend/</text>
+      <text x="970" y="214">│   └─ src/page.tsx</text>
+      <text x="970" y="228">└─ infra/deploy.sh</text>
+    </g>
+    
+
+    <!-- Repo B tree: shadow/backend/main on B keeps B's root layout -->
+    <text x="970" y="312" font-size="11" font-weight="700" fill="#1a8a3e">Repo B (sync on root)</text>
+    <g font-family="'Cascadia Code','Consolas',monospace" font-size="10" fill="#333">
+      <text x="970" y="350">.</text>
+      <text x="1075" y="350" fill="#1d60d9" font-style="italic">← A's backend/</text>
+      <text x="970" y="366">├─ README.md</text>
+      <text x="1075" y="366" fill="#1d60d9" font-style="italic">   (prefix stripped)</text>
+      <text x="970" y="382">├─ package.json</text>
+      <text x="970" y="398">├─ src/</text>
+      <text x="970" y="414">│   └─ app.ts</text>
+      <text x="970" y="430">└─ tests/</text>
+      <text x="970" y="446">.   └─ app.test.ts</text>
+    </g>
 
 
   </svg>
   <figcaption>
-    <strong>Repo A</strong> (top): <code>a/main</code>, <code>a/feature</code> (forks from <code>a/main</code>
-    at c1, pre-seed), plus one shadow <code>shadow/backend/main</code> on A mirroring <code>b/main</code>.
-    <strong>Repo B</strong> (bottom): native <code>b/main</code> plus two shadows mirroring A's branches.
-    Pre-seed history on <code>b/main</code> is identical to <code>a/main</code> — it's not re-drawn.
-    <br>
-    The black filled dots at the vertical dashed <strong>seed</strong> line are the seed commits on each
-    native. The hollow circles are shadow <em>anchors</em> — they aren't separate commits, they reference
-    the native's seed as their root (vertical coloured connector). All three shadow branches originate there
-    and continue as dashed lines.
-    <br>
-    Developers commit: <code>a</code>, <code>b</code> on <code>b/main</code>; <code>c</code> on
-    <code>a/main</code>; <code>d</code> on <code>a/feature</code>. A sync is a single event shown as an
-    arrow in empty space between source commits and their replays.
-    <strong>DOWN blue</strong> = <code>shadow-sync --from a</code>: <code>c</code>→<code>c'</code> and
-    <code>d</code>→<code>d'</code>. <strong>UP green</strong> = <code>shadow-sync --from b</code>:
-    <code>a</code>→<code>a'</code>, <code>b</code>→<code>b'</code>. After syncing, each side lands the
-    shadow content with a plain <code>git merge</code> (merge commits rimmed in the other colour).
+
   </figcaption>
 </figure>
 
