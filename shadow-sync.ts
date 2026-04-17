@@ -152,12 +152,11 @@ function _runSyncCore(options: SyncOptions): number {
         sourceBranch,
       });
 
-      if (result.upToDate && !sourceBranch) {
-        console.log("  Already up to date.");
-      } else {
-
+      {
         // Fetch target to know current state — warn on failure rather than
         // proceeding silently, since stale tracking refs mis-classify divergence.
+        // Always fetch: even when no new commits were replayed, the echo
+        // mapping may advance the shadow branch to mirror the source's tip.
         const fetchResult = git(["fetch", target.remote], { safe: true });
         if (!fetchResult.ok) {
           console.error(`  ⚠ Failed to fetch '${target.remote}': ${fetchResult.stderr}`);
@@ -171,7 +170,7 @@ function _runSyncCore(options: SyncOptions): number {
 
           if (!replayedSHA) {
             if (result.upToDate) {
-              console.log(`  Already up to date.`);
+              console.log(`  ${shadow}: already up to date.`);
             } else {
               console.log(`  ${shadow}: no mapping found, skipping.`);
             }

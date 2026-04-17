@@ -12,22 +12,29 @@ function git(cmd: string, cwd: string): string {
  * Test: echo commits resolve to their original target-side hash, not the
  * target's current branch tip via fallback.
  *
- * Scenario from the diagram (B-side has a commit BEFORE the merge):
+ * Phase 1 — no-ff merge with an earlier B-side commit (diagram scenario):
  *   A/main:  init --- b
  *   B/main:  seed --- a --- merge(a, b') --- c
+ * The replayed merge must have the original `b` commit as its second parent
+ * (not A/main's current tip).
  *
- * When syncing B → A, the merge's second parent (b', an echo of A's `b`)
- * must resolve to the original `b` commit hash on A — not to whatever
- * A/main's tip happens to be. This keeps A/main and shadow/B/main sharing
- * the real `b` commit as their merge-base.
+ * Phase 2 — FF merge with no extra B commits (round-trip no-op):
+ *   A/main:  init --- c
+ *   B/main:  seed --- c'  (b FF-merged the shadow)
+ * Syncing B → A has no new commits to replay, but the echo mapping must
+ * still advance shadow/pair/main on A to point at A's original `c`.
  */
 export default function run() {
   const env = createTestEnv("pull-echo-mapping");
   try {
+    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
+
+    // ── Phase 1: no-ff merge with B-side commit before it ─────────────────
+
     // 1. Establish baseline — seed B with something then pull to create the shadow branch
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base.txt");
     const r1 = runCiSync(env);
-    assertEqual(r1.status, 0, "initial pull should succeed");
+    assertEqual(r1.status, 0, "[phase 1] initial pull should succeed");
     mergeShadow(env);
 
     // 2. A commits `b` locally (origin side)
@@ -36,11 +43,10 @@ export default function run() {
 
     // 3. Push A → B (creates b' on team/shadow/frontend/main with trailer)
     const r2 = runPush(env);
-    assertEqual(r2.status, 0, "push A→B should succeed");
+    assertEqual(r2.status, 0, "[phase 1] push A→B should succeed");
 
     // 4. On B side: commit `a` on main BEFORE the merge, then merge b' in,
     //    then commit `c` after the merge.
-    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
     fs.writeFileSync(path.join(env.remoteWorking, "b-pre.ts"), "B before merge\n");
     git("add b-pre.ts", env.remoteWorking);
     git('commit -m "a: B commit before merge"', env.remoteWorking);
@@ -61,35 +67,60 @@ export default function run() {
 
     // 6. Pull B → A. The echo of b' should map back to `b` (not to hashAfterB).
     const r3 = runCiSync(env);
-    assertEqual(r3.status, 0, "pull B→A should succeed");
+    assertEqual(r3.status, 0, "[phase 1] pull B→A should succeed");
 
     // 7. Verify: origin/shadow/frontend/main contains the ORIGINAL `b` commit
     //    in its ancestry — reachable via the replayed merge's second parent.
     git(`fetch origin ${shadowBranch}`, env.localRepo);
-    const shadowTip = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
-    const ancestors = git(`rev-list ${shadowTip}`, env.localRepo).split("\n");
+    const shadowTip1 = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
+    const ancestors1 = git(`rev-list ${shadowTip1}`, env.localRepo).split("\n");
     assertIncludes(
-      ancestors.join("\n"),
+      ancestors1.join("\n"),
       hashB,
-      "original `b` hash must appear in shadow branch ancestry (echo mapped to original, not fallback)",
+      "[phase 1] original `b` hash must appear in shadow branch ancestry",
     );
-
-    // And it must NOT wire to the post-b tip — that'd mean the fallback leaked
-    // through and the replayed merge claims to have merged later A work.
     assertEqual(
-      ancestors.includes(hashAfterB),
+      ancestors1.includes(hashAfterB),
       false,
-      "post-b tip must not appear in shadow ancestry (would indicate fallback, not trailer lookup)",
+      "[phase 1] post-b tip must NOT appear in shadow ancestry (would indicate fallback leak)",
     );
 
-    // 8. Sanity: A/main can fast-forward to shadow tip, since `b` is a shared
-    //    commit and A's post-b work also descends from it. We expect a
-    //    non-conflicting merge (merge-base = b or later).
-    const mergeBase = git(`merge-base HEAD origin/${shadowBranch}`, env.localRepo);
+    // ── Phase 2: FF merge with no extra B commits ─────────────────────────
+    // A commits `c`, pushes; B fast-forwards its main to c' (no native B
+    // commits and no merge); sync back. We expect origin/shadow/{pair}/main
+    // to advance to A's original `c` — even though there are no "new" commits
+    // to replay from B's side.
+
+    // Merge phase-1 shadow (with the replayed merge) into A/main so A's
+    // working branch fully reflects B's state before we continue.
+    mergeShadow(env);
+
+    // 8. A commits `c` locally
+    commitOnLocal(env, { "phase2.ts": "A phase-2 work\n" }, "c: phase 2 A commit");
+    const hashC = git("rev-parse HEAD", env.localRepo);
+
+    // 9. Push A → B (c' lands on team shadow with trailer)
+    const r4 = runPush(env);
+    assertEqual(r4.status, 0, "[phase 2] push A→B should succeed");
+
+    // 10. On B: fast-forward B/main to c' (no native B commits, no merge commit)
+    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
+    git(`merge --ff-only origin/${shadowBranch}`, env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    // 11. Pull B → A. No new commits from B, but echo mapping must still
+    //     advance the shadow branch on origin to A's original c.
+    const r5 = runCiSync(env);
+    assertEqual(r5.status, 0, "[phase 2] pull B→A should succeed");
+
+    // 12. Verify: origin/shadow/{pair}/main tip is literally hashC (A's own
+    //     commit — same SHA, not a re-replay).
+    git(`fetch origin ${shadowBranch}`, env.localRepo);
+    const shadowTip2 = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
     assertEqual(
-      mergeBase === hashB || mergeBase === hashAfterB,
-      true,
-      `merge-base should be b or a descendant of b (got ${mergeBase.slice(0, 10)})`,
+      shadowTip2,
+      hashC,
+      "[phase 2] shadow branch tip should be A's original `c` commit (echo mapped to original)",
     );
   } finally {
     env.cleanup();

@@ -608,6 +608,9 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     <strong>Push shadow branches.</strong> For each branch, push the final replayed SHA to the target remote
     as <code>shadow/{pairName}/{branch}</code>. If the shadow branch has diverged
     (both sides have new commits), a reconciliation merge is created. See <a href="#merge">Merges</a>.
+    Note: even when replay produces no <em>new</em> commits, the branch may still advance if the echo
+    mapping points the source's tip at an existing target-side commit &mdash; the per-branch push logic
+    compares SHAs and fast-forwards when warranted.
   </div></li>
   <li><span class="step-num">7</span><div>
     <strong>Report stale branches.</strong> If syncing all branches, warn about shadow branches whose
