@@ -244,8 +244,8 @@
 <table>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr>
-    <td><code>npm run setup -- -r backend --from a</code></td>
-    <td><strong>Bootstrap.</strong> Records a seed baseline so sync knows where shared history begins. Run once per pair.</td>
+    <td><code>npm run setup -- -r backend</code></td>
+    <td><strong>Bootstrap.</strong> Builds a seed commit via <code>git commit-tree</code> and pushes it to the target remote, anchoring shared history. Run once per pair &mdash; or once per branch when pre-existing branches are divergent at setup time.</td>
   </tr>
   <tr>
     <td><code>npm run sync -- --from b</code></td>
@@ -352,23 +352,41 @@
   the replay engine where history begins &mdash; everything before it is skipped.
 </p>
 
-<pre><code>npm run setup -- -r backend --from a</code></pre>
+<pre><code>npm run setup -- -r backend</code></pre>
 
-<p>This creates an empty commit with a trailer:</p>
+<p>
+  <code>shadow-setup.ts</code> uses plumbing (<code>git commit-tree</code>) to build the seed commit
+  as a child of the target branch's current tip and pushes it directly to the target remote
+  (<code>git push &lt;target&gt; &lt;seedSHA&gt;:refs/heads/&lt;branch&gt;</code>). The workspace's HEAD is never touched.
+  This means setup behaves identically in workspace mode (target is <code>origin</code>) and orchestrator mode
+  (target is an external remote) &mdash; no more "seed landed on the wrong repo" footgun.
+</p>
+
+<p>The seed commit carries a trailer:</p>
 <pre><code>Seed shadow-sync for backend from repo-b/main
 
 Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 
 <p>
   The trailer records the pair name and the tip hash of the source branch at that moment.
-  During replay, <code>findSeed()</code> scans the log for this trailer and uses the seed hash as a boundary
-  in <code>git rev-list</code> to exclude ancestor commits.
+  During replay, <code>findSeeds()</code> scans the log for this trailer and uses matching hashes as
+  boundaries in <code>git rev-list</code> to exclude ancestor commits.
 </p>
 
 <div class="highlight-box">
-  <strong>Seed mapping (new):</strong> the engine now also maps <code>seedTrailerHash &harr; seedCommitHash</code> bidirectionally.
-  When a replayed commit's first parent predates the seed, the mapping substitutes the seed commit itself,
-  giving the shadow branch shared ancestry with the target's main branch &mdash; so plain <code>git merge</code> works.
+  <strong>Seed mapping:</strong> the engine maps <code>seedTrailerHash &harr; seedCommitHash</code>
+  bidirectionally. When a replayed commit's first parent predates the seed, the mapping substitutes the seed
+  commit itself, giving the shadow branch shared ancestry with the target's main branch &mdash; so plain
+  <code>git merge</code> works.
+</div>
+
+<div class="highlight-box">
+  <strong>Multi-seed (per branch):</strong> setup is additive. Running
+  <code>npm run setup -- -r backend -b client-x</code> creates a second seed anchored on <code>client-x</code>.
+  <code>findSeeds()</code> returns every seed for a pair; <code>findSeedBoundaries()</code> then picks, for each seed,
+  whichever of its two hashes is reachable from any source ref and uses those as rev-list boundaries.
+  This supports the case where both sides already have long-lived divergent branches at setup time &mdash;
+  each branch gets its own anchor without replaying pre-seed history.
 </div>
 
 <!-- ── 3. Steps of a Sync ──────────────────────────────────────────────── -->
@@ -430,14 +448,17 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     <code>Map&lt;sourceHash, targetHash&gt;</code> of commits that are already replayed.
   </div></li>
   <li><span class="step-num">2</span><div>
-    <strong>Find the seed.</strong> <code>findSeed()</code> searches the local log for the
-    <code>Shadow-seed: {pairName} {hash}</code> trailer. The embedded hash is the boundary below which
-    commits are skipped.
+    <strong>Find all seeds.</strong> <code>findSeeds()</code> searches the local log (<code>--all</code>) for
+    every <code>Shadow-seed: {pairName} {hash}</code> trailer matching the pair. Each entry yields a
+    <code>{seedTrailerHash, seedCommitHash}</code> record. For each seed, <code>findSeedBoundaries()</code> tests
+    both hashes against the source refs and keeps whichever is reachable &mdash; so a pair with multiple
+    anchored branches produces multiple boundaries.
   </div></li>
   <li><span class="step-num">3</span><div>
     <strong>Collect commits in topological order.</strong> <code>collectSourceCommits()</code> runs
-    <code>git rev-list --topo-order --reverse</code> from each branch tip, excluding commits before the seed
-    boundary and (where <code>dir</code> is non-empty) narrowing to commits that touch the source subdirectory.
+    <code>git rev-list --topo-order --reverse</code> from each branch tip, excluding commits reachable from
+    any seed boundary (<code>^seed1 ^seed2 &hellip;</code>) and (where <code>dir</code> is non-empty) narrowing
+    to commits that touch the source subdirectory.
   </div></li>
   <li><span class="step-num">4</span><div>
     <strong>Filter.</strong> <code>filterNewCommits()</code> drops commits already in the mapping (skipped &mdash;
@@ -446,9 +467,9 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
   </div></li>
   <li><span class="step-num">5</span><div>
     <strong>Seed mapping &amp; fallback parent.</strong> <code>seedShaMapping()</code> records
-    <code>seedTrailerHash &harr; seedCommitHash</code> in both directions. <code>fallbackParent</code> is set to the
-    target's main tip &mdash; any source parent that doesn't map (seed boundary, path filter, orphan merge) falls
-    back to this, so merge commits stay merges on the shadow side.
+    <code>seedTrailerHash &harr; seedCommitHash</code> in both directions for every seed. <code>fallbackParent</code>
+    is set to the target's main tip &mdash; any source parent that doesn't map (seed boundary, path filter,
+    orphan merge) falls back to this, so merge commits stay merges on the shadow side.
   </div></li>
   <li><span class="step-num">6</span><div>
     <strong>Replay loop.</strong> <code>runReplayLoop()</code> walks the remaining commits in topo order:
@@ -812,10 +833,10 @@ const result = runSync({ from: "b", pair: "backend" });
   <tr><th>File</th><th>Purpose</th></tr>
   <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine, tree builder, trailer management, preflight checks</td></tr>
   <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, merge reconciliation. Also exports <code>runSync</code> for in-process use.</td></tr>
-  <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: creates the empty commit with the <code>Shadow-seed</code> trailer</td></tr>
+  <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: builds the seed commit via <code>git commit-tree</code> and pushes it to the target remote; additive (run per branch for multi-seed)</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
   <tr><td><code>.shadowignore</code></td><td>Per-repo file-exclusion patterns (auto-discovered from source tree)</td></tr>
-  <tr><td><code>shadow-tests/</code></td><td>14 consolidated test files: pull-content, pull-paths, pull-branches, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, round-trip</td></tr>
+  <tr><td><code>shadow-tests/</code></td><td>15 consolidated test files: pull-content, pull-paths, pull-branches, pull-multi-branch-seed, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, round-trip</td></tr>
   <tr><td><code>.github/workflows/shadow-sync.yml</code></td><td>CI workflow: pull from B on schedule</td></tr>
   <tr><td><code>.github/workflows/shadow-forward.yml</code></td><td>CI workflow: push from A on schedule (needs PAT)</td></tr>
 </table>

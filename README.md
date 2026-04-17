@@ -160,11 +160,13 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 # Edit shadow-config.json with your pair definitions
 ```
 
-3. Record a seed from the monorepo side (tells sync where history starts):
+3. Record a seed baseline (tells sync where history starts). The seed commit is built via plumbing and pushed directly to the target remote — it never modifies your workspace HEAD, so this works the same in workspace and orchestrator modes:
 
 ```bash
-npm run setup -- -r backend --from a
+npm run setup -- -r backend
 ```
+
+Default `--from b` records RepoB's current tip as the baseline; the seed commit lands on RepoA's main. For repos that already have multiple long-lived branches at setup time, run setup once per branch you want to anchor (`-b <branch>`) — branches that descend from an existing seed don't need their own.
 
 4. Create the external repo with the same content as your subdirectory. The external repo must start with the same files so both sides agree on the baseline:
 
@@ -190,7 +192,7 @@ git merge origin/shadow/backend/main   # merge the shadow branch
 npm test
 ```
 
-39 automated tests covering pull, push, merge, branching, binary files, LFS, symlinks, submodules, and more.
+Automated tests covering pull, push, merge, branching, binary files, LFS, symlinks, submodules, multi-seed, and more.
 
 ## Files
 
@@ -198,7 +200,7 @@ npm test
 |------|---------|
 | `shadow-config.example.json` | Example pair definitions, trailers, git config overrides |
 | `shadow-common.ts` | Config, git helpers, unified replay engine |
-| `shadow-setup.ts` | Bootstrap: records seed so sync skips existing history |
+| `shadow-setup.ts` | Bootstrap: builds a seed commit via plumbing and pushes it to the target remote; additive across branches |
 | `shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `.shadowignore` | Ignore patterns (auto-discovered from source commit, like `.gitignore`) |
 | `shadow-sync-explained.html` | Detailed technical documentation |
