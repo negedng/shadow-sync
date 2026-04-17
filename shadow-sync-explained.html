@@ -334,15 +334,17 @@
     <circle cx="300" cy="490" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
 
 
+    <circle cx="400" cy="320" r="6.5" fill="#1a8a3e"/>
+    <text x="400" y="343" font-size="13" font-weight="700" fill="#1a8a3e">a</text>
 
 
-    <!-- Blue DOWN — shadow-sync --from a (main pair): c → c' -->
+    <!-- Blue DOWN — shadow-sync --from a (main pair): b → b' -->
         <!-- c (the commit that gets synced) -->
     <circle cx="440" cy="140" r="6.5" fill="#1d60d9"/>
-    <text x="440" y="124" font-size="13" font-weight="700" fill="#1d60d9">c</text>
+    <text x="440" y="124" font-size="13" font-weight="700" fill="#1d60d9">b</text>
      
     <circle cx="500" cy="420" r="6.5" fill="#1d60d9"/>
-    <text x="500" y="442" font-size="13" font-weight="700" fill="#1d60d9">c'</text>
+    <text x="500" y="442" font-size="13" font-weight="700" fill="#1d60d9">b'</text>
 
     <line x1="480" y1="148" x2="480" y2="412" stroke="#1d60d9" stroke-width="2" marker-end="url(#tip-blue)"/>
     <text x="485" y="188" font-size="12" fill="#1d60d9" font-weight="700">shadow-sync</text>
@@ -353,36 +355,41 @@
     <text x="525" y="380" font-size="12" fill="#1d60d9" font-weight="700">merge</text>
     <!-- merge commit on b/main (green fill, blue rim = absorbs blue content) -->
     <circle cx="520" cy="320" r="8" fill="#1a8a3e" stroke="#1d60d9" stroke-width="2.5"/>
+    <text x="530" y="343" font-size="13" font-weight="700" fill="#1a8a3e">m</text>
 
     <!-- a, b commit on Repo B, synced back to repo A -->
-    <circle cx="560" cy="320" r="6.5" fill="#1a8a3e"/>
-    <text x="560" y="343" font-size="13" font-weight="700" fill="#1a8a3e">a</text>
     <circle cx="600" cy="320" r="6.5" fill="#1a8a3e"/>
-    <text x="600" y="343" font-size="13" font-weight="700" fill="#1a8a3e">b</text>
+    <text x="600" y="343" font-size="13" font-weight="700" fill="#1a8a3e">c</text>
 
     <!-- Green UP — shadow-sync --from b: a,b → a',b' -->
     <line x1="630" y1="312" x2="630" y2="228" stroke="#1a8a3e" stroke-width="2" marker-end="url(#tip-green)"/>
     <text x="635" y="258" font-size="12" fill="#1a8a3e" font-weight="700">shadow-sync</text>
     <text x="635" y="272" font-size="12" fill="#1a8a3e" font-weight="700">--from b</text>
 
-    <circle cx="660" cy="220" r="6.5" fill="none" stroke="#1a8a3e" stroke-width="2"/>
-    <text x="660" y="210" font-size="13" font-weight="700" fill="#1a8a3e">c''</text>
-    <text x="640" y="195" font-size="10" font-weight="700" font-style="italic" fill="#1a8a3e">skipped</text>
-    <circle cx="700" cy="220" r="6.5" fill="#1a8a3e"/>
-    <text x="700" y="210" font-size="13" font-weight="700" fill="#1a8a3e">a'</text>
+    <circle cx="660" cy="220" r="6.5" fill="#1a8a3e"/>
+    <text x="660" y="210" font-size="13" font-weight="700" fill="#1a8a3e">a'</text>
+
+    <circle cx="700" cy="220" r="6.5" fill="#1a8a3e" stroke="#1d60d9" stroke-width="2"/>
+    <text x="705" y="210" font-size="13" font-weight="700" fill="#1a8a3e">m'</text>
+    <line x1="700" y1="149" x2="700" y2="213" stroke="#1a8a3e" stroke-width="2" marker-end="url(#tip-green)"/>
+    <text x="705" y="178" font-size="11" fill="#1a8a3e" font-weight="700">merge</text>
+    <text x="705"  y="190" font-size="10" fill="#666">(auto)</text>
+
     <circle cx="730" cy="220" r="6.5" fill="#1a8a3e"/>
-    <text x="730" y="210" font-size="13" font-weight="700" fill="#1a8a3e">b'</text>
+    <text x="730" y="210" font-size="13" font-weight="700" fill="#1a8a3e">c'</text>
+
+        <circle cx="770" cy="140" r="6.5" fill="#1d60d9"/>
+    <text x="770" y="124" font-size="13" font-weight="700" fill="#1d60d9">d</text>
 
     <!-- Green merge on A: shadow on A → merge commit on a/main -->
-    <line x1="770" y1="213" x2="770" y2="149" stroke="#1a8a3e" stroke-width="2" marker-end="url(#tip-green)"/>
-    <text x="775" y="178" font-size="11" fill="#1a8a3e" font-weight="700">merge</text>
-
+    <line x1="810" y1="213" x2="810" y2="149" stroke="#1a8a3e" stroke-width="2" marker-end="url(#tip-green)"/>
+    <text x="815" y="178" font-size="11" fill="#1a8a3e" font-weight="700">merge</text>
     <!-- merge commit on a/main (blue fill, green rim = absorbs green content) -->
-    <circle cx="770" cy="140" r="8" fill="#1d60d9" stroke="#1a8a3e" stroke-width="2.5"/>
+    <circle cx="810" cy="140" r="8" fill="#1d60d9" stroke="#1a8a3e" stroke-width="2.5"/>
     
     <!-- d commit on a/feature -->
     <circle cx="850" cy="70" r="6.5" fill="#1d60d9"/>
-    <text x="850" y="54" font-size="13" font-weight="700" fill="#1d60d9">d</text>
+    <text x="850" y="54" font-size="13" font-weight="700" fill="#1d60d9">e</text>
 
     <!-- Blue DOWN — shadow-sync --from a (feature pair): d → d' -->
     <line x1="890" y1="78" x2="890" y2="482" stroke="#1d60d9" stroke-width="2" marker-end="url(#tip-blue)"/>
@@ -390,7 +397,7 @@
     <text x="895" y="132" font-size="12" fill="#1d60d9" font-weight="700">--from a</text>
 
     <circle cx="920" cy="490" r="6.5" fill="#1d60d9"/>
-    <text x="920" y="513" font-size="13" font-weight="700" fill="#1d60d9">d'</text>
+    <text x="920" y="513" font-size="13" font-weight="700" fill="#1d60d9">e'</text>
 
 
 
