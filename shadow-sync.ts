@@ -87,9 +87,17 @@ function _runSyncCore(options: SyncOptions): number {
     ensureRemote(pair.a);
     ensureRemote(pair.b);
 
-    // Fetch from source
+    // Fetch both remotes before replay. Target-side objects (seed trailer
+    // hashes, fallback parent) must exist locally for the replay loop to
+    // resolve SHA mappings and build trees. A fresh CI runner has neither
+    // cached, so both fetches are mandatory up front.
     console.log(`\n══ Syncing pair '${pair.name}' (from ${fromSide}: ${source.remote} → ${target.remote}) ══`);
     git(["fetch", source.remote]);
+    const targetFetchEarly = git(["fetch", target.remote], { safe: true });
+    if (!targetFetchEarly.ok) {
+      console.error(`  ⚠ Failed to fetch '${target.remote}': ${targetFetchEarly.stderr}`);
+      console.error(`    Continuing with local tracking refs — seed/divergence checks may be stale.`);
+    }
 
     // Determine branches to replay.
     // If source has no url, it's the workspace — default to current branch.
@@ -154,16 +162,6 @@ function _runSyncCore(options: SyncOptions): number {
       });
 
       {
-        // Fetch target to know current state — warn on failure rather than
-        // proceeding silently, since stale tracking refs mis-classify divergence.
-        // Always fetch: even when no new commits were replayed, the echo
-        // mapping may advance the shadow branch to mirror the source's tip.
-        const fetchResult = git(["fetch", target.remote], { safe: true });
-        if (!fetchResult.ok) {
-          console.error(`  ⚠ Failed to fetch '${target.remote}': ${fetchResult.stderr}`);
-          console.error(`    Continuing with local tracking refs — divergence checks may be stale.`);
-        }
-
         // Update shadow branches on target's remote
         for (const branch of validBranches) {
           const shadow = shadowBranchName(pair.name, branch);

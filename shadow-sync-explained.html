@@ -622,7 +622,12 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     Ensure both remotes exist (add or update URL if the config specifies one).
   </div></li>
   <li><span class="step-num">2</span><div>
-    <strong>Fetch from source.</strong> <code>git fetch {source.remote}</code>.
+    <strong>Fetch both remotes.</strong> <code>git fetch {source.remote}</code> for the commits to replay,
+    and <code>git fetch {target.remote}</code> so target-side objects &mdash; seed trailer hashes (which are
+    target-side commit SHAs carried in the seed trailer), the <code>fallbackParent</code>
+    (<code>{target}/main</code>'s tip), and the current shadow-branch tips &mdash; all exist locally before
+    the replay engine starts resolving them. On a fresh CI runner, neither is cached, so both fetches are
+    mandatory up front.
   </div></li>
   <li><span class="step-num">3</span><div>
     <strong>Determine branches.</strong>
