@@ -159,6 +159,21 @@ export function refExists(ref: string): boolean {
   return git(["rev-parse", "--verify", ref], { safe: true }).ok;
 }
 
+/** Check existence of multiple remote-tracking refs in a single git call. */
+function refsExist(refs: string[]): Set<string> {
+  if (refs.length === 0) return new Set();
+  const result = git(
+    ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
+    { safe: true },
+  );
+  if (!result.ok || !result.stdout) return new Set();
+  const existing = new Set<string>();
+  for (const line of result.stdout.split("\n").filter(Boolean)) {
+    existing.add(line.replace(/^refs\/remotes\//, ""));
+  }
+  return existing;
+}
+
 export function getCurrentBranch(): string {
   const result = git(["symbolic-ref", "--short", "HEAD"], { safe: true });
   if (!result.ok) {
@@ -468,6 +483,8 @@ function buildRemappedTree(opts: {
 
   // Parse and apply each change. diff-tree is invoked without -M/-C above,
   // so renames/copies surface as D+A pairs — we only handle A/M/D/T here.
+  const removals: string[] = [];
+  const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
   for (const line of diffOutput.split("\n").filter(Boolean)) {
     const m = line.match(/^:\d+ (\d+) [0-9a-f]+ ([0-9a-f]+) ([AMDT])\t(.+)$/);
     if (!m) continue;
@@ -486,10 +503,20 @@ function buildRemappedTree(opts: {
     const targetPath = targetDir ? `${targetDir}/${srcRelative}` : srcRelative;
 
     if (status === "D") {
-      git(["rm", "--cached", "-f", "--quiet", "--", targetPath], { env: idxEnv, safe: true });
+      removals.push(targetPath);
     } else {
-      git(["update-index", "--add", "--cacheinfo", `${newMode},${newHash},${targetPath}`], { env: idxEnv });
+      additions.push(`${newMode} ${newHash}\t${targetPath}`);
     }
+  }
+
+  // Batch-remove deleted paths (single spawn)
+  if (removals.length > 0) {
+    git(["rm", "--cached", "-f", "--quiet", "--", ...removals], { env: idxEnv, safe: true });
+  }
+
+  // Batch-add/update entries via --index-info (single spawn)
+  if (additions.length > 0) {
+    git(["update-index", "--index-info"], { env: idxEnv, input: additions.join("\n") + "\n" });
   }
 
   return git(["write-tree"], { env: idxEnv });
@@ -719,9 +746,9 @@ function scanReplayedMapping(opts: {
   dc: DirectionConfig;
 }): Map<string, string> {
   const { pair, target, branches, dc } = opts;
-  const shadowRefs = branches
-    .map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`)
-    .filter(r => refExists(r));
+  const candidateRefs = branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`);
+  const existingRefs = refsExist(candidateRefs);
+  const shadowRefs = candidateRefs.filter(r => existingRefs.has(r));
 
   if (shadowRefs.length === 0) {
     return new Map();
