@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -39,13 +40,14 @@ jobs:
 
       - name: Configure git
         env:
-          EXTERNAL_REPO_TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN }}
+          # PAT if provided (required for orchestrator-mode cross-repo pushes);
+          # otherwise fall back to the caller's GITHUB_TOKEN which covers
+          # pushes to origin in workspace mode.
+          TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN || github.token }}
         run: |
           git config --global user.name "Shadow Sync"
           git config --global user.email "shadow-sync@users.noreply.github.com"
-          if [ -n "$EXTERNAL_REPO_TOKEN" ]; then
-            git config --global url."https://x-access-token:${EXTERNAL_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
-          fi
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Pull from B into shadow branches on A
         run: npm run sync -- --from b
