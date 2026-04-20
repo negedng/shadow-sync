@@ -30,5 +30,10 @@ jobs:
 
       - run: npm ci
 
+      - name: Configure git
+        run: |
+          git config --global user.name "Shadow Sync"
+          git config --global user.email "shadow-sync@users.noreply.github.com"
+
       - name: Pull from B into shadow branches on A
         run: npm run sync -- --from b
