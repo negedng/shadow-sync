@@ -29,13 +29,13 @@ The tool needs a git repo as its workspace (for the git object database). Two mo
 **From inside one of the repos (workspace mode)** — install shadow-sync and run it directly. That repo is `origin`, the other is added as a remote.
 
 ```bash
-npm install negedng/test-main
+npm install negedng/shadow-sync
 ```
 
 **Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes. Set `SHADOW_CONFIG` to point at your config.
 
 ```bash
-npm install negedng/test-main
+npm install negedng/shadow-sync
 cross-env SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts
 ```
 
@@ -141,7 +141,7 @@ Requires `EXTERNAL_REPO_TOKEN` secret (fine-grained PAT with Contents: Read and 
 1. Install shadow-sync and add scripts to your `package.json`:
 
 ```bash
-npm install negedng/test-main cross-env tsx
+npm install negedng/shadow-sync cross-env tsx
 ```
 
 ```json
