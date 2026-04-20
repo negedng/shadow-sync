@@ -10,6 +10,8 @@ export interface RemoteInfo {
   subdir: string;
   remoteBare: string;
   remoteWorking: string;
+  /** Subdir on the B-side (external) where files live. "" = root (default). */
+  remoteSubdir: string;
 }
 
 export interface TestEnv {
@@ -32,8 +34,10 @@ function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 
-/** Create an isolated test environment with three git repos. */
-export function createTestEnv(name: string, subdir = "frontend", branchPrefix = "shadow"): TestEnv {
+/** Create an isolated test environment with three git repos.
+ *  `remoteSubdir` (default "") places B-side files under a subdir so both
+ *  A and B use non-root directories. */
+export function createTestEnv(name: string, subdir = "frontend", branchPrefix = "shadow", remoteSubdir = ""): TestEnv {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `shadow-test-${name}-`));
   const remoteBare = path.join(tmpDir, "remote-bare").replace(/\\/g, "/");
   const remoteWorking = path.join(tmpDir, "remote-working").replace(/\\/g, "/");
@@ -82,7 +86,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, localRepo);
   git("push origin main", localRepo);
 
-  const primary: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking };
+  const primary: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking, remoteSubdir };
 
   const cleanup = () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -120,7 +124,7 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, env.localRepo);
   git("push origin main", env.localRepo);
 
-  const info: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking };
+  const info: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking, remoteSubdir: "" };
   env.remotes.push(info);
   return info;
 }
@@ -134,17 +138,19 @@ export function commitOnRemote(
   remote?: RemoteInfo,
 ): void {
   const workDir = remote?.remoteWorking ?? env.remoteWorking;
+  const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
   for (const [rel, content] of Object.entries(files)) {
-    const full = path.join(workDir, rel);
+    const prefixed = prefix ? `${prefix}/${rel}` : rel;
+    const full = path.join(workDir, prefixed);
     if (content === null) {
       if (fs.existsSync(full)) {
         fs.unlinkSync(full);
-        git(`rm "${rel}"`, workDir);
+        git(`rm "${prefixed}"`, workDir);
       }
     } else {
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content);
-      git(`add "${rel}"`, workDir);
+      git(`add "${prefixed}"`, workDir);
     }
   }
   git(`commit -m "${message}"`, workDir);
@@ -192,7 +198,8 @@ export function readLocalFile(env: TestEnv, rel: string, remote?: RemoteInfo): s
 /** Read a file from the remote working copy. Returns null if absent. */
 export function readRemoteFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const workDir = remote?.remoteWorking ?? env.remoteWorking;
-  const full = path.join(workDir, rel);
+  const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
+  const full = path.join(workDir, prefix ? `${prefix}/${rel}` : rel);
   if (!fs.existsSync(full)) return null;
   return normalizeLF(fs.readFileSync(full, "utf8"));
 }
@@ -220,7 +227,7 @@ function buildPairs(env: TestEnv): SyncPair[] {
   return env.remotes.map(r => ({
     name: r.subdir,
     a: { remote: "origin", dir: r.subdir },
-    b: { remote: r.remoteName, url: r.remoteBare, dir: "" },
+    b: { remote: r.remoteName, url: r.remoteBare, dir: r.remoteSubdir },
   }));
 }
 
@@ -343,10 +350,11 @@ export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): str
 export function readExternalShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const remoteName = remote?.remoteName ?? env.remoteName;
   const subdir = remote?.subdir ?? env.subdir;
+  const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
   const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
-    const content = execSync(`git show ${remoteName}/${shadowBranch}:${rel}`, {
+    const content = execSync(`git show ${remoteName}/${shadowBranch}:${prefix ? `${prefix}/${rel}` : rel}`, {
       cwd: env.localRepo, encoding: "utf8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
     });
     return normalizeLF(content);

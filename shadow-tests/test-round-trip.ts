@@ -12,9 +12,12 @@ function git(cmd: string, cwd: string): string {
  * Verifies that a commit originating from A, replayed to B's shadow branch,
  * merged into B's main, and then synced back from B does NOT get replayed
  * again on A (the echo is skipped).
+ *
+ * Both sides use a non-root subdir (A=frontend, B=src) to exercise the case
+ * where neither pair endpoint lives at the repo root.
  */
 export default function run() {
-  const env = createTestEnv("round-trip");
+  const env = createTestEnv("round-trip", "frontend", "shadow", "src");
   try {
     // 1. Establish baseline: pull initial remote content
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base.txt");
