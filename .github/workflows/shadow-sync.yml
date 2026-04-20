@@ -8,6 +8,13 @@ on:
         description: Node.js version to use on the runner.
         type: string
         default: '20'
+    secrets:
+      EXTERNAL_REPO_TOKEN:
+        description: >
+          Optional. PAT with Contents: Read+Write on cross-repo push targets.
+          Required in orchestrator mode (target-A is not the caller's origin).
+          Not needed in workspace mode — GITHUB_TOKEN covers pushes to origin.
+        required: false
 
 concurrency:
   group: shadow-sync-pull
@@ -31,9 +38,14 @@ jobs:
       - run: npm ci
 
       - name: Configure git
+        env:
+          EXTERNAL_REPO_TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN }}
         run: |
           git config --global user.name "Shadow Sync"
           git config --global user.email "shadow-sync@users.noreply.github.com"
+          if [ -n "$EXTERNAL_REPO_TOKEN" ]; then
+            git config --global url."https://x-access-token:${EXTERNAL_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       - name: Pull from B into shadow branches on A
         run: npm run sync -- --from b
