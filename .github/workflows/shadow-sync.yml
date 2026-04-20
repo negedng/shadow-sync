@@ -1,11 +1,13 @@
 name: Shadow Sync (Pull from B)
 
 on:
-  # Disabled until real repo URLs are configured in shadow-config.json.
-  # Uncomment the cron schedule when ready:
-  # schedule:
-  #   - cron: '*/15 * * * *'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to use on the runner.
+        type: string
+        default: '20'
 
 concurrency:
   group: shadow-sync-pull
@@ -24,9 +26,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ inputs.node-version || '20' }}
 
       - run: npm ci
 
       - name: Pull from B into shadow branches on A
-        run: npx tsx shadow-sync.ts --from b
+        run: npm run sync -- --from b

@@ -1,11 +1,17 @@
 name: Shadow Sync (Push from A)
 
 on:
-  # Disabled until real repo URLs are configured in shadow-config.json.
-  # Uncomment the cron schedule when ready:
-  # schedule:
-  #   - cron: '*/15 * * * *'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to use on the runner.
+        type: string
+        default: '20'
+    secrets:
+      EXTERNAL_REPO_TOKEN:
+        description: Fine-grained PAT with Contents Read+Write on the B-side repos.
+        required: true
 
 concurrency:
   group: shadow-sync-push
@@ -25,7 +31,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ inputs.node-version || '20' }}
 
       - run: npm ci
 
@@ -36,4 +42,4 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Push from A into shadow branches on B
-        run: npx tsx shadow-sync.ts --from a
+        run: npm run sync -- --from a

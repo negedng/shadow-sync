@@ -118,15 +118,42 @@ CLAUDE.md
 
 ## GitHub Actions
 
-### Shadow Sync (Pull) — `.github/workflows/shadow-sync.yml`
+Both workflows in `.github/workflows/` are **reusable** (`workflow_call:`) so consumers don't duplicate them — they add a thin caller workflow and the logic stays here.
 
-Cron every 15 min. Runs `shadow-sync.ts --from b` for all pairs.
+### Consumer setup (one-time)
 
-### Shadow Forward (Push) — `.github/workflows/shadow-forward.yml`
+Create these two files in the consumer repo:
 
-Runs on a cron schedule (same as pull, separate job). Runs `shadow-sync.ts --from a`.
+**`.github/workflows/shadow-sync.yml`** — pull from B:
 
-Requires `EXTERNAL_REPO_TOKEN` secret (fine-grained PAT with Contents: Read and write).
+```yaml
+name: Shadow Sync (Pull from B)
+on:
+  workflow_dispatch:
+  # schedule: [{ cron: '*/15 * * * *' }]   # enable when ready
+jobs:
+  sync:
+    uses: negedng/shadow-sync/.github/workflows/shadow-sync.yml@main
+```
+
+**`.github/workflows/shadow-forward.yml`** — push from A (needs `EXTERNAL_REPO_TOKEN` PAT):
+
+```yaml
+name: Shadow Sync (Push from A)
+on:
+  workflow_dispatch:
+  # schedule: [{ cron: '*/15 * * * *' }]   # enable when ready
+jobs:
+  sync:
+    uses: negedng/shadow-sync/.github/workflows/shadow-forward.yml@main
+    secrets: inherit
+```
+
+Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `package.json` must have a `sync` script that calls `shadow-sync.ts` with the correct `SHADOW_CONFIG` env var pointing at the local `shadow-config.json`. See the [Setup](#setup) section below.
+
+### Secrets
+
+- **`EXTERNAL_REPO_TOKEN`** (push only): fine-grained PAT with Contents: Read and Write on every B-side repo listed in `shadow-config.json`. Not needed for pull (`--from b` only writes back to `origin`, which `GITHUB_TOKEN` covers).
 
 ## Options
 
