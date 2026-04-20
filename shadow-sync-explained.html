@@ -845,6 +845,24 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
   aligned with what the target actually has on that branch right now.
 </div>
 
+<p>
+  This is what the "out-of-scope commits" (marked <code>x</code> and <code>y</code> in the flow diagram
+  above) rely on. Those commits live outside <code>{pair.dir}/</code> &mdash; root files, another pair's
+  directory, CI config &mdash; and the replay engine never touches them: the path filter drops them at
+  commit collection, and they never produce replayed counterparts. But the shadow branch is still what the
+  target team merges into their main branch, and <code>git merge</code> compares the <em>whole</em> tree,
+  not just the pair dir. Without the splice, the shadow tip's non-pair files would be frozen at the seed,
+  and the user-facing merge would silently revert <code>x</code> and <code>y</code>.
+</p>
+<p>
+  <code>composeShadowTip</code> runs on every <code>--from b</code> (and symmetrically on
+  <code>--from a</code> whenever <code>target.dir</code> is non-empty), borrowing the target branch's
+  current tree for everything outside the pair. The commits <code>x</code> and <code>y</code> aren't
+  replayed anywhere &mdash; their <em>effect on the tree</em> just gets carried over, so the shadow branch
+  stays a clean, fast-forward-friendly view of the target branch's current non-pair state with fresh
+  pair content spliced in.
+</p>
+
 <!-- ── 7. How Merges Work ──────────────────────────────────────────────── -->
 
 <h2 id="merge">7. How Merges Work</h2>
