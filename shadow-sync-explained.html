@@ -167,8 +167,8 @@
   }
 
   .step-list { list-style: none; margin-left: 0; padding-left: 0; }
-  .step-list li { display: flex; align-items: flex-start; margin-bottom: 0.6rem; }
-  .step-list li > div { flex: 1; }
+  .step-list > li { display: flex; align-items: flex-start; margin-bottom: 0.6rem; }
+  .step-list > li > div { flex: 1; }
 
   .page-break {
     border-top: 3px dashed var(--border);
@@ -631,14 +631,28 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     engine (see <a href="#engine">next section</a>).
   </div></li>
   <li><span class="step-num">6</span><div>
-    <strong>Push shadow branches.</strong> For each branch, push the final replayed SHA to the target remote
-    as <code>shadow/{pairName}/{branch}</code>. If the shadow branch has diverged
-    (both sides have new commits), a reconciliation merge is created. See <a href="#merge">Merges</a>.
-    Note: even when replay produces no <em>new</em> commits, the branch may still advance if the echo
-    mapping points the source's tip at an existing target-side commit &mdash; the per-branch push logic
-    compares SHAs and fast-forwards when warranted.
+    <strong>Compose the shadow tip.</strong> For each replayed branch, fetch the target remote so local
+    tracking refs are current, then run <code>composeShadowTip()</code>. It rewrites the tip commit's tree so
+    <em>non-pair</em> content (files outside <code>target.dir</code>) tracks the target branch's current state
+    instead of freezing at the seed-era tree. No-op when <code>target.dir</code> is empty or when the composed
+    tree already matches the replayed tree. The result is the SHA actually destined for the target
+    (<code>replayedSHA</code>). See <a href="#tree">section 6</a> for the splice mechanics.
   </div></li>
   <li><span class="step-num">7</span><div>
+    <strong>Reconcile and push.</strong> For each branch, compare <code>replayedSHA</code> with the target's current
+    <code>shadow/{pairName}/{branch}</code> tip:
+    <ul>
+      <li>Identical, or <code>replayedSHA</code> is an ancestor of the current tip &mdash; skip (already up to date).</li>
+      <li>Current tip is an ancestor of <code>replayedSHA</code> &mdash; push fast-forward.</li>
+      <li>Divergent (neither is an ancestor) &mdash; build a reconciliation merge via
+      <code>git commit-tree</code> with two parents (current tip and <code>replayedSHA</code>) using the replayed tree,
+      then push that. See <a href="#merge">Merges</a>.</li>
+    </ul>
+    Note: even when replay produces no <em>new</em> commits, the branch may still advance &mdash; the echo
+    mapping can point the source's tip at an existing target-side commit, which this comparison then
+    fast-forwards to.
+  </div></li>
+  <li><span class="step-num">8</span><div>
     <strong>Report stale branches.</strong> If syncing all branches, warn about shadow branches whose
     source branch no longer exists. Print the <code>git push --delete</code> command for manual cleanup.
   </div></li>
@@ -655,9 +669,13 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 
 <ol class="step-list">
   <li><span class="step-num">1</span><div>
-    <strong>Scan replayed-commit mapping.</strong> <code>scanReplayedMapping()</code> walks the target's shadow branch
-    and extracts <code>Shadow-replayed-{remote}: {hash}</code> trailers, building a
-    <code>Map&lt;sourceHash, targetHash&gt;</code> of commits that are already replayed.
+    <strong>Scan replayed-commit mapping.</strong> <code>scanReplayedMapping()</code> runs once per pair (not
+    per branch). It collects every <code>{target.remote}/shadow/{pair}/{branch}</code> ref that exists and
+    passes them all into a single <code>git log ... --grep=^Shadow-replayed-{remote}:</code>, then extracts
+    each trailer into a <code>Map&lt;sourceHash, targetHash&gt;</code>. The map is pair-wide and shared across
+    all branches in this sync, so a commit reachable from multiple branches appears exactly once &mdash;
+    when the replay loop later processes it for the first branch, subsequent branches find it already mapped
+    and reuse the existing replayed SHA instead of duplicating work.
   </div></li>
   <li><span class="step-num">2</span><div>
     <strong>Find all seeds.</strong> <code>findSeeds()</code> searches the local log (<code>--all</code>) for
@@ -779,16 +797,21 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 
 <h3>Tip-tree refresh before push (<code>composeShadowTip</code>)</h3>
 <p>
-  The replay chain above builds each tree from the <em>previous</em> replayed tree &mdash; which traces
-  back to A's seed tree. That means A's post-seed changes to non-pair paths (root files, other pairs'
-  directories, any file outside <code>{pair.dir}/</code>) never propagate through the chain. If a user
-  merges the shadow branch after modifying such files on A's main, git can silently revert them
-  because the shadow tree holds seed-era content where A/main holds current content.
+  The replay chain above is path-scoped. Each replayed tree is built from the <em>previous</em> replayed
+  tree, which traces back to the seed tree. Files outside <code>{pair.dir}/</code> are carried through
+  every replayed commit unchanged, so they stay frozen at their seed-era content. If the target side has
+  since modified any such file &mdash; a root README, another pair's directory, CI config &mdash; a later
+  <code>git merge origin/shadow/{pair}/{branch}</code> on the target would silently revert it, because
+  the shadow tree holds seed-era content where the target's current branch holds up-to-date content.
 </p>
 <p>
-  To fix this, <code>composeShadowTip()</code> rewrites the replayed tip at push time when
-  <code>target.dir</code> is non-empty:
+  <code>composeShadowTip()</code> fixes this at push time with a single tree splice: take the target
+  branch's <em>current</em> tree as the outer shell and inject only the replayed tip's
+  <code>{pair.dir}/</code> subtree into it. The shadow tip's tree now equals the target branch's current
+  tree <em>except</em> inside the synced directory.
 </p>
+
+<p>The full mechanics:</p>
 <ol class="step-list">
   <li><span class="step-num">1</span><div>
     <strong>Pick a splice base.</strong> Prefer <code>{target}/{branch}^{tree}</code>. If that branch
@@ -811,7 +834,7 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
   The invariant this preserves: <strong>shadow/{pair}/{branch}'s tree equals target/{branch}'s
   tree, with only <code>{pair.dir}/</code> swapped for the replay's pair content.</strong>
   A plain <code>git merge</code> then only diffs that subdirectory &mdash; everything outside stays
-  aligned with what A actually has on that branch right now.
+  aligned with what the target actually has on that branch right now.
 </div>
 
 <!-- ── 7. How Merges Work ──────────────────────────────────────────────── -->
