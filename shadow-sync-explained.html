@@ -1125,6 +1125,16 @@ const result = runSync({ from: "b", pair: "backend" });
   files against ephemeral git environments.
 </p>
 
+<div class="highlight-box">
+  <strong>Authentication:</strong> <code>runSync</code> shells out to <code>git fetch</code> and
+  <code>git push</code> just like the CLI does &mdash; it doesn't handle credentials itself. Any push to a
+  private remote (e.g. B-side repos on GitHub, or cross-repo pushes in orchestrator mode) still needs a
+  Personal Access Token configured in the caller's environment, either via the remote URL
+  (<code>https://x-access-token:{PAT}@github.com/&hellip;</code>), a credential helper, or an SSH key. In CI
+  this is the same PAT the <code>shadow-forward.yml</code> workflow uses; in-process callers inherit whatever
+  git auth the parent process has.
+</div>
+
 <!-- ── 12. File Reference ──────────────────────────────────────────────── -->
 
 <h2 id="files">12. File Reference</h2>
