@@ -11,9 +11,9 @@
  * `origin`) and orchestrator mode (target is an external remote), and
  * never touches the workspace's HEAD.
  *
- * Multi-seed: each invocation creates an additional seed. Run once per
- * branch you want to anchor — branches that descend from an existing seed
- * do not need their own.
+ * Default (no `-b`): seeds every branch present on both remotes, skipping
+ * ones already seeded. Idempotent — safe to re-run as new branches appear.
+ * Pass `-b <branch>` to seed just that branch.
  *
  * Usage:
  *   npx tsx shadow-setup.ts -r backend
@@ -24,7 +24,7 @@ import { parseArgs } from "util";
 import {
   PAIRS, SEED_TRAILER, ShadowSyncError,
   git, refExists, listBranches, ensureRemote,
-  getCurrentBranch, appendTrailer,
+  appendTrailer,
   validateName, die,
   preflightChecks, handlePreflightResults,
 } from "./shadow-common";
@@ -45,7 +45,7 @@ if (values.help) {
   console.log("Usage: shadow-setup.ts [-r pair] [--from a|b] [-b branch]");
   console.log("  -r  Pair name                (default: first pair)");
   console.log("  --from  Which side's tip to record as the seed baseline (default: b)");
-  console.log("  -b  Branch to seed           (default: current branch)");
+  console.log("  -b  Branch to seed           (default: every branch on both remotes)");
   process.exit(0);
 }
 
@@ -67,20 +67,13 @@ if (fromSide !== "a" && fromSide !== "b") {
 
 const source = fromSide === "a" ? pair.a : pair.b;
 const target = fromSide === "a" ? pair.b : pair.a;
-const targetBranch = values.branch ?? getCurrentBranch();
 validateName(pair.name, "Pair name");
 validateName(source.remote, "Source remote");
 validateName(target.remote, "Target remote");
-validateName(targetBranch, "Branch");
-
-const sourceRef = `${source.remote}/${targetBranch}`;
-const targetRef = `${target.remote}/${targetBranch}`;
 
 console.log(`Pair          : ${pair.name}`);
 console.log(`Seeding from  : ${fromSide} (${source.remote})`);
-console.log(`Seed lands on : ${target.remote}/${targetBranch}`);
-console.log(`Branch        : ${targetBranch}`);
-console.log();
+console.log(`Seed lands on : ${target.remote}`);
 
 ensureRemote(pair.a);
 ensureRemote(pair.b);
@@ -89,41 +82,81 @@ console.log(`Fetching '${source.remote}' and '${target.remote}'...`);
 git(["fetch", source.remote]);
 git(["fetch", target.remote]);
 
-if (!refExists(sourceRef)) {
-  console.error(`✘ '${sourceRef}' does not exist. Available branches on '${source.remote}':`);
-  listBranches(source.remote).forEach(b => console.error(`  ${b}`));
-  process.exit(1);
+let branches: string[];
+if (values.branch) {
+  validateName(values.branch, "Branch");
+  branches = [values.branch];
+} else {
+  const sourceBranches = new Set(listBranches(source.remote));
+  branches = listBranches(target.remote).filter(b => sourceBranches.has(b));
+  if (branches.length === 0) {
+    die(`No branches exist on both '${source.remote}' and '${target.remote}'.`);
+  }
+  console.log(`Branches      : ${branches.join(", ")}`);
 }
-if (!refExists(targetRef)) {
-  console.error(`✘ '${targetRef}' does not exist. Available branches on '${target.remote}':`);
-  listBranches(target.remote).forEach(b => console.error(`  ${b}`));
-  process.exit(1);
-}
-
-const warnings = preflightChecks(sourceRef);
-if (!handlePreflightResults(warnings)) {
-  process.exit(1);
-}
-
-const sourceTip = git(["rev-parse", sourceRef]);
-const targetTip = git(["rev-parse", targetRef]);
-const targetTree = git(["rev-parse", `${targetTip}^{tree}`]);
-
-const msg = appendTrailer(
-  `Seed shadow-sync for ${pair.name} from ${sourceRef}`,
-  `${SEED_TRAILER}: ${pair.name} ${sourceTip}`,
-);
-
-const seedSHA = git(["commit-tree", targetTree, "-p", targetTip, "-m", msg]);
-
-console.log(`Pushing seed to ${target.remote}/${targetBranch}...`);
-git(["push", target.remote, `${seedSHA}:refs/heads/${targetBranch}`]);
-
-console.log(`✓ Seeded: sync for '${pair.name}' will start after ${sourceTip.slice(0, 10)}.`);
 console.log();
-console.log("Next steps:");
-console.log(`  1. If working on ${target.remote}, run 'git pull' to fetch the seed commit.`);
-console.log(`  2. Run sync:  npm run sync -- -r ${pair.name} --from ${fromSide}`);
+
+const isAlreadySeeded = (targetRef: string): boolean => {
+  const result = git(
+    ["log", targetRef, `--grep=^${SEED_TRAILER}: ${pair!.name} `, "-1", "--format=%H"],
+    { safe: true },
+  );
+  return result.ok && result.stdout.length > 0;
+};
+
+let seededCount = 0;
+let skippedCount = 0;
+for (const branch of branches) {
+  const sourceRef = `${source.remote}/${branch}`;
+  const targetRef = `${target.remote}/${branch}`;
+
+  if (!refExists(sourceRef)) {
+    console.log(`[${branch}] skipped — not on '${source.remote}'.`);
+    skippedCount++;
+    continue;
+  }
+  if (!refExists(targetRef)) {
+    console.log(`[${branch}] skipped — not on '${target.remote}'.`);
+    skippedCount++;
+    continue;
+  }
+
+  if (isAlreadySeeded(targetRef)) {
+    console.log(`[${branch}] already seeded, skipping.`);
+    skippedCount++;
+    continue;
+  }
+
+  const warnings = preflightChecks(sourceRef);
+  if (!handlePreflightResults(warnings)) {
+    process.exit(1);
+  }
+
+  const sourceTip = git(["rev-parse", sourceRef]);
+  const targetTip = git(["rev-parse", targetRef]);
+  const targetTree = git(["rev-parse", `${targetTip}^{tree}`]);
+
+  const msg = appendTrailer(
+    `Seed shadow-sync for ${pair.name} from ${sourceRef}`,
+    `${SEED_TRAILER}: ${pair.name} ${sourceTip}`,
+  );
+
+  const seedSHA = git(["commit-tree", targetTree, "-p", targetTip, "-m", msg]);
+
+  console.log(`[${branch}] pushing seed to ${target.remote}/${branch}...`);
+  git(["push", target.remote, `${seedSHA}:refs/heads/${branch}`]);
+  console.log(`[${branch}] ✓ seeded after ${sourceTip.slice(0, 10)}.`);
+  seededCount++;
+}
+
+console.log();
+console.log(`✓ Done: ${seededCount} seeded, ${skippedCount} skipped.`);
+if (seededCount > 0) {
+  console.log();
+  console.log("Next steps:");
+  console.log(`  1. If working on ${target.remote}, run 'git pull' to fetch the seed commit(s).`);
+  console.log(`  2. Run sync:  npm run sync -- -r ${pair.name} --from ${fromSide}`);
+}
 
 } catch (e) {
   if (e instanceof ShadowSyncError) {

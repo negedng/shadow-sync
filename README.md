@@ -166,7 +166,7 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 npm run setup -- -r backend
 ```
 
-Default `--from b` records RepoB's current tip as the baseline; the seed commit lands on RepoA's main. For repos that already have multiple long-lived branches at setup time, run setup once per branch you want to anchor (`-b <branch>`) — branches that descend from an existing seed don't need their own.
+Default `--from b` records RepoB's current tip as the baseline; the seed commit lands on RepoA's main. By default, setup seeds every branch present on both remotes (idempotent — re-running skips already-seeded branches). Pass `-b <branch>` to seed just one branch.
 
 4. Create the external repo with the same content as your subdirectory. The external repo must start with the same files so both sides agree on the baseline:
 

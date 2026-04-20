@@ -453,7 +453,7 @@
   <tr><th>Command</th><th>What it does</th></tr>
   <tr>
     <td><code>npm run setup -- -r backend</code></td>
-    <td><strong>Bootstrap.</strong> Builds a seed commit via <code>git commit-tree</code> and pushes it to the target remote, anchoring shared history. Run once per pair &mdash; or once per branch when pre-existing branches are divergent at setup time.</td>
+    <td><strong>Bootstrap.</strong> Builds a seed commit via <code>git commit-tree</code> and pushes it to the target remote, anchoring shared history. Run once per pair &mdash; by default it seeds every branch present on both remotes and is idempotent (re-running skips already-seeded branches). Pass <code>-b &lt;branch&gt;</code> to seed a single branch.</td>
   </tr>
   <tr>
     <td><code>npm run sync -- --from b</code></td>
@@ -589,8 +589,9 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 </div>
 
 <div class="highlight-box">
-  <strong>Multi-seed (per branch):</strong> setup is additive. Running
-  <code>npm run setup -- -r backend -b client-x</code> creates a second seed anchored on <code>client-x</code>.
+  <strong>Multi-seed (per branch):</strong> setup is additive and idempotent. The default invocation
+  (<code>npm run setup -- -r backend</code>) seeds every branch present on both remotes, skipping any that
+  already have a seed trailer in their history. Pass <code>-b client-x</code> to seed a single branch.
   <code>findSeeds()</code> returns every seed for a pair; <code>findSeedBoundaries()</code> then picks, for each seed,
   whichever of its two hashes is reachable from any source ref and uses those as rev-list boundaries.
   This supports the case where both sides already have long-lived divergent branches at setup time &mdash;
@@ -1109,7 +1110,7 @@ const result = runSync({ from: "b", pair: "backend" });
   <tr><th>File</th><th>Purpose</th></tr>
   <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine, tree builder, trailer management, preflight checks</td></tr>
   <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, merge reconciliation. Also exports <code>runSync</code> for in-process use.</td></tr>
-  <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: builds the seed commit via <code>git commit-tree</code> and pushes it to the target remote; additive (run per branch for multi-seed)</td></tr>
+  <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: builds seed commits via <code>git commit-tree</code> and pushes them to the target remote. Default seeds every common branch; <code>-b &lt;branch&gt;</code> seeds one. Idempotent — re-running skips already-seeded branches.</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
   <tr><td><code>.shadowignore</code></td><td>Per-repo file-exclusion patterns (auto-discovered from source tree)</td></tr>
   <tr><td><code>shadow-tests/</code></td><td>17 consolidated test files: pull-content, pull-paths, pull-branches, pull-multi-branch-seed, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, pull-echo-mapping, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, multi-pair-root-files, round-trip</td></tr>
