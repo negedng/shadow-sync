@@ -40,14 +40,21 @@ jobs:
 
       - name: Configure git
         env:
-          # PAT if provided (required for orchestrator-mode cross-repo pushes);
-          # otherwise fall back to the caller's GITHUB_TOKEN which covers
-          # pushes to origin in workspace mode.
-          TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN || github.token }}
+          # Caller's own origin is always authed with github.token (always valid,
+          # right scope). Any other github.com URL uses EXTERNAL_REPO_TOKEN if
+          # provided — required in orchestrator mode where pushes target repos
+          # outside the caller. Longest-prefix wins in git's insteadOf matching,
+          # so the caller-specific rewrite takes precedence over the generic one.
+          GITHUB_TOKEN: ${{ github.token }}
+          EXTERNAL_REPO_TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN }}
+          CALLER_REPO: ${{ github.repository }}
         run: |
           git config --global user.name "Shadow Sync"
           git config --global user.email "shadow-sync@users.noreply.github.com"
-          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/${CALLER_REPO}".insteadOf "https://github.com/${CALLER_REPO}"
+          if [ -n "$EXTERNAL_REPO_TOKEN" ]; then
+            git config --global url."https://x-access-token:${EXTERNAL_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       - name: Pull from B into shadow branches on A
         run: npm run sync -- --from b
