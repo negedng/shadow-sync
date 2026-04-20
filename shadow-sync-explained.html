@@ -559,6 +559,63 @@
 </table>
 </div>
 
+<h3>Deployment modes</h3>
+<p>
+  Shadow-sync runs the same code either way &mdash; what differs is where the tool itself lives relative to
+  the synced repos. Two modes, one config shape, two auth pictures.
+</p>
+
+<div class="card">
+<table>
+  <tr><th>&nbsp;</th><th>Workspace mode</th><th>Orchestrator mode</th></tr>
+  <tr>
+    <td><strong>Tool runs inside</strong></td>
+    <td>One of the synced repos (typically the monorepo A).</td>
+    <td>A separate, dedicated orchestrator repo with nothing but config + workflows.</td>
+  </tr>
+  <tr>
+    <td><strong><code>shadow-config.json</code></strong></td>
+    <td>One endpoint has <code>"remote": "origin"</code> (no <code>url</code> needed); the other lists its external <code>url</code>.</td>
+    <td>Both endpoints have an explicit <code>url</code>; the tool adds each as a remote at runtime.</td>
+  </tr>
+  <tr>
+    <td><strong>CI push destinations</strong></td>
+    <td>Pull writes back to <code>origin</code> (same repo); push writes cross-repo to the B-side.</td>
+    <td>Every push is cross-repo &mdash; both the A-side and every B-side are external to the orchestrator.</td>
+  </tr>
+  <tr>
+    <td><strong><code>GITHUB_TOKEN</code> enough?</strong></td>
+    <td>Yes for pull. No for push &mdash; <code>GITHUB_TOKEN</code> is scoped to the caller repo.</td>
+    <td>No for either direction.</td>
+  </tr>
+  <tr>
+    <td><strong><code>EXTERNAL_REPO_TOKEN</code> PAT</strong></td>
+    <td>Required for push only. Pull workflow falls back to <code>github.token</code> automatically if absent.</td>
+    <td>Required for both directions. Must have Contents: Read+Write on every external repo the config references.</td>
+  </tr>
+  <tr>
+    <td><strong>Seed lands on</strong></td>
+    <td>The target remote (same plumbing either way &mdash; see <a href="#seed">section 2</a>).</td>
+    <td>The target remote (same).</td>
+  </tr>
+  <tr>
+    <td><strong>Example in this repo</strong></td>
+    <td><code>sht2-main</code> (main-plus-two-pair-repos, monorepo runs the tool).</td>
+    <td><code>sht3-orchestrator</code> (runs against <code>sht3-main</code> + <code>sht3-backend</code> + <code>sht3-frontend</code>).</td>
+  </tr>
+</table>
+</div>
+
+<div class="highlight-box">
+  <strong>Reusable GitHub Actions workflows</strong> ship in this repo under <code>.github/workflows/</code>
+  and accept both modes without modification. A consumer in either mode adds a thin caller workflow that
+  does <code>uses: negedng/shadow-sync/.github/workflows/shadow-sync.yml@main</code> (and the forward
+  variant), declares <code>permissions: contents: write</code> (pull) or <code>contents: read</code> (forward) &mdash;
+  a reusable workflow can't ask for more permissions than the caller grants &mdash; and passes
+  <code>secrets: inherit</code> so <code>EXTERNAL_REPO_TOKEN</code> flows through. See the README "GitHub Actions"
+  section for copy-pastable templates.
+</div>
+
 <!-- ── 2. Seed & Bootstrap ─────────────────────────────────────────────── -->
 
 <h2 id="seed">2. Seed &amp; Bootstrap</h2>

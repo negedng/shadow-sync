@@ -131,18 +131,23 @@ name: Shadow Sync (Pull from B)
 on:
   workflow_dispatch:
   # schedule: [{ cron: '*/15 * * * *' }]   # enable when ready
+permissions:
+  contents: write
 jobs:
   sync:
     uses: negedng/shadow-sync/.github/workflows/shadow-sync.yml@main
+    secrets: inherit
 ```
 
-**`.github/workflows/shadow-forward.yml`** — push from A (needs `EXTERNAL_REPO_TOKEN` PAT):
+**`.github/workflows/shadow-forward.yml`** — push from A:
 
 ```yaml
 name: Shadow Sync (Push from A)
 on:
   workflow_dispatch:
   # schedule: [{ cron: '*/15 * * * *' }]   # enable when ready
+permissions:
+  contents: read
 jobs:
   sync:
     uses: negedng/shadow-sync/.github/workflows/shadow-forward.yml@main
@@ -151,9 +156,13 @@ jobs:
 
 Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `package.json` must have a `sync` script that calls `shadow-sync.ts` with the correct `SHADOW_CONFIG` env var pointing at the local `shadow-config.json`. See the [Setup](#setup) section below.
 
+**Why the explicit `permissions:` block** — a reusable workflow's declared permissions can't exceed the caller's, and the default `default_workflow_permissions` in most repos is `read`. The pull callee needs `contents: write` (pushes shadow branches), so the caller must grant at least that. Forward's callee is `contents: read` (it pushes via PAT, not `GITHUB_TOKEN`).
+
 ### Secrets
 
-- **`EXTERNAL_REPO_TOKEN`** (push only): fine-grained PAT with Contents: Read and Write on every B-side repo listed in `shadow-config.json`. Not needed for pull (`--from b` only writes back to `origin`, which `GITHUB_TOKEN` covers).
+- **`EXTERNAL_REPO_TOKEN`** — fine-grained PAT with Contents: Read and Write on every external repo shadow-sync will push to.
+  - **Workspace mode** (tool runs inside one of the synced repos): required for push (pushes to the external B-side repos); optional for pull (pull pushes back to `origin`, which `GITHUB_TOKEN` covers — the pull workflow falls back to `github.token` automatically when the secret is absent).
+  - **Orchestrator mode** (tool runs from a standalone repo): required for both push and pull — neither endpoint is the caller's origin, so every push is cross-repo. The PAT must cover all three external repos listed in `shadow-config.json` (both A-side and B-side).
 
 ## Options
 
