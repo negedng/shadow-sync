@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, runCiSync, readLocalFile } from "./harness";
+import { createTestEnv, commitOnRemote, runCiSync, runPush, readLocalFile } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -21,6 +21,10 @@ function git(cmd: string, cwd: string): string {
  *   4. After both branches are live, a cross-branch merge on b (client-x
  *      into main) replays onto shadow/<pair>/main with parents bridging
  *      both branch histories, and merges cleanly into a/main.
+ *   5. Extending to four more pre-seed branches (f1..f4): cross-branch
+ *      merges on BOTH sides (a merges f1+f2 into a/main, b merges f3+f4
+ *      into b/main), then sync round-trips so every feature's post-seed
+ *      content reaches both mains.
  */
 export default function run() {
   const env = createTestEnv("pull-multi-branch-seed");
@@ -127,6 +131,111 @@ export default function run() {
     assertEqual(readLocalFile(env, "client.ts"), "// client code\n", "[phase 7] pre-seed client.ts reached a/main via cross-branch merge");
     // a-only.ts only existed on a/client-x — cross-branch merge on b can't
     // pull it to a/main. That's fine; it's still on a/client-x.
+    git("push origin main", env.localRepo);
+
+    // ── phase 8: add 4 more pre-seed branches (f1..f4) on b with b-only content ──
+    const features = ["f1", "f2", "f3", "f4"];
+    const bTips: Record<string, string> = {};
+    for (const f of features) {
+      git(`checkout -b ${f} main`, env.remoteWorking);
+      fs.writeFileSync(path.join(env.remoteWorking, `${f}-b.ts`), `// b-only pre-seed for ${f}\n`);
+      git(`add ${f}-b.ts`, env.remoteWorking);
+      git(`commit -m "pre-seed ${f} on b"`, env.remoteWorking);
+      git(`push origin ${f}`, env.remoteWorking);
+      bTips[f] = git(`rev-parse ${f}`, env.remoteWorking);
+    }
+
+    // ── phase 9: create f1..f4 on a off main, seed each ──
+    git("fetch team", env.localRepo);
+    for (const f of features) {
+      git(`checkout -b ${f} main`, env.localRepo);
+      git(
+        `commit --allow-empty -m "Seed shadow-sync for ${env.subdir}/ from team/${f}" ` +
+        `-m "Shadow-seed: ${env.subdir} ${bTips[f]}"`,
+        env.localRepo,
+      );
+      git(`push origin ${f}`, env.localRepo);
+    }
+
+    // ── phase 10: post-seed commits on each feature, scattered extras ──
+    for (const f of features) {
+      git(`checkout ${f}`, env.remoteWorking);
+      commitOnRemote(env, { [`${f}-work.ts`]: `${f} work content\n` }, `post-seed: ${f} work`);
+      if (f === "f2" || f === "f3") {
+        commitOnRemote(env, { [`${f}-extra.ts`]: `${f} extra content\n` }, `post-seed: ${f} extra commit`);
+      }
+      git(`push origin ${f}`, env.remoteWorking);
+    }
+    git("checkout main", env.remoteWorking);
+
+    // ── phase 11: --from b populates all 4 shadow branches on a ──
+    git("checkout main", env.localRepo);
+    const r3 = runCiSync(env);
+    assertEqual(r3.status, 0, "[phase 11] sync with 4 new branches should succeed");
+    // 6 seeds total now: main + client-x + f1..f4
+    assertIncludes(r3.stdout, "6 seed baseline", "[phase 11] detects all 6 seeds");
+
+    git("fetch origin", env.localRepo);
+    for (const f of features) {
+      assertEqual(
+        git("branch -r", env.localRepo).includes(`origin/shadow/${env.subdir}/${f}`),
+        true,
+        `[phase 11] shadow/${f} exists on a`,
+      );
+    }
+
+    // ── phase 12: on a, merge shadows into features, cross-branch merge f1+f2 → a/main ──
+    for (const f of features) {
+      git(`checkout ${f}`, env.localRepo);
+      git(`merge --no-ff origin/shadow/${env.subdir}/${f}`, env.localRepo);
+      git(`push origin ${f}`, env.localRepo);
+    }
+    git("checkout main", env.localRepo);
+    git(`merge --no-ff f1 -m "A: merge f1 into main"`, env.localRepo);
+    git(`merge --no-ff f2 -m "A: merge f2 into main"`, env.localRepo);
+    git("push origin main", env.localRepo);
+
+    assertEqual(readLocalFile(env, "f1-work.ts"), "f1 work content\n", "[phase 12] a/main has f1-work.ts");
+    assertEqual(readLocalFile(env, "f2-work.ts"), "f2 work content\n", "[phase 12] a/main has f2-work.ts");
+    assertEqual(readLocalFile(env, "f2-extra.ts"), "f2 extra content\n", "[phase 12] a/main has f2-extra.ts");
+    assertEqual(readLocalFile(env, "f3-work.ts"), null, "[phase 12] a/main does NOT have f3 yet");
+    assertEqual(readLocalFile(env, "f4-work.ts"), null, "[phase 12] a/main does NOT have f4 yet");
+
+    // ── phase 13: on b, cross-branch merge f3+f4 → b/main ──
+    git("checkout main", env.remoteWorking);
+    git(`merge --no-ff f3 -m "B: merge f3 into main"`, env.remoteWorking);
+    git(`merge --no-ff f4 -m "B: merge f4 into main"`, env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    // ── phase 14: round-trip — push a's merges, pull b's merges ──
+    const r4 = runPush(env);
+    assertEqual(r4.status, 0, "[phase 14] --from a should succeed");
+    const r5 = runCiSync(env);
+    assertEqual(r5.status, 0, "[phase 14] --from b should succeed");
+
+    // ── phase 15: integrate on both sides via shadow/main merge ──
+    git("fetch origin", env.localRepo);
+    git("checkout main", env.localRepo);
+    git(`merge --no-ff origin/shadow/${env.subdir}/main -m "A: absorb b/main"`, env.localRepo);
+
+    git("fetch origin", env.remoteWorking);
+    git("checkout main", env.remoteWorking);
+    git(`merge --no-ff origin/shadow/${env.subdir}/main -m "B: absorb a/main"`, env.remoteWorking);
+
+    // ── phase 16: verify — all 4 features' post-seed content on both mains ──
+    for (const f of features) {
+      assertEqual(
+        readLocalFile(env, `${f}-work.ts`),
+        `${f} work content\n`,
+        `[phase 16] a/main has ${f}-work.ts`,
+      );
+      const bPath = path.join(env.remoteWorking, `${f}-work.ts`);
+      assertEqual(fs.existsSync(bPath), true, `[phase 16] b/main has ${f}-work.ts`);
+    }
+    assertEqual(readLocalFile(env, "f2-extra.ts"), "f2 extra content\n", "[phase 16] a/main has f2-extra.ts");
+    assertEqual(readLocalFile(env, "f3-extra.ts"), "f3 extra content\n", "[phase 16] a/main has f3-extra.ts");
+    assertEqual(fs.existsSync(path.join(env.remoteWorking, "f2-extra.ts")), true, "[phase 16] b/main has f2-extra.ts");
+    assertEqual(fs.existsSync(path.join(env.remoteWorking, "f3-extra.ts")), true, "[phase 16] b/main has f3-extra.ts");
   } finally {
     env.cleanup();
   }
