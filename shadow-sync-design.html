@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shadow Sync &mdash; Design Plan</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --card: #ffffff;
+    --accent: #2563eb;
+    --accent-light: #dbeafe;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --code-bg: #f1f5f9;
+    --green: #16a34a;
+    --orange: #ea580c;
+    --red: #dc2626;
+    --purple: #7c3aed;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  h1 { font-size: 2.2rem; margin-bottom: 0.3rem; color: var(--accent); }
+  h1 + p { color: var(--muted); margin-bottom: 2rem; font-size: 1.05rem; }
+
+  h2 {
+    font-size: 1.5rem;
+    margin: 2.5rem 0 1rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 2px solid var(--accent);
+    color: var(--accent);
+  }
+  h2 + p { color: var(--muted); margin-bottom: 1.2rem; }
+
+  h3.subsection {
+    font-size: 1.2rem;
+    margin: 2rem 0 0.6rem;
+    color: var(--accent);
+    padding-bottom: 0.2rem;
+    border-bottom: 1px dashed var(--border);
+  }
+  h3.subsection + p { color: var(--muted); margin-bottom: 1rem; font-size: 0.95rem; }
+
+  h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: var(--text); }
+
+  p { margin-bottom: 0.8rem; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin-bottom: 0.9rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .card h3 { margin-top: 0; }
+
+  .card.compact { padding: 0.85rem 1.1rem; margin-bottom: 0.55rem; }
+  .card.compact h3 { font-size: 0.98rem; font-weight: 600; margin-bottom: 0.35rem; }
+  .card.compact p { margin-bottom: 0.3rem; font-size: 0.92rem; line-height: 1.55; }
+  .card.compact .from { margin-bottom: 0.25rem; }
+
+  .ref {
+    display: inline-block;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 0.08rem 0.45rem;
+    border-radius: 4px;
+    margin-right: 0.45rem;
+    vertical-align: 0.08em;
+    letter-spacing: 0.02em;
+  }
+  .ref-r { background: var(--accent-light); color: var(--accent); }
+  .ref-c { background: #ede9fe;           color: var(--purple); }
+  .ref-m { background: #ccfbf1;           color: #0f766e; }
+  a.ref { text-decoration: none; }
+  a.ref:hover { text-decoration: underline; }
+
+  .from {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-top: -0.1rem;
+    margin-bottom: 0.6rem;
+  }
+  .from strong { color: var(--text); font-weight: 600; }
+
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 0.12rem 0.55rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: 0.4rem;
+    vertical-align: middle;
+  }
+  .tag-green  { background: #dcfce7; color: var(--green); }
+  .tag-red    { background: #fef2f2; color: var(--red); }
+
+  code {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+  }
+
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+  li { margin-bottom: 0.3rem; }
+
+  table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: 0.93rem; }
+  th, td { text-align: left; padding: 0.65rem 0.85rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th {
+    background: var(--accent-light);
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tr:hover td { background: #f8fafc; }
+  table td:first-child { white-space: nowrap; width: 30%; }
+
+  .toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .toc h2 { margin-top: 0; border: none; font-size: 1.2rem; padding-bottom: 0; }
+  .toc ol { margin: 0.5rem 0 0 1.5rem; }
+  .toc li { margin-bottom: 0.2rem; font-size: 0.95rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  .reading-note {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-light);
+    padding: 0.7rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin-bottom: 1.5rem;
+    font-size: 0.92rem;
+  }
+  .reading-note code { background: rgba(255,255,255,0.6); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.2rem;
+    align-items: center;
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  @media (max-width: 720px) {
+    body { padding: 1rem; }
+    table td:first-child { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Shadow Sync &mdash; Design Plan</h1>
+<p>Requirements, the design choices we made, the mechanisms those choices forced on us, and the surprises that fell out.</p>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#requirements">Requirements &mdash; what the tool has to do</a></li>
+    <li><a href="#choices">Design choices &mdash; where we had real alternatives</a></li>
+    <li><a href="#consequences">Mechanisms &mdash; what the choices force us to build</a></li>
+    <li><a href="#unexpected">Unexpected consequences &mdash; things we didn&rsquo;t plan for</a></li>
+  </ol>
+</nav>
+
+<div class="reading-note">
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R5</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C7</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C4 are the major ones, C5&ndash;C7 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M6</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<!-- 1. REQUIREMENTS                                                          -->
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+
+<h2 id="requirements">1. Requirements</h2>
+<p>What the product has to do. Five items, nothing more. Everything else in this document derives from these.</p>
+
+<div class="card" id="r1">
+  <h3><span class="ref ref-r">R1</span> One deployment supports multiple independent pairs of repos</h3>
+  <p>
+    A pair is two repos that share a subdirectory of content; the same deployment needs to run
+    several pairs side by side &mdash; e.g. a <em>backend</em> pair and a <em>frontend</em> pair,
+    each with its own two repos, its own <code>dir</code>, and its own <code>.shadowignore</code>.
+    Pairs are named and independently addressable. Each pair is self-contained: one pair&rsquo;s
+    history, trailers, and shadow branches must not collide with another&rsquo;s.
+  </p>
+</div>
+
+<div class="card" id="r2">
+  <h3><span class="ref ref-r">R2</span> Commits are copied with the same content and behaviour</h3>
+  <p>
+    A replayed commit has to look and act like the original from the target side: same tree, same
+    author and author date, same merge topology, same handling of binary files, LFS pointers,
+    symlinks, and submodules. <code>git blame</code> and <code>git log --graph</code> on the target
+    must reflect what actually happened on the source.
+  </p>
+</div>
+
+<div class="card" id="r3">
+  <h3><span class="ref ref-r">R3</span> Each side can exclude files via <code>.shadowignore</code></h3>
+  <p>
+    Each side controls what it exports. The filter is part of the repo&rsquo;s own content, not a
+    separately-deployed config.
+  </p>
+</div>
+
+<div class="card" id="r4">
+  <h3><span class="ref ref-r">R4</span> Only a declared subdirectory per side is in scope</h3>
+  <p>
+    A monorepo might share only <code>backend/</code>; the counterpart repo has that content at the
+    root. The prefix is part of the config, not fixed in code, and the two sides don&rsquo;t have to use
+    the same prefix.
+  </p>
+</div>
+
+<div class="card" id="r5">
+  <h3><span class="ref ref-r">R5</span> Runs unattended on CI (GitHub Actions or equivalent)</h3>
+  <p>
+    No human is there to clear a prompt, resolve a conflict, or fix a line-ending surprise. The tool
+    must be safe to retry, safe to schedule, and safe to run cross-platform (Linux and Windows
+    runners).
+  </p>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<!-- 2. DESIGN CHOICES                                                        -->
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+
+<h2 id="choices">2. Design choices</h2>
+<p>Points where we had a real alternative and picked one. Each card names the requirement(s) it derives from and the alternative it ruled out. Mechanisms that fall out of a choice without a meaningful alternative of their own live in <a href="#consequences">&sect;3</a>, not here.</p>
+
+<div class="card" id="c1">
+  <h3><span class="ref ref-c">C1</span> Land changes via plain <code>git merge</code> of a <code>shadow/</code> branch</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> force-push replayed commits onto the target&rsquo;s <code>main</code>; auto-merge via a bot; or require consumers to use a special merge invocation (<code>-s subtree</code>, <code>git subtree merge --prefix=&lt;dir&gt;</code>, <code>git merge --allow-unrelated-histories</code>).</p>
+  <p>
+    Sync is bidirectional (<a class="ref ref-r" href="#r2">R2</a>), so both sides can have new commits. Force-pushing replayed
+    commits onto the target&rsquo;s <code>main</code> would destroy the target&rsquo;s own commits &mdash;
+    violating <a class="ref ref-r" href="#r2">R2</a> applied to the target side. Conflict resolution at sync time has no human
+    under <a class="ref ref-r" href="#r5">R5</a>.
+  </p>
+  <p>
+    Instead we materialise incoming history on a tracking branch named
+    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code> and let the team that owns <code>main</code>
+    land it. The landing command has to be <em>plain</em> <code>git merge origin/shadow/&hellip;</code>
+    &mdash; anything more exotic (subtree strategies, unrelated-histories flags) becomes a tax on
+    every consumer and a new way to get it wrong. That commitment forces two more decisions
+    downstream: how to bootstrap ancestry (<a class="ref ref-c" href="#c4">C4</a>) and how shadow branches are laid out
+    (<a class="ref ref-m" href="#m1">M1</a>).
+  </p>
+</div>
+
+<div class="card" id="c2">
+  <h3><span class="ref ref-c">C2</span> Deduplicate replayed commits via git trailers, scoped by source remote</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> <code>git notes</code> (separate ref, easy to drop on a fresh clone); a sidecar mapping file outside git; or content-based dedup on tree SHAs (silently drops legitimate no-op commits).</p>
+  <p>
+    CI reruns, manual retries, and cron-triggered syncs all have to converge to the same result
+    under <a class="ref ref-r" href="#r5">R5</a>. Each replayed commit carries
+    <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
+    target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
+    map. Anything already present is skipped. Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
+    honest: two pairs that both read from <code>origin</code> (a backend pair and a frontend pair
+    in workspace mode, for example) can&rsquo;t step on each other&rsquo;s trailers.
+  </p>
+  <p>
+    Keying dedup on source SHAs is what forces per-commit replay as a mechanism (<a class="ref ref-m" href="#m4">M4</a>) &mdash;
+    a whole-repo <code>filter-repo</code> pre-pass would mangle those SHAs before we got a chance
+    to put them in trailers.
+  </p>
+</div>
+
+<div class="card" id="c3">
+  <h3><span class="ref ref-c">C3</span> Support workspace mode and orchestrator mode from the same codebase</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r5">R5</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> commit to one mode only &mdash; either the tool must live inside one of the synced repos, or it must run from a standalone orchestrator.</p>
+  <p>
+    <a class="ref ref-r" href="#r5">R5</a> doesn&rsquo;t pick where the CI job lives. Workspace mode (tool runs inside one of the
+    synced repos, that side is <code>origin</code>) is the simplest setup; orchestrator mode (tool
+    runs from a third, standalone repo; both sides are external) is the cleanest separation. The
+    engine takes both because the choice belongs to the consumer, not to us.
+  </p>
+  <p>
+    Supporting both is what forces the CI mechanisms in <a href="#consequences">&sect;3</a>: auth has to handle
+    both &ldquo;caller is one of the synced repos&rdquo; and &ldquo;caller is a third repo&rdquo;
+    (<a class="ref ref-m" href="#m5">M5</a>), and CI logic has to be callable from whichever repo the consumer puts it in
+    (<a class="ref ref-m" href="#m6">M6</a>).
+  </p>
+</div>
+
+<div class="card" id="c4">
+  <h3><span class="ref ref-c">C4</span> Bootstrap by seeding at the divergence point, not by replaying each source&rsquo;s full history</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> <em>sync from init</em> &mdash; replay every commit from each source repo into the target in chronological order, preserving all history, and merge the two full histories together on the target side.</p>
+  <p>
+    <a class="ref ref-c" href="#c1">C1</a> demands a merge-base between source and target. Two real ways to establish one:
+  </p>
+  <ul>
+    <li>
+      <strong>Seed at divergence</strong> (what we do): create a single commit anchoring the two
+      trees at the moment sync begins. Source history before that point stays on the source repo;
+      the target sees a fresh divergence point and goes from there.
+    </li>
+    <li>
+      <strong>Sync from init</strong>: replay every commit from each source repo into the target
+      in chronological order, then merge the two histories. The target becomes the union of both
+      sources&rsquo; full histories plus its own.
+    </li>
+  </ul>
+  <p>
+    Sync-from-init gives deeper archaeology on the target (<code>git blame</code> reaches back
+    forever), but it&rsquo;s slow to bootstrap (potentially millions of commits), rewrites the
+    target&rsquo;s own history to include two previously-independent histories, and confuses
+    chronology whenever a source was initialised before the target was. Seed-at-divergence is
+    fast and reversible; the cost is that pre-seed <code>git blame</code> on the target resolves
+    to the seed commit and has to be chased back to the source repo.
+  </p>
+  <p>
+    Implementation: <code>shadow-setup</code> creates one commit per pair+branch via
+    <code>commit-tree</code>, reusing the target&rsquo;s current tree and parenting the target&rsquo;s
+    tip. A <code>Shadow-seed</code> trailer points at the source tip. Tree unchanged &rarr; no
+    content drift. Target tip as parent &rarr; ancestry established. The setup is idempotent
+    under <a class="ref ref-r" href="#r5">R5</a>.
+  </p>
+  <p class="from">
+    <em>Degree of freedom within &ldquo;seed at divergence&rdquo;:</em> a content-preserving seed
+    (reuse the target&rsquo;s tree, just add a trailer) vs. a content-modifying seed (overwrite the
+    target&rsquo;s tree with the source&rsquo;s). The latter would trash the target&rsquo;s files on
+    <code>main</code> at seed time, so wasn&rsquo;t viable.
+  </p>
+</div>
+
+<h3 class="subsection">Minor choices</h3>
+<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C4. Listed briefly.</p>
+
+<div class="card compact" id="c5">
+  <h3><span class="ref ref-c">C5</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r2">R2</a>. <strong>Rejected:</strong> separate push/pull scripts, or a primary/secondary model where one side is source-of-truth.</p>
+  <p>One code path, tested once, serves both directions; push and pull can&rsquo;t drift out of sync. Direction is chosen at the command line with <code>--from a</code> or <code>--from b</code>.</p>
+</div>
+
+<div class="card compact" id="c6">
+  <h3><span class="ref ref-c">C6</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
+  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter is just a normal commit on each side, not a config redeploy.</p>
+</div>
+
+<div class="card compact" id="c7">
+  <h3><span class="ref ref-c">C7</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
+  <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay.</p>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<!-- 3. CONSEQUENCES                                                          -->
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+
+<h2 id="consequences">3. Mechanisms &mdash; what the choices force us to build</h2>
+<p>Once a choice is made, some machinery follows without a real alternative. Six mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
+
+<div class="card" id="m1">
+  <h3><span class="ref ref-m">M1</span> Shadow branch tips carry the target&rsquo;s full layout</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c1">C1</a></p>
+  <p>
+    <code>git merge</code> on the target applies the shadow branch&rsquo;s tree against the target&rsquo;s
+    own. If the shadow tip held only the synced <code>dir</code>, merging would need a
+    subtree-style invocation to drop the files at the right prefix &mdash; which
+    <a class="ref ref-c" href="#c1">C1</a> rules out. So we compose the shadow tip&rsquo;s tree to mirror the target&rsquo;s layout:
+    the synced <code>dir</code> carries the incoming changes, and everything outside <code>dir</code>
+    is spliced through from the target&rsquo;s current tip. Merge mechanics stay on our side; consumers
+    keep running <code>git merge origin/shadow/&hellip;</code>.
+  </p>
+</div>
+
+<div class="card" id="m2">
+  <h3><span class="ref ref-m">M2</span> Unmapped merge parents fall back to the target&rsquo;s branch tip</h3>
+  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-c" href="#c4">C4</a></p>
+  <p>
+    <a class="ref ref-r" href="#r2">R2</a> demands that merge topology survive. <a class="ref ref-c" href="#c4">C4</a> creates a hard boundary &mdash;
+    anything before the seed doesn&rsquo;t exist in the target. Both together guarantee some source
+    merges will reference parents we can&rsquo;t map (commits before the seed, or on branches we don&rsquo;t
+    sync). Wiring those parents to the target&rsquo;s branch tip keeps the merge a merge and keeps
+    <code>git merge-base</code> returning a real ancestor. The ancestry edge sometimes jumps
+    further than it did on the source &mdash; see <a href="#unexpected">&sect;4</a>.
+  </p>
+  <p class="from">
+    <em>Degree of freedom:</em> the fallback target. We pick target-tip. Dropping the parent
+    (demotes the merge to a linear commit) and failing the sync (halts on legitimately
+    out-of-scope history) are the alternatives we rejected.
+  </p>
+</div>
+
+<div class="card" id="m3">
+  <h3><span class="ref ref-m">M3</span> Build replayed commits via <code>git commit-tree</code> plumbing; never touch the working tree</h3>
+  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p>
+    <a class="ref ref-r" href="#r2">R2</a> requires explicit control over author name, email, author date, committer and parents
+    &mdash; values we set via <code>GIT_AUTHOR_*</code>/<code>GIT_COMMITTER_*</code> on the
+    <code>commit-tree</code> call. A porcelain <code>checkout + commit</code> approach would route
+    through the user&rsquo;s hooks, signing config, and working-tree state, any of which can corrupt the
+    replay. <a class="ref ref-r" href="#r5">R5</a> also means there may not be a working tree at all (orchestrator mode). Between
+    these, plumbing isn&rsquo;t a real choice &mdash; it&rsquo;s the only path that survives both constraints.
+  </p>
+</div>
+
+<div class="card" id="m4">
+  <h3><span class="ref ref-m">M4</span> Process replay one commit at a time (not via a whole-repo pre-pass)</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a></p>
+  <p>
+    <a class="ref ref-c" href="#c2">C2</a> keys dedup on source SHAs &mdash; each replayed commit carries the original&rsquo;s SHA in
+    a trailer. A <code>git filter-repo</code> or <code>git subtree</code> pre-pass that produced a
+    transformed &ldquo;view&rdquo; of each side would rewrite those SHAs before we ever got to the
+    trailer stage, breaking dedup on every re-run. So we process commits one at a time: diff against
+    the source parent, swap the prefix (<a class="ref ref-r" href="#r4">R4</a>), write the tree with <a class="ref ref-m" href="#m3">M3</a>, add the
+    trailer. Renames and copies surface as delete+add pairs; we don&rsquo;t depend on
+    <code>-M</code>/<code>-C</code> heuristics.
+  </p>
+</div>
+
+<div class="card" id="m5">
+  <h3><span class="ref ref-m">M5</span> CI auth via <code>insteadOf</code> rewrites: caller-specific first, generic fallback</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c3">C3</a></p>
+  <p>
+    <a class="ref ref-c" href="#c3">C3</a> says the caller&rsquo;s repo can be one of the synced pair or a third orchestrator.
+    GitHub scopes <code>GITHUB_TOKEN</code> to the caller&rsquo;s own repo; cross-repo operations need a
+    PAT (<code>EXTERNAL_REPO_TOKEN</code>). The workflow installs two URL rewrites: a
+    caller-specific one pointing the caller&rsquo;s own URL at <code>github.token</code>, and a generic
+    one pointing <code>https://github.com/</code> at the PAT. Longest-prefix match wins, so a PAT
+    scoped only to the B-side can&rsquo;t accidentally break pushes to the caller&rsquo;s origin.
+  </p>
+  <p class="from">
+    <em>Degree of freedom:</em> the two-rule structure vs. a single wildcard rule. A single
+    wildcard is simpler but fails whenever the PAT&rsquo;s scope is narrower than the set of repos
+    the workflow touches &mdash; it gets applied to URLs it has no access to and returns 403.
+    Longest-prefix matching avoids that.
+  </p>
+</div>
+
+<div class="card" id="m6">
+  <h3><span class="ref ref-m">M6</span> Distribute CI logic via reusable <code>workflow_call</code> workflows</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c3">C3</a></p>
+  <p>
+    Because <a class="ref ref-c" href="#c3">C3</a> lets the tool live in different repos, consumers in different places all
+    need to invoke the same sync logic. A reusable <code>workflow_call</code> workflow lets each
+    consumer ship a thin caller that inherits updates from one central definition. Permissions are
+    declared at the call site, so the caller can&rsquo;t grant the callee more than it meant to. The
+    copy-paste-YAML-per-consumer alternative drifts silently under <a class="ref ref-r" href="#r5">R5</a>.
+  </p>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<!-- 4. UNEXPECTED CONSEQUENCES                                               -->
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+
+<h2 id="unexpected">4. Unexpected consequences</h2>
+<p>Ongoing properties of the design that weren&rsquo;t the point of making any choice. Good, bad, and neutral.</p>
+
+<div class="legend">
+  <span><span class="tag tag-green">+</span> unplanned benefit</span>
+  <span><span class="tag tag-red">!</span> unplanned side-effect we live with</span>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Seed commits look odd in <code>git log</code></h3>
+  <p class="from">From <a class="ref ref-c" href="#c4">C4</a></p>
+  <p>
+    Because seeds reuse the target&rsquo;s tree and add only a trailer, they show up in history as
+    no-content commits. First-time reviewers flag them as bugs. The diagram in
+    <code>shadow-sync-explained.html</code> exists largely to explain that those nodes are
+    load-bearing.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Round-trip merges can make ancestry look jumpy</h3>
+  <p class="from">From <a class="ref ref-m" href="#m2">M2</a></p>
+  <p>
+    When a commit goes A &rarr; B, gets merged on B, and is synced back to A, the merge&rsquo;s parent
+    is re-wired through the dedup map so it lands on the original A commit. Topologically correct
+    &mdash; <code>merge-base</code> still answers the right question &mdash; but visually the edge
+    jumps across the graph. Our echo-mapping test exists specifically to lock this behaviour down.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Commits that touch only non-pair paths are silently skipped</h3>
+  <p class="from">From <a class="ref ref-m" href="#m4">M4</a></p>
+  <p>
+    If a source commit changes only files outside the declared <code>dir</code>, the remapped tree
+    is identical to its parent&rsquo;s and the commit is not replayed. Correct by design, but users
+    periodically ask &ldquo;where did my merge commit go?&rdquo; The answer is usually &ldquo;it had no files
+    in the pair&rsquo;s <code>dir</code>&rdquo;.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Multi-pair configs force one PAT to cover every listed repo</h3>
+  <p class="from">From <a class="ref ref-r" href="#r1">R1</a> &times; <a class="ref ref-m" href="#m5">M5</a></p>
+  <p>
+    The sharpness of this one is specifically an <a class="ref ref-r" href="#r1">R1</a> consequence: as soon as a deployment has
+    more than one pair, <code>EXTERNAL_REPO_TOKEN</code> (one secret per workflow) has to cover
+    every external repo across every pair. Adding a new pair without widening the PAT silently
+    fails at push time. There is no per-pair credential.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-green">+</span> Running the same sync locally after CI &ldquo;just works&rdquo;</h3>
+  <p class="from">From <a class="ref ref-c" href="#c2">C2</a> + <a class="ref ref-m" href="#m3">M3</a></p>
+  <p>
+    Trailers are the dedup key and the working tree is never touched, so a developer can fetch the
+    target remote and re-run the sync from their workstation. The second run is a no-op. We didn&rsquo;t
+    plan for this &mdash; it&rsquo;s a happy side-effect of idempotence plus plumbing-only replay.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-green">+</span> One bug fix covers both directions</h3>
+  <p class="from">From <a class="ref ref-c" href="#c5">C5</a></p>
+  <p>
+    Symmetric <code>a</code>/<code>b</code> means push and pull are the same code. A regression
+    found on one direction is fixed on both at once; a test that covers pull covers almost all of
+    push. The test matrix stayed roughly half the size it would have been with an asymmetric
+    design.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-green">+</span> Retroactive <code>.shadowignore</code> changes work without ceremony</h3>
+  <p class="from">From <a class="ref ref-c" href="#c6">C6</a></p>
+  <p>
+    Because the filter is read out of the source commit&rsquo;s tree, adding an entry to
+    <code>.shadowignore</code> takes effect on the next sync without touching config, CI, or the
+    other repo. Different branches can even carry different ignore rules &mdash; useful on release
+    branches where the export surface is narrower.
+  </p>
+</div>
+
+</body>
+</html>

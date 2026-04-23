@@ -498,6 +498,7 @@
 
 <nav class="toc">
 <h2>Table of Contents</h2>
+<p style="margin: 0.3rem 0 0.6rem; padding-left: 0;"><strong><a href="#walkthrough">Walkthrough</a>:</strong> Joining two mature repos into a monorepo</p>
 <ol>
   <li><a href="#config">Configuration</a></li>
   <li><a href="#seed">Seed &amp; Bootstrap</a></li>
@@ -515,6 +516,173 @@
 </nav>
 
 <!-- ── 1. Configuration ────────────────────────────────────────────────── -->
+
+<!-- ── Walkthrough ──────────────────────────────────────────────────────── -->
+
+<h2 id="walkthrough">Walkthrough: Joining Two Mature Repos into a Monorepo</h2>
+
+<p>
+  Concrete scenario. You already have <code>org/frontend</code> (four years of history, active
+  PRs) and <code>org/backend</code> (three years of history, active PRs). You want a new
+  <code>org/monorepo</code> that holds both under <code>frontend/</code> and <code>backend/</code>,
+  with every future change flowing between the monorepo and the original repos in both
+  directions.
+</p>
+
+<h3>Starting and target state</h3>
+
+<div class="diagram">BEFORE
+═══════════════════════════════════════════════════════
+org/frontend                       org/backend
+├─ src/                             ├─ src/
+├─ package.json                     ├─ go.mod
+└─ README.md                        └─ README.md
+(4 years of history, open PRs)      (3 years of history, open PRs)
+
+org/monorepo   (empty, or existing with unrelated root tooling)
+
+
+AFTER
+═══════════════════════════════════════════════════════
+org/monorepo
+├─ frontend/   ←── sync ──→  org/frontend
+│   ├─ src/
+│   ├─ package.json
+│   └─ README.md
+├─ backend/    ←── sync ──→  org/backend
+│   ├─ src/
+│   ├─ go.mod
+│   └─ README.md
+├─ README.md                  (monorepo-only, not synced)
+└─ .github/workflows/         (monorepo-only, not synced)</div>
+
+<h3>Step 1 &mdash; Populate the monorepo with current tips</h3>
+<p>
+  Copy the current contents of each source repo into its target subdirectory. This is a plain
+  file copy &mdash; <em>not</em> a merge or a clone &mdash; because we&rsquo;re establishing the
+  divergence point, not importing prior history (see <a href="#seed">&sect;2</a>).
+</p>
+
+<pre><code>git clone https://github.com/org/monorepo.git
+cd monorepo
+
+# Grab current frontend tip as plain files
+git clone --depth 1 https://github.com/org/frontend.git /tmp/frontend-tip
+mkdir frontend
+cp -r /tmp/frontend-tip/. frontend/
+rm -rf frontend/.git
+
+# Same for backend
+git clone --depth 1 https://github.com/org/backend.git /tmp/backend-tip
+mkdir backend
+cp -r /tmp/backend-tip/. backend/
+rm -rf backend/.git
+
+git add -A
+git commit -m "Initial frontend/ and backend/ (from live repos as of today)"
+git push origin main</code></pre>
+
+<p>
+  Everything older than this commit &mdash; four years of frontend history, three of backend
+  &mdash; stays on the original repos. The monorepo starts fresh from this point.
+</p>
+
+<h3>Step 2 &mdash; Install and configure</h3>
+<p>
+  Run in workspace mode: the monorepo <em>is</em> the workspace. <code>a</code> is
+  <code>origin</code> with a <code>dir</code> prefix; <code>b</code> is the external repo at root.
+</p>
+
+<pre><code>npm install negedng/shadow-sync cross-env tsx</code></pre>
+
+<p>Add the scripts to the monorepo&rsquo;s <code>package.json</code>:</p>
+
+<pre><code>{
+  "scripts": {
+    "setup": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-setup.ts",
+    "sync":  "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-sync.ts"
+  }
+}</code></pre>
+
+<p>Create <code>shadow-config.json</code>:</p>
+
+<pre><code>{
+  "pairs": [
+    {
+      "name": "frontend",
+      "a": { "remote": "origin",        "dir": "frontend" },
+      "b": { "remote": "frontend-repo", "url": "https://github.com/org/frontend.git", "dir": "" }
+    },
+    {
+      "name": "backend",
+      "a": { "remote": "origin",        "dir": "backend" },
+      "b": { "remote": "backend-repo",  "url": "https://github.com/org/backend.git",  "dir": "" }
+    }
+  ]
+}</code></pre>
+
+<h3>Step 3 &mdash; Seed both pairs</h3>
+<p>
+  Anchors the ancestry on both sides so future syncs can do a plain 3-way merge. Idempotent &mdash;
+  re-running skips already-seeded branches.
+</p>
+
+<pre><code>npm run setup -- -r frontend
+npm run setup -- -r backend</code></pre>
+
+<p>
+  After this, <code>org/frontend/main</code> has one new commit (a <code>Shadow-seed</code>
+  carrying its existing tree unchanged, parented on the old tip), and <code>org/monorepo/main</code>
+  has one as well. Those two seeds are what give plain <code>git merge</code> a merge-base to
+  find later. No other history on either repo is touched.
+</p>
+
+<h3>Step 4 &mdash; Sync, both directions</h3>
+
+<p><strong>Frontend team commits to <code>org/frontend</code> (or merges a PR there):</strong></p>
+<pre><code># On the monorepo:
+npm run sync -- --from b -r frontend
+git fetch origin
+git merge origin/shadow/frontend/main       # lands on monorepo/main</code></pre>
+
+<p><strong>Monorepo contributor edits <code>frontend/src/foo.ts</code>:</strong></p>
+<pre><code># On the monorepo:
+npm run sync -- --from a -r frontend
+# On org/frontend (via normal git UI or CI):
+git merge origin/shadow/frontend/main       # lands on frontend/main</code></pre>
+
+<p>Same pattern for <code>backend</code> with <code>-r backend</code>. In production you&rsquo;ll wire
+up the two reusable workflows (<a href="#files">&sect;12</a>) on a cron and let them run &mdash; the
+manual commands above are just for first-time testing.</p>
+
+<h3>What happens to open PRs on <code>org/frontend</code>?</h3>
+<p>
+  They keep working exactly as before. When one merges into
+  <code>org/frontend/main</code>, the next <code>--from b -r frontend</code> run picks the new
+  commits up and replays them onto <code>origin/shadow/frontend/main</code> in the monorepo. The
+  monorepo team then merges the shadow branch when they&rsquo;re ready. If a PR and a monorepo-side
+  change have edited the same lines, the conflict surfaces at the merge step &mdash; no different
+  from a pre-monorepo world.
+</p>
+
+<h3>What about pre-seed <code>git blame</code>?</h3>
+<p>
+  On the monorepo side, <code>git blame frontend/src/foo.ts</code> resolves to the seed commit
+  for any line that existed before sync began; for deeper archaeology, developers go to
+  <code>org/frontend</code>, which still has its full four-year history intact. This is the
+  deliberate trade for a fast, reversible bootstrap (design choice C4 in the
+  <a href="shadow-sync-design.html">design plan</a>).
+</p>
+
+<h3>What if you want the reverse direction &mdash; split an existing monorepo out?</h3>
+<p>
+  Same mechanics, flipped. Start with a monorepo, create two empty target repos
+  (<code>org/frontend</code>, <code>org/backend</code>), populate each with the current contents
+  of the respective subdirectory from the monorepo (plain file copy + initial commit), configure
+  and seed. Sync now flows both ways from day one.
+</p>
+
+<!-- ── Configuration ──────────────────────────────────────────────────── -->
 
 <h2 id="config">1. Configuration</h2>
 
