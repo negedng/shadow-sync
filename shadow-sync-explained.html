@@ -279,13 +279,16 @@
 
     <!-- Track labels (left) -->
     <text x="8"  y="70"  font-size="12" font-weight="600" fill="#1d60d9">A / feature</text>
-    <text x="8"  y="133" font-size="12" font-weight="600" fill="#1d60d9">A / main</text>
-    <text x="8"  y="213" font-size="11" font-weight="600" fill="#1a8a3e">shadow / PairName / main</text>
-    <text x="8"  y="227" font-size="10" fill="#666">(on A — mirrors B / main)</text>
+    <text x="8"  y="140" font-size="12" font-weight="600" fill="#1d60d9">A / main</text>
+    <text x="8"  y="100" font-size="11" font-weight="600" fill="#1a8a3e">shadow / backend / feature</text>
+    <text x="8"  y="114" font-size="10" fill="#666">(on A — mirrors B / feature)</text>
+    <text x="8"  y="200" font-size="11" font-weight="600" fill="#1a8a3e">shadow / backend / main</text>
+    <text x="8"  y="214" font-size="10" fill="#666">(on A — mirrors B / main)</text>
     <text x="8"  y="330" font-size="12" font-weight="600" fill="#1a8a3e">B / main</text>
-    <text x="8"  y="400" font-size="11" font-weight="600" fill="#1d60d9">shadow / PairName / main</text>
+    <text x="8"  y="400" font-size="11" font-weight="600" fill="#1d60d9">shadow / backend / main</text>
     <text x="8"  y="414" font-size="10" fill="#666">(on B — mirrors A / main)</text>
-    <text x="8"  y="483" font-size="11" font-weight="600" fill="#1d60d9">shadow / PairName / feature</text>
+    <text x="8"  y="460" font-size="12" font-weight="600" fill="#1a8a3e">B / feature</text>
+    <text x="8"  y="483" font-size="11" font-weight="600" fill="#1d60d9">shadow / backend / feature</text>
     <text x="8"  y="497" font-size="10" fill="#666">(on B — mirrors A / feature)</text>
 
     <!-- Pane labels (right) -->
@@ -299,39 +302,43 @@
 
 
     <!-- a/feature (forks from a/main at c1) -->
-    <circle cx="245" cy="70" r="5" fill="#1d60d9"/>
+    <circle cx="245" cy="460" r="5" fill="#1a8a3e"/>
 
-    <circle cx="75"  cy="140" r="5" fill="#1d60d9"/>
-    <text x="58" y="163" font-size="10" fill="#444" font-style="italic">init</text>
-    <circle cx="170" cy="140" r="5" fill="#1d60d9"/>           <!-- c1 = fork point -->
-    <circle cx="240" cy="140" r="5" fill="#1d60d9"/>           <!-- c2 -->
+    <circle cx="75"  cy="320" r="5" fill="#1a8a3e"/>
+    <text x="58" y="335" font-size="10" fill="#444" font-style="italic">init</text>
+    <circle cx="170" cy="320" r="5" fill="#1a8a3e"/>           <!-- c1 = fork point -->
+    <circle cx="240" cy="320" r="5" fill="#1a8a3e"/>           <!-- c2 -->
     
-    
-    <line x1="130" y1="140" x2="200" y2="70" stroke="#1d60d9" stroke-width="2"/>
-    <line x1="200" y1="70" x2="940" y2="70" stroke="#1d60d9" stroke-width="2.5"/>
+    <line x1="300" y1="100  " x2="360" y2="70" stroke="#1d60d9" stroke-width="2"/>
+    <line x1="130" y1="220" x2="200" y2="100" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5" />
+    <line x1="360" y1="70" x2="940" y2="70" stroke="#1d60d9" stroke-width="2.5"/>
+    <line x1="200" y1="100" x2="940" y2="100" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
+
     <!-- a/main -->
-    <line x1="75" y1="140" x2="940" y2="140" stroke="#1d60d9" stroke-width="2.5"/>
-    <line x1="300" y1="140" x2="360" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="360" y1="140" x2="940" y2="140" stroke="#1d60d9" stroke-width="2.5"/>
+    <line x1="360" y1="140" x2="300" y2="220" stroke="#1d60d9" stroke-width="2"/>
     <!-- shadow/backend/main on A  -->
-    <line x1="360" y1="220" x2="940" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="75" y1="220" x2="940" y2="220" stroke="#1a8a3e" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- SEED on a/main (black filled, blue rim) -->
-    <circle cx="300" cy="140" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
-    <circle cx="300" cy="70" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
+    <circle cx="300" cy="100" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
+    <circle cx="300" cy="220" r="8" fill="#1a1a1a" stroke="#1d60d9" stroke-width="2.5"/>
 
 
-    <line x1="130" y1="420" x2="200" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="130" y1="320" x2="200" y2="460" stroke="#1a8a3e" stroke-width="2.5"/>
     <!-- b/main starts at the seed (pre-seed history identical to a/main) -->
-    <line x1="360" y1="320" x2="940" y2="320" stroke="#1a8a3e" stroke-width="2.5"/>
+    <line x1="75" y1="320" x2="940" y2="320" stroke="#1a8a3e" stroke-width="2.5"/>
 
-    <line x1="300" y1="420" x2="360" y2="320" stroke="#1a8a3e" stroke-width="2"/>
+    <line x1="360" y1="420" x2="300" y2="320" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- shadow/backend/main on B (blue dashed) -->
-    <line x1="75" y1="420" x2="940" y2="420" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
-
+    <line x1="360" y1="420" x2="940" y2="420" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <!-- shadow/main/feature on B (green) -->
+    <line x1="200" y1="460" x2="940" y2="460" stroke="#1a8a3e" stroke-width="2.5"/>
     <!-- shadow/backend/feature on B (blue dashed) -->
-    <line x1="200" y1="490" x2="940" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="300" y1="460" x2="360" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="360" y1="490" x2="940" y2="490" stroke="#1d60d9" stroke-width="2" stroke-dasharray="6 5"/>
     <!-- SEED on b/main (black filled, green rim) -->
-    <circle cx="300" cy="420" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
-    <circle cx="300" cy="490" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
+    <circle cx="300" cy="320" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
+    <circle cx="300" cy="460" r="8" fill="#1a1a1a" stroke="#1a8a3e" stroke-width="2.5"/>
     
     <circle cx="380" cy="140" r="6.5"  fill="none"  stroke="#1d60d9" stroke-width="2"/>
     <text x="380" y="120" font-size="13" font-weight="700" fill="#1d60d9" >x</text>
