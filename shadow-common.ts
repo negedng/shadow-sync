@@ -4,6 +4,26 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
+// TODO(orchestrator-only): the design committed to orchestrator-only operation
+// (C4 in shadow-sync-design.html). The following workspace-mode codepaths can
+// be removed in a follow-up cleanup:
+//
+//   - getCurrentBranch(): only called when source.url is absent (workspace
+//     mode reads HEAD on the workspace repo). Orchestrator never has a current
+//     branch — both endpoints are remotes.
+//   - The `useLocalBranch` branch in collectSourceCommits(): selects local refs
+//     instead of remote-tracking refs when source.url is absent.
+//   - source.url being optional in RepoEndpoint and shadow-config.json:
+//     orchestrator mode requires url on every endpoint.
+//   - In shadow-sync.ts: the `else if (!source.url)` fallback that defaults
+//     to the current branch, and the dirty-tree guard for source.dir/.
+//   - In .github/workflows/shadow-sync.yml: the conditional EXTERNAL_REPO_TOKEN
+//     check + github.token fallback, and the caller-specific insteadOf rule.
+//     Single insteadOf https://github.com/ -> PAT covers everything.
+//   - In shadow-tests/harness.ts: buildPairs() currently produces workspace
+//     style configs (a-side has remote: "origin" with no url). Should switch
+//     to orchestrator-style with explicit url on both endpoints.
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 export interface RepoEndpoint {
@@ -801,11 +821,47 @@ function runReplayLoop(opts: {
 
       const mappedParents = resolveParents(commit, shaMapping, fallbackParent);
 
-      // Use the first mapped parent's tree as the base for this commit,
-      // falling back to lastTree for linear history.
-      const parentTree = mappedParents.length > 0
-        ? git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true }).stdout || lastTree
-        : lastTree;
+      // M9: if any source parent of `commit` is an echo'd target-side commit
+      // (carries skipTrailer pointing back to a commit on our side), splice
+      // its outer tree into the parentTree. This keeps shadow's intermediate
+      // commits' outer state aligned with the most recent round-tripped
+      // commit, so checking out an old shadow commit reflects the target's
+      // outer at that point rather than a frozen bootstrap snapshot. The
+      // splice composes: outer from the echo'd target-side parent, dir/ from
+      // the existing shadow chain, so nothing earlier is lost.
+      let echoTargetSHA: string | null = null;
+      if (target.dir) {
+        for (const sourceParent of commit.parents) {
+          const parentMeta = getCommitMeta(sourceParent);
+          if (hasTrailerLine(parentMeta.trailers, dc.skipTrailerKey)) {
+            const mapped = shaMapping.get(sourceParent);
+            if (mapped) {
+              echoTargetSHA = mapped;
+              break;
+            }
+          }
+        }
+      }
+
+      let parentTree: string | null;
+      if (echoTargetSHA && mappedParents.length > 0) {
+        const aTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
+        const shadowFirstParent = mappedParents[0];
+        const shadowDirRes = git(["rev-parse", `${shadowFirstParent}:${target.dir}`], { safe: true });
+        if (aTreeRes.ok && shadowDirRes.ok) {
+          parentTree = spliceSubtree(aTreeRes.stdout, target.dir, shadowDirRes.stdout);
+        } else if (aTreeRes.ok) {
+          parentTree = aTreeRes.stdout;
+        } else {
+          parentTree = git(["rev-parse", `${shadowFirstParent}^{tree}`], { safe: true }).stdout || lastTree;
+        }
+      } else {
+        // Use the first mapped parent's tree as the base for this commit,
+        // falling back to lastTree for linear history.
+        parentTree = mappedParents.length > 0
+          ? git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true }).stdout || lastTree
+          : lastTree;
+      }
 
       // Load .shadowignore from this commit's tree
       const ignorePath = source.dir ? `${source.dir}/.shadowignore` : ".shadowignore";
