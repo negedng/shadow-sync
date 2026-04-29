@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C8</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C8 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C8</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C8 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M8</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -431,130 +431,184 @@
 <p>Once a choice is made, some machinery follows without a real alternative. Nine mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
 
 <div class="card" id="m1">
-  <h3><span class="ref ref-m">M1</span> Splice the target&rsquo;s current outer tree under the synced subtree at push time</h3>
+  <h3><span class="ref ref-m">M1</span> Splice the outer tree onto shadow commits</h3>
   <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a></p>
   <p>
-    <a class="ref ref-c" href="#c2">C2</a> commits us to the shadow tip carrying the target&rsquo;s full
-    outer tree &mdash; that&rsquo;s the shape that delivers <a class="ref ref-r" href="#r5">R5</a>&rsquo;s
-    no-phantom-conflict guarantee. The tree of any individual replayed commit only knows about the
-    synced <code>dir</code> (replay walks the source side, where the rest of the target&rsquo;s tree
-    doesn&rsquo;t exist), so the tip&rsquo;s outer-tree content has to be added at push time.
-  </p>
-  <p>
-    <strong>The splice (per pushed branch).</strong> Read the target branch&rsquo;s current tip tree;
-    <code>rm -r --cached dir/</code> to clear the slot; <code>read-tree --prefix=dir/</code> the
-    replayed tip&rsquo;s synced subtree; <code>write-tree</code>; then <code>commit-tree</code> with
-    the replayed tip&rsquo;s parents, author, committer, and message. The result is the SHA the engine
-    actually pushes to <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code>.
-  </p>
-  <p>
-    <strong>Why it&rsquo;s load-bearing.</strong> Without the splice, the shadow tip&rsquo;s tree
-    contains only <code>dir/</code> &mdash; nothing outside it. Plain <code>git merge</code> at the
-    consumer end is a 3-way merge between:
-  </p>
-  <ul>
-    <li><em>base:</em> the previous shadow merge on target/main (which carried the target&rsquo;s outer tree as it was at that point);</li>
-    <li><em>target/main now:</em> the target&rsquo;s current state, with whatever has happened to the outer tree since;</li>
-    <li><em>shadow tip:</em> only <code>dir/</code> content, no outer tree at all.</li>
-  </ul>
-  <p>
-    For any file <em>outside</em> <code>dir/</code>, git interprets the shadow side as having deleted
-    it. Two failure modes follow:
-  </p>
-  <ul>
-    <li>
-      <strong>Silent deletion.</strong> Base has the file, target hasn&rsquo;t changed it, shadow
-      doesn&rsquo;t carry it &rarr; git reads &ldquo;shadow deleted, target untouched&rdquo; and the
-      file <em>disappears</em> from the merge commit&rsquo;s tree. No conflict marker, no warning;
-      <code>git log -p main</code> just shows the file removed in the merge commit, mixed in with the
-      legitimate <code>dir/</code> changes.
-    </li>
-    <li>
-      <strong>Modify/delete conflicts.</strong> Base has the file, target modified it, shadow
-      doesn&rsquo;t carry it &rarr; git flags a conflict on every such file. The consumer has to
-      manually resolve dozens of conflicts on every merge for files they never touched.
-    </li>
-  </ul>
-  <p>
-    Concrete examples of files this hits on every merge for a typical monorepo:
-    <code>.github/workflows/*.yml</code>, root <code>README.md</code> and other monorepo-only docs,
-    other pairs&rsquo; directories (e.g. <code>frontend/</code> when this push is for the
-    <code>backend/</code> pair), repo-root tooling configs (<code>tsconfig.json</code>,
-    <code>package.json</code> at root, etc.).
-  </p>
-  <p>
-    The splice makes the shadow tip&rsquo;s outer tree byte-for-byte identical to target/main&rsquo;s
-    current outer tree. The 3-way merge then sees zero diff outside <code>dir/</code> &mdash; only
-    the synced subdirectory&rsquo;s changes surface, which is what the consumer expects.
-  </p>
-  <p>
-    <strong>Why the round-trip doesn&rsquo;t fix this.</strong> Tempting reasoning: target/main
-    never merges directly into shadow, but the round-trip echo (A &rarr; B &rarr; A&rsquo;s shadow)
-    re-identifies an A-side commit <code>x</code> as the parent of the replayed merge on shadow.
-    Since <code>x</code> is on A/main and has all of A&rsquo;s outer-tree content, isn&rsquo;t the
-    outer-tree state already &ldquo;on shadow&rdquo;? It is &mdash; in <em>ancestry</em> &mdash; but
-    that&rsquo;s the wrong shape of &ldquo;on shadow.&rdquo; A 3-way merge looks at exactly three
-    trees:
-  </p>
-  <ul>
-    <li><code>tree(merge-base)</code></li>
-    <li><code>tree(A)</code> (target/main&rsquo;s tip)</li>
-    <li><code>tree(B)</code> (shadow&rsquo;s tip <em>commit</em>)</li>
-  </ul>
-  <p>
-    The algorithm doesn&rsquo;t walk back through shadow&rsquo;s history to read <code>x</code>&rsquo;s
-    tree. It reads the shadow tip&rsquo;s tree directly. And the shadow tip is built by the replay
-    engine, which constructs each tree as <code>previous_replayed_tree + path_filtered_diff</code> &mdash;
-    outer-tree changes from <code>x</code> never enter that diff because of <a class="ref ref-m" href="#m4">M4</a>&rsquo;s
-    filter on <code>source.dir/</code>. So the shadow tip&rsquo;s tree stays frozen at the bootstrap
-    chain&rsquo;s inherited outer tree, even though <code>x</code> is reachable as an ancestor.
-  </p>
-  <p>
-    Concrete failure trace without the splice:
+    <a class="ref ref-c" href="#c2">C2</a> commits us to shadow commits carrying the target&rsquo;s
+    full outer tree. Replay walks the source side, where the target&rsquo;s outer doesn&rsquo;t
+    exist, so a replayed commit only knows the synced <code>dir</code>. The outer is grafted on:
   </p>
 <pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
-A makes commit x: modifies frontend/file.ts AND README.md (outer).
-
-Push A&rarr;B. The path filter strips x's README.md change; only
-frontend/file.ts crosses to B's shadow.
-
-B merges, pull A&larr;B. Echo maps the round-tripped commit back to x.
-M' on A's shadow has parents [fallback, x].
-
-At merge time on A:
-  merge-base(A/main, M') = x         &lt;- x IS the merge-base
-  tree(base = x)         = init + frontend/file.ts + README.md modified
-  tree(A = A/main tip)   = same as base (no further A commits)
-  tree(B = M')           = init + frontend/file.ts + frontend/README.md
-                            (replay-built; no README.md outer change)
-
-Diff base&rarr;A:  none
-Diff base&rarr;B:  README.md DELETED (B doesn't have it)
-
-Result: README.md is removed from the merge commit. Silent revert.
+splice(outer^{tree}, target.dir, dir^{tree}) &rarr; write-tree &rarr; commit-tree
 </pre>
   <p>
-    The round-trip + echo gives merge a real merge-base (<code>x</code>), which is what we want.
-    What it doesn&rsquo;t give is shadow&rsquo;s tip tree matching <code>x</code>&rsquo;s outer
-    state &mdash; the path filter sees to that. The splice closes the gap by overwriting shadow
-    tip&rsquo;s outer tree with target/main&rsquo;s current outer tree at push time, so the
-    base&rarr;B diff outside <code>dir/</code> is empty by construction. Round-trip handles
-    ancestry; splice handles tree state. They&rsquo;re both load-bearing and they don&rsquo;t
-    substitute for each other.
+    Operands depend on which shadow commit is being constructed:
   </p>
+  <ul>
+    <li>
+      <strong>The tip pushed at push time:</strong> outer = target/main&rsquo;s current tip; dir
+      = the replayed tip&rsquo;s <code>dir/</code>. The shadow tip is what consumers
+      <code>git merge</code>, so it has to carry the freshest target/main outer available.
+    </li>
+    <li>
+      <strong>An echo&rsquo;d merge commit during replay</strong> (B-side <code>x'</code>
+      trailer-mapped to A-side <code>x</code>, processed by <code>runReplayLoop</code>): outer
+      = <code>x^{tree}</code>; dir = previous shadow tip&rsquo;s <code>dir/</code>; M&rsquo;s diff
+      overlaid via <code>buildRemappedTree</code>. Keeps intermediate shadow commits&rsquo; outer
+      state true to the most recent round-trip &mdash; useful for <code>git bisect</code> and
+      archaeology. Subsequent regular commits inherit the spliced tree as their
+      <code>parentTree</code>, carrying x&rsquo;s outer forward until the next round-trip echoes
+      a fresher A-side commit.
+    </li>
+  </ul>
+
   <p>
-    <strong>Could echo mapping be extended to also fix the tree?</strong> One could imagine making
-    the replay engine, when it echo-maps <code>x'</code> to <code>x</code>, also lift
-    <code>x</code>&rsquo;s outer tree onto the replayed commit&rsquo;s tree &mdash; effectively a
-    mini-splice keyed on the echo&rsquo;d commit instead of target/main&rsquo;s tip. This would
-    work, but it&rsquo;s strictly weaker than the splice we already have. <code>x</code> is by
-    construction an ancestor of target/main, so its outer tree is at most as recent as
-    target/main&rsquo;s tip &mdash; usually older. And echo only fires when something round-trips;
-    outer-only commits the target makes that never cross to B (most of them, since the path filter
-    drops them on the way out) would never trigger an echo-driven splice. The current splice
-    sidesteps both limits: it always fires (every push) and it always reads the freshest available
-    source (target/main&rsquo;s current tip). Echo and splice end up doing genuinely different jobs;
-    neither would be cleaner if folded into the other.
+    <strong>Why both points fire.</strong> Replay-time anchors intermediate-commit outer at the
+    echo&rsquo;d A-side commit <code>x</code>. Push-time anchors the tip&rsquo;s outer at
+    target/main&rsquo;s <em>current</em> state. The reason both are needed: the replay engine&rsquo;s
+    <code>fallbackParent</code> (= target/main&rsquo;s current tip when the run starts) is wired
+    into the chain as the first parent of orphan source commits
+    (<a class="ref ref-m" href="#m2">M2</a>), so it&rsquo;s reachable from shadow tip <em>and</em>
+    it&rsquo;s on A/main. When A makes any outer-only commit between the round-trip and the next
+    pull, fallbackParent advances past <code>x</code>, and so does
+    <code>merge-base(A/main, shadow_tip)</code>. The replay-time splice&rsquo;s anchor at
+    <code>x</code> is then older than merge-base; the consumer&rsquo;s 3-way merge reads
+    <code>tree(B)</code> as a B-side revert and silently drops A&rsquo;s outer changes since
+    <code>x</code>. Push-time aligns the tip&rsquo;s outer with fallbackParent&rsquo;s outer, so
+    <code>tree(B)</code> matches <code>tree(merge-base)</code> outside <code>dir/</code>.
+    Conversely, push-time can&rsquo;t substitute for replay-time: it only touches the tip, not the
+    intermediate shadow chain that <code>git bisect</code> might check out.
+  </p>
+
+  <p>
+    <strong>Failure trace without push-time</strong> (assuming replay-time splice is in place):
+  </p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+A makes commit x: modifies frontend/file.ts AND README.md (outer = v1).
+Push A&rarr;B; B integrates via merge; round-trip echoes back later.
+
+A then makes y: README v1 &rarr; v2 (outer-only; doesn&rsquo;t round-trip).
+A/main = y.
+
+Pull B&rarr;A. fallbackParent = y (target/main&rsquo;s current).
+Replay processes B&rsquo;s merge commit M_B &rarr; M&prime; on A&rsquo;s shadow,
+parents = [y, x] (y from fallbackParent, x via echo).
+Replay-time splice fires: tree(M&prime;) carries x&rsquo;s outer (README v1).
+
+At merge time on A:
+  merge-base(A/main = y, shadow_tip) = y     &larr; y is on both: A/main directly,
+                                                shadow chain via fallbackParent
+  tree(y)        = init + dir + README v2
+  tree(A/main)   = same as base
+  tree(B)        = init + dir + README v1    &larr; replay-anchored at x&rsquo;s outer
+
+Diff base&rarr;A:  none
+Diff base&rarr;B:  README v2 &rarr; v1 (looks like a B-side revert)
+
+3-way: A unchanged, B &ldquo;modified&rdquo; &rarr; take B&rsquo;s revert.
+Result: README silently reverts to v1; A&rsquo;s commit y is undone.
+</pre>
+  <p>
+    Push-time recomposes shadow tip with target/main&rsquo;s current outer
+    (= <code>y</code>&rsquo;s outer), so <code>tree(B) == tree(y)</code> outside <code>dir/</code>
+    and the merge sees zero diff there. Other files this hits in practice on a typical monorepo:
+    <code>.github/workflows/*.yml</code>, sibling pairs&rsquo; directories, root tooling configs
+    (<code>tsconfig.json</code>, <code>package.json</code>) &mdash; anything outside the synced
+    <code>dir/</code> that the target side modifies between syncs.
+  </p>
+
+  <p>
+    <strong>Alternative considered for the replay-time case: real <code>git merge</code> instead
+    of tree composition.</strong> (The push-time splice has no merge equivalent &mdash; nothing
+    to merge at push, just tree composition.) Three flavors, all rejected:
+  </p>
+  <ul>
+    <li>
+      <strong>Echo + <code>git merge x</code>:</strong> <code>x</code> already an ancestor &rarr;
+      <em>Already up-to-date</em>, no commit, intermediate outer never updates.
+      <a class="ref ref-r" href="#r5">R5</a> violated.
+    </li>
+    <li>
+      <strong>Drop echo + <code>git merge x</code>:</strong> merge-base falls back to
+      <code>init</code>; files modified by both <code>b</code> and <code>x</code> conflict; no
+      human to resolve. Even on success, would re-resolve what M already resolved on Fornax
+      &mdash; violating &ldquo;each conflict resolved at most once.&rdquo;
+      <a class="ref ref-r" href="#r4">R4</a> + <a class="ref ref-r" href="#r5">R5</a> violated.
+    </li>
+    <li>
+      <strong>Merge-trick:</strong> <code>git merge --no-commit -s ours x</code> +
+      <code>read-tree --prefix=dir/ M^{tree}</code> + outer fix-up (<code>-s ours</code> keeps
+      <code>b'</code>&rsquo;s tree wholesale; outer needs an extra step). Same parents, same tree,
+      same SHA as splice &mdash; mechanically worse:
+    </li>
+  </ul>
+<table>
+  <thead>
+    <tr><th>Aspect</th><th>Splice</th><th>Merge-trick</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Resulting commit (parents, tree, SHA)</td>
+      <td>identical to merge-trick by construction</td>
+      <td>identical to splice by construction</td>
+    </tr>
+    <tr>
+      <td>Git layer</td>
+      <td>plumbing (<code>mktree</code>, <code>read-tree</code>, <code>commit-tree</code>)</td>
+      <td>porcelain (<code>merge</code>, <code>checkout</code>) mixed with plumbing</td>
+    </tr>
+    <tr>
+      <td>Working tree</td>
+      <td>not needed &mdash; pure object DB</td>
+      <td>required &mdash; checkout of <code>b'</code>, then manipulation</td>
+    </tr>
+    <tr>
+      <td>Steps</td>
+      <td>1 tree composition + commit</td>
+      <td>4+: <code>checkout b'</code>, <code>merge --no-commit -s ours x</code>, <code>read-tree --prefix=dir/ M^{tree}</code>, outer fix-up, <code>commit</code></td>
+    </tr>
+    <tr>
+      <td><code>MERGE_HEAD</code> lifetime</td>
+      <td>none</td>
+      <td>lives between <code>--no-commit</code> and <code>commit</code>; partial failure leaves it dangling for the next run</td>
+    </tr>
+    <tr>
+      <td><code>-s ours</code> side effect</td>
+      <td>n/a</td>
+      <td>keeps <code>b'</code>&rsquo;s <em>full</em> tree; outer needs an explicit fix-up step to come from <code>x</code></td>
+    </tr>
+    <tr>
+      <td>Determinism</td>
+      <td>pure function of input trees</td>
+      <td>depends on working-tree state, autocrlf, line-ending normalization</td>
+    </tr>
+    <tr>
+      <td>Windows / autocrlf</td>
+      <td>unaffected (object-level)</td>
+      <td>checkout round-trips through CRLF; can perturb the tree&rsquo;s blob SHAs (<a class="ref ref-r" href="#r4">R4</a> exposure)</td>
+    </tr>
+    <tr>
+      <td>Retry idempotence</td>
+      <td>same SHA trivially on identical inputs</td>
+      <td>only if every working-tree intermediate is bit-identical &mdash; brittle</td>
+    </tr>
+    <tr>
+      <td>Testability</td>
+      <td>one tree-composition unit</td>
+      <td>several porcelain interactions, more fixtures</td>
+    </tr>
+  </tbody>
+</table>
+  <p class="from">
+    Identical commit through a more fragile route. M&rsquo;s resolution was a human decision, not
+    an algorithmic function of three trees &mdash; anything that replays M has to read
+    <code>M^{tree}</code>. The only question is whether to do it as a diff overlay (splice) or a
+    working-tree overwrite (merge-trick). Same information, two routes; we take the shorter one.
+  </p>
+  <p class="from">
+    <em>Degree of freedom (replay-time case):</em> splice with previous shadow tip&rsquo;s
+    <code>dir/</code>, or use <code>x^{tree}</code> raw. We splice. Raw would clobber earlier
+    B-side <code>dir/</code> contributions with x&rsquo;s A-side view of the synced subdirectory.
   </p>
 </div>
 
@@ -725,66 +779,6 @@ Result: README.md is removed from the merge commit. Silent revert.
     branch exists (forces a manual setup step on the consumer for every new branch). The
     merge-base heuristic works without naming conventions and degrades gracefully to
     <code>main</code> only when nothing else is reachable.
-  </p>
-</div>
-
-<div class="card" id="m9">
-  <h3><span class="ref ref-m">M9</span> When a replayed commit has an echo&rsquo;d source parent, splice the echo&rsquo;d outer into <em>that commit&rsquo;s</em> <code>parentTree</code></h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> applied to intermediate shadow commits, not just the tip</p>
-  <p>
-    <a class="ref ref-m" href="#m1">M1</a> rewrites the shadow tip&rsquo;s tree so non-pair content
-    matches target/main&rsquo;s current state. That fixes consumer merges, which only ever look at
-    the tip. But anyone checking out an <em>older</em> shadow commit (<code>git checkout shadow~5</code>,
-    <code>git bisect</code>, archaeology) would see the chain&rsquo;s frozen outer state &mdash;
-    whatever the bootstrap or an earlier splice left there &mdash; not the outer state at the time
-    that commit corresponds to. M9 closes this gap during replay, without adding any commits to
-    shadow&rsquo;s history.
-  </p>
-  <p>
-    <strong>The mechanism.</strong> When <code>runReplayLoop</code> processes a source commit
-    <code>M</code> whose source parents include an echo&rsquo;d one (a B-side commit <code>x'</code>
-    whose trailer maps to an A-side commit <code>x</code>), the replayed commit <code>M'</code>
-    <em>is</em> the splice commit. There&rsquo;s no separate insertion. The change is in how the
-    engine constructs <code>M'</code>&rsquo;s <code>parentTree</code>:
-  </p>
-<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
-parentTree(M&prime;) = splice(x^{tree}, target.dir, previous_shadow_tip:target.dir)
-                        &uarr;                                  &uarr;
-                        outer from echo&rsquo;d A-side parent      dir/ from existing shadow chain
-                        (preserves x&rsquo;s outer)              (preserves earlier B-side commits like b1)
-</pre>
-  <p>
-    Then <code>buildRemappedTree</code> applies M&rsquo;s diff (= x&rsquo;s contributions on B side,
-    mapped to <code>target.dir/</code>) on top of that spliced parentTree, exactly as it does for
-    any other commit. The result has all three layers preserved:
-  </p>
-  <ul>
-    <li><strong>x&rsquo;s outer</strong> &mdash; from the outer portion of <code>x^{tree}</code>, kept by the splice.</li>
-    <li><strong>Earlier Fornax commits&rsquo; <code>dir/</code> changes</strong> (b1, b2&hellip; before x round-tripped) &mdash; from <code>previous_shadow_tip:target.dir</code>, kept by the splice.</li>
-    <li><strong>x&rsquo;s frontend contributions</strong> &mdash; from M&rsquo;s applied diff, overlaid on top.</li>
-  </ul>
-  <p>
-    Subsequent regular Fornax commits replayed after M&prime; inherit M&prime;&rsquo;s tree as
-    their <code>parentTree</code> (via <code>mappedParents[0]</code> normal lookup), so they
-    automatically carry x&rsquo;s outer forward until the next round-trip echoes a fresher A-side
-    commit. <code>git checkout</code> on any commit between two round-trips shows Realogic&rsquo;s
-    state at the most recent round-trip &mdash; useful for inspection, with no extra commits
-    cluttering shadow&rsquo;s history.
-  </p>
-  <p>
-    <strong>Relationship to M1.</strong> Both still needed:
-  </p>
-  <ul>
-    <li>M9 keeps intermediate-commit outer fresh as far back as the most recent round-tripped commit. But M9 only fires when an echo&rsquo;d parent is present. Outer-only A commits (e.g. <code>.claude/state.json</code> updates that never touch <code>dir/</code>) don&rsquo;t round-trip, don&rsquo;t echo, and so don&rsquo;t trigger M9.</li>
-    <li>M1 catches everything else at push time: tip&rsquo;s outer = target/main&rsquo;s <em>current</em>, including outer-only commits made after the latest round-trip. The tip is what consumers merge, so it has to be the freshest.</li>
-  </ul>
-  <p class="from">
-    <em>Degree of freedom:</em> use the echo&rsquo;d parent&rsquo;s tree raw vs. splice it with the
-    previous shadow tip&rsquo;s <code>dir/</code>. We splice. Using <code>x^{tree}</code> raw would
-    overwrite any earlier B-side <code>dir/</code> contributions (b1, b2&hellip;) with x&rsquo;s
-    A-side view of the synced subdirectory, losing Fornax&rsquo;s commits that landed on shadow
-    before x round-tripped. The splice keeps both: outer from the A-side, <code>dir/</code> from
-    the existing shadow chain, M&rsquo;s diff overlaid.
   </p>
 </div>
 
