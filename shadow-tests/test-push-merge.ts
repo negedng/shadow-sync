@@ -13,14 +13,14 @@ function git(cmd: string, cwd: string): string {
  * the external shadow branch.
  *
  *   env1:
- *     1. merge-ancestry — first push: shadow commit has 1 parent = seed tip
+ *     1. merge-ancestry — first push: shadow commit has 1 parent = external main tip
  *     2. branch-merge — local feature branch merged back, push replays
  *     3. merge-with-external-changes — round-trip: ext→ci-sync→merge→push
  *     4. preserves-non-dir — root-level files survive mergeShadow
  *
- *   env2 (isolated because it asserts seed-tip as unmapped first parent):
+ *   env2 (isolated because it asserts external-tip as unmapped first parent):
  *     5. merge-unmapped-parent — merge of an orphan branch on local produces
- *        a 2-parent shadow commit with the seed tip as first parent
+ *        a 2-parent shadow commit with the external main tip as first parent
  */
 export default function run() {
   // ── env1: four push-merge phases sharing one env ────────────────────
@@ -35,8 +35,8 @@ export default function run() {
     const parentLine1 = git(`rev-list --parents -1 ${env1.remoteName}/shadow/${env1.subdir}/main`, env1.localRepo);
     const parents1 = parentLine1.split(/\s+/).filter(Boolean);
     assertEqual(parents1.length - 1, 1, "[phase 1] forwarded commit has exactly 1 parent");
-    const seedTip = git(`rev-parse ${env1.remoteName}/main`, env1.localRepo);
-    assertEqual(parents1[1], seedTip, "[phase 1] parent is the external seed tip");
+    const extTip = git(`rev-parse ${env1.remoteName}/main`, env1.localRepo);
+    assertEqual(parents1[1], extTip, "[phase 1] parent is the external main tip");
     const msg1 = git(`log -1 --format=%B ${env1.remoteName}/shadow/${env1.subdir}/main`, env1.localRepo);
     assertIncludes(msg1, "Shadow-replayed-", "[phase 1] commit has replay trailer");
 
@@ -117,7 +117,7 @@ export default function run() {
   const env2 = createTestEnv("push-merge-unmapped");
   try {
     const sub = env2.subdir;
-    const seedTip2 = git(`rev-parse ${env2.remoteName}/main`, env2.localRepo);
+    const extTip2 = git(`rev-parse ${env2.remoteName}/main`, env2.localRepo);
 
     // Create an orphan branch with unrelated history
     git("checkout --orphan orphan", env2.localRepo);
@@ -145,7 +145,7 @@ export default function run() {
     const parentLine5 = git(`log -1 --format=%P ${env2.remoteName}/${shadowBranch2}`, env2.localRepo);
     const parents5 = parentLine5.split(/\s+/).filter(Boolean);
     assertEqual(parents5.length, 2, `[phase 5] replayed merge has 2 parents, got ${parents5.length}`);
-    assertEqual(parents5[0], seedTip2, "[phase 5] unmapped parent grafted onto external seed tip");
+    assertEqual(parents5[0], extTip2, "[phase 5] unmapped parent grafted onto external main tip");
     assertEqual(readExternalShadowFile(env2, "orphan.ts"), "from orphan\n", "[phase 5] orphan.ts on shadow");
     assertEqual(readExternalShadowFile(env2, "merge-marker.ts"), "merge marker\n", "[phase 5] merge-marker.ts on shadow");
   } finally {

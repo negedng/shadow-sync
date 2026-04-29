@@ -87,16 +87,16 @@ function _runSyncCore(options: SyncOptions): number {
     ensureRemote(pair.a);
     ensureRemote(pair.b);
 
-    // Fetch both remotes before replay. Target-side objects (seed trailer
-    // hashes, fallback parent) must exist locally for the replay loop to
-    // resolve SHA mappings and build trees. A fresh CI runner has neither
-    // cached, so both fetches are mandatory up front.
+    // Fetch both remotes before replay. Target-side objects (fallback parent,
+    // existing shadow branches for the dedup scan) must exist locally for the
+    // replay loop to resolve SHA mappings and build trees. A fresh CI runner
+    // has neither cached, so both fetches are mandatory up front.
     console.log(`\n══ Syncing pair '${pair.name}' (from ${fromSide}: ${source.remote} → ${target.remote}) ══`);
     git(["fetch", source.remote]);
     const targetFetchEarly = git(["fetch", target.remote], { safe: true });
     if (!targetFetchEarly.ok) {
       console.error(`  ⚠ Failed to fetch '${target.remote}': ${targetFetchEarly.stderr}`);
-      console.error(`    Continuing with local tracking refs — seed/divergence checks may be stale.`);
+      console.error(`    Continuing with local tracking refs — divergence checks may be stale.`);
     }
 
     // Determine branches to replay.
@@ -178,8 +178,9 @@ function _runSyncCore(options: SyncOptions): number {
 
           // Rewrite the replayed tip so its non-pair content tracks the
           // target side's current branch state instead of freezing at the
-          // seed-era tree.  No-op when target.dir is empty (B-side has no
-          // non-pair content) or when the composed tree already matches.
+          // tree the replay chain inherited from its first commit. No-op
+          // when target.dir is empty (B-side has no non-pair content) or
+          // when the composed tree already matches.
           const replayedSHA = composeShadowTip({
             target,
             branch,

@@ -14,13 +14,13 @@ function git(cmd: string, cwd: string): string {
  *
  * Phase 1 — no-ff merge with an earlier B-side commit (diagram scenario):
  *   A/main:  init --- b
- *   B/main:  seed --- a --- merge(a, b') --- c
+ *   B/main:  init --- a --- merge(a, b') --- c
  * The replayed merge must have the original `b` commit as its second parent
  * (not A/main's current tip).
  *
  * Phase 2 — FF merge with no extra B commits (round-trip no-op):
  *   A/main:  init --- c
- *   B/main:  seed --- c'  (b FF-merged the shadow)
+ *   B/main:  init --- c'  (b FF-merged the shadow)
  * Syncing B → A has no new commits to replay, but the echo mapping must
  * still advance shadow/pair/main on A to point at A's original `c`.
  */
@@ -31,7 +31,7 @@ export default function run() {
 
     // ── Phase 1: no-ff merge with B-side commit before it ─────────────────
 
-    // 1. Establish baseline — seed B with something then pull to create the shadow branch
+    // 1. Establish baseline — push a B-side commit then pull to create the shadow branch
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base.txt");
     const r1 = runCiSync(env);
     assertEqual(r1.status, 0, "[phase 1] initial pull should succeed");

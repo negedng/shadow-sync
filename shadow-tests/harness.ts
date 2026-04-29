@@ -79,13 +79,6 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   git(`remote add origin "${originBare}"`, localRepo);
   git("push origin main", localRepo);
 
-  // Create seed commit on main — records the external repo's current tip
-  // so ci-sync knows where to start replaying. The seed commit is on main's
-  // history, giving shadow branches shared ancestry for plain git merge.
-  const extTip = git("rev-parse team/main", localRepo);
-  git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, localRepo);
-  git("push origin main", localRepo);
-
   const primary: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking, remoteSubdir };
 
   const cleanup = () => {
@@ -118,11 +111,6 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   git(`remote add ${remoteName} "${remoteBare}"`, env.localRepo);
   git(`fetch ${remoteName}`, env.localRepo);
   fs.mkdirSync(path.join(env.localRepo, subdir), { recursive: true });
-
-  // Create seed commit on main for this remote
-  const extTip = git(`rev-parse ${remoteName}/main`, env.localRepo);
-  git(`commit --allow-empty -m "Seed shadow-sync for ${subdir}/ from ${remoteName}/main" -m "Shadow-seed: ${subdir} ${extTip}"`, env.localRepo);
-  git("push origin main", env.localRepo);
 
   const info: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking, remoteSubdir: "" };
   env.remotes.push(info);
@@ -401,8 +389,9 @@ export function getExternalShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): s
 
 /**
  * Merge the shadow branch into the local working branch.
- * Shadow commits now carry the full repo tree, so a plain merge works —
- * git finds the seed commit as the merge base and only dir/ files differ.
+ * Shadow commits carry the full repo tree, so a plain merge works —
+ * git finds the local repo's init commit as the merge base via the
+ * fallbackParent chain set up by replay.
  */
 export function mergeShadow(env: TestEnv, remote?: RemoteInfo): void {
   const subdir = remote?.subdir ?? env.subdir;

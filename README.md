@@ -174,7 +174,7 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 
 ## Setup
 
-1. Install shadow-sync and add scripts to your `package.json`:
+1. Install shadow-sync and add a script to your `package.json`:
 
 ```bash
 npm install negedng/shadow-sync cross-env tsx
@@ -183,7 +183,6 @@ npm install negedng/shadow-sync cross-env tsx
 ```json
 {
   "scripts": {
-    "setup": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-setup.ts",
     "sync": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-sync.ts"
   }
 }
@@ -196,25 +195,7 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 # Edit shadow-config.json with your pair definitions
 ```
 
-3. Record a seed baseline (tells sync where history starts). The seed commit is built via plumbing and pushed directly to the target remote — it never modifies your workspace HEAD, so this works the same in workspace and orchestrator modes:
-
-```bash
-npm run setup -- -r backend
-```
-
-Default `--from b` records RepoB's current tip as the baseline; the seed commit lands on RepoA's main. By default, setup seeds every branch present on both remotes (idempotent — re-running skips already-seeded branches). Pass `-b <branch>` to seed just one branch.
-
-4. Create the external repo with the same content as your subdirectory. The external repo must start with the same files so both sides agree on the baseline:
-
-```bash
-mkdir backend-repo && cd backend-repo && git init
-cp -r ../your-monorepo/backend/* .
-git add -A && git commit -m "Initial backend (from monorepo)"
-git remote add origin https://github.com/org/backend.git
-git push -u origin main
-```
-
-5. Sync and merge:
+3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, parented to the target's current `main` tip — so plain `git merge origin/shadow/<pair>/<branch>` always finds a merge base. The `Shadow-replayed-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
 
 ```bash
 npm run sync -- -r backend --from a    # push monorepo changes to external
@@ -222,13 +203,15 @@ npm run sync -- -r backend --from b    # pull external changes to monorepo
 git merge origin/shadow/backend/main   # merge the shadow branch
 ```
 
+The first sync is proportional to source-side history (per-commit replay). For a fresh monorepo joining mature source repos, run it locally once and push the resulting shadow branches; subsequent CI syncs only handle the delta.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Automated tests covering pull, push, merge, branching, binary files, LFS, symlinks, submodules, multi-seed, and more.
+Automated tests covering pull, push, merge, branching, binary files, LFS, symlinks, submodules, orphan-branch merges, and more.
 
 ## Files
 
@@ -236,10 +219,9 @@ Automated tests covering pull, push, merge, branching, binary files, LFS, symlin
 |------|---------|
 | `shadow-config.example.json` | Example pair definitions, trailers, git config overrides |
 | `shadow-common.ts` | Config, git helpers, unified replay engine |
-| `shadow-setup.ts` | Bootstrap: builds a seed commit via plumbing and pushes it to the target remote; additive across branches |
 | `shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `.shadowignore` | Ignore patterns (auto-discovered from source commit, like `.gitignore`) |
 | `shadow-sync-explained.html` | Detailed technical documentation |
-| `shadow-tests/` | 17 automated tests |
+| `shadow-tests/` | 16 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron) |
 | `.github/workflows/shadow-forward.yml` | CI push workflow (on shadow branch push) |

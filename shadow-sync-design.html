@@ -315,44 +315,42 @@
 </div>
 
 <div class="card" id="c4">
-  <h3><span class="ref ref-c">C4</span> Bootstrap by seeding at the divergence point, not by replaying each source&rsquo;s full history</h3>
+  <h3><span class="ref ref-c">C4</span> Bootstrap by replaying full source history, parented to target&rsquo;s init</h3>
   <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a></p>
-  <p class="from"><strong>Rejected alternative:</strong> <em>sync from init</em> &mdash; replay every commit from each source repo into the target in chronological order, preserving all history, and merge the two full histories together on the target side.</p>
+  <p class="from"><strong>Rejected alternative:</strong> <em>seed at divergence</em> &mdash; create a marker commit on each target branch anchoring the two trees at the moment sync begins, and replay only commits after the seed.</p>
   <p>
     <a class="ref ref-c" href="#c1">C1</a> demands a merge-base between source and target. Two real ways to establish one:
   </p>
   <ul>
     <li>
-      <strong>Seed at divergence</strong> (what we do): create a single commit anchoring the two
-      trees at the moment sync begins. Source history before that point stays on the source repo;
-      the target sees a fresh divergence point and goes from there.
+      <strong>Sync from init</strong> (what we do): replay every commit from each source repo into
+      the target. The first replayed root commit on each branch parents to the target&rsquo;s
+      <code>main</code> tip (typically the empty init commit on a fresh monorepo), so all shadow
+      branches share the target&rsquo;s init as a common ancestor. Source history is preserved on
+      the target; <code>git blame</code> reaches back to the original commits.
     </li>
     <li>
-      <strong>Sync from init</strong>: replay every commit from each source repo into the target
-      in chronological order, then merge the two histories. The target becomes the union of both
-      sources&rsquo; full histories plus its own.
+      <strong>Seed at divergence</strong>: create one no-op commit per pair+branch, anchoring shared
+      ancestry without replaying prior history. Faster to bootstrap, but loses pre-seed
+      archaeology and adds a separate setup phase consumers have to remember to run.
     </li>
   </ul>
   <p>
-    Sync-from-init gives deeper archaeology on the target (<code>git blame</code> reaches back
-    forever), but it&rsquo;s slow to bootstrap (potentially millions of commits), rewrites the
-    target&rsquo;s own history to include two previously-independent histories, and confuses
-    chronology whenever a source was initialised before the target was. Seed-at-divergence is
-    fast and reversible; the cost is that pre-seed <code>git blame</code> on the target resolves
-    to the seed commit and has to be chased back to the source repo.
-  </p>
-  <p>
-    Implementation: <code>shadow-setup</code> creates one commit per pair+branch via
-    <code>commit-tree</code>, reusing the target&rsquo;s current tree and parenting the target&rsquo;s
-    tip. A <code>Shadow-seed</code> trailer points at the source tip. Tree unchanged &rarr; no
-    content drift. Target tip as parent &rarr; ancestry established. The setup is idempotent
-    under <a class="ref ref-r" href="#r5">R5</a>.
+    Sync-from-init costs a one-time bootstrap proportional to source-side history (per-commit
+    replay through <code>commit-tree</code> plumbing). For a fresh monorepo joining mature source
+    repos this is run once locally and the resulting shadow branches pushed; subsequent CI syncs
+    only handle deltas. The benefit is that the design has no separate setup step and no seed
+    trailer to maintain &mdash; the empty init commit on the monorepo serves as the natural common
+    ancestor for plain <code>git merge</code> from any pair&rsquo;s shadow branch. Chronologies
+    look jumpy (source commit dates predate the target&rsquo;s init) but topology is correct and
+    <code>merge-base</code> always answers.
   </p>
   <p class="from">
-    <em>Degree of freedom within &ldquo;seed at divergence&rdquo;:</em> a content-preserving seed
-    (reuse the target&rsquo;s tree, just add a trailer) vs. a content-modifying seed (overwrite the
-    target&rsquo;s tree with the source&rsquo;s). The latter would trash the target&rsquo;s files on
-    <code>main</code> at seed time, so wasn&rsquo;t viable.
+    <em>Degree of freedom within &ldquo;sync from init&rdquo;:</em> per-commit replay vs. a single
+    bulk import (e.g. <code>git filter-repo --to-subdirectory-filter</code> followed by a merge).
+    The bulk approach mangles SHAs before they can be put into trailers, breaking
+    <a class="ref ref-c" href="#c2">C2</a>&rsquo;s dedup &mdash; so per-commit replay is the only path
+    consistent with the rest of the design.
   </p>
 </div>
 
@@ -399,15 +397,25 @@
 </div>
 
 <div class="card" id="m2">
-  <h3><span class="ref ref-m">M2</span> Unmapped merge parents fall back to the target&rsquo;s branch tip</h3>
+  <h3><span class="ref ref-m">M2</span> Unmapped parents (including roots) fall back to the target&rsquo;s branch tip</h3>
   <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-c" href="#c4">C4</a></p>
   <p>
-    <a class="ref ref-r" href="#r2">R2</a> demands that merge topology survive. <a class="ref ref-c" href="#c4">C4</a> creates a hard boundary &mdash;
-    anything before the seed doesn&rsquo;t exist in the target. Both together guarantee some source
-    merges will reference parents we can&rsquo;t map (commits before the seed, or on branches we don&rsquo;t
-    sync). Wiring those parents to the target&rsquo;s branch tip keeps the merge a merge and keeps
-    <code>git merge-base</code> returning a real ancestor. The ancestry edge sometimes jumps
-    further than it did on the source &mdash; see <a href="#unexpected">&sect;4</a>.
+    <a class="ref ref-r" href="#r2">R2</a> demands that merge topology survive. <a class="ref ref-c" href="#c4">C4</a>
+    starts replay from each source root and parents it to the target&rsquo;s current
+    <code>main</code> tip. Some source commits still reference parents we can&rsquo;t map &mdash;
+    typically merges that pull in branches we don&rsquo;t sync, or root commits of orphan branches
+    that get merged into <code>main</code>. Wiring those parents to the target&rsquo;s branch tip
+    keeps the merge a merge and keeps <code>git merge-base</code> returning a real ancestor. The
+    ancestry edge sometimes jumps further than it did on the source &mdash; see
+    <a href="#unexpected">&sect;4</a>.
+  </p>
+  <p class="from">
+    <em>Subtlety we ran into:</em> with a path filter, <code>git rev-list --parents</code>
+    silently rewrites merge parents whose ancestors are TREESAME at the path, dropping them from
+    the output. That breaks parent-fallback (we&rsquo;d never see the parent that needed
+    fallback). The replay engine therefore selects commits via path-filtered <code>rev-list</code>
+    but reads each commit&rsquo;s <em>true</em> parents via a separate
+    <code>git log --no-walk</code> pass, bypassing simplification.
   </p>
   <p class="from">
     <em>Degree of freedom:</em> the fallback target. We pick target-tip. Dropping the parent
@@ -487,13 +495,27 @@
 </div>
 
 <div class="card">
-  <h3><span class="tag tag-red">!</span> Seed commits look odd in <code>git log</code></h3>
+  <h3><span class="tag tag-red">!</span> First sync is proportional to source history length</h3>
   <p class="from">From <a class="ref ref-c" href="#c4">C4</a></p>
   <p>
-    Because seeds reuse the target&rsquo;s tree and add only a trailer, they show up in history as
-    no-content commits. First-time reviewers flag them as bugs. The diagram in
-    <code>shadow-sync-explained.html</code> exists largely to explain that those nodes are
-    load-bearing.
+    Because we replay every source commit per-pair on bootstrap, the first sync against a mature
+    source repo can take minutes to tens of minutes. The expected workflow is to run the first
+    sync locally, push the resulting shadow branches, and let CI pick up only the deltas
+    afterward. Steady-state sync runs are unaffected &mdash; the
+    <code>Shadow-replayed-&lt;remote&gt;</code> trailer makes already-replayed commits a no-op
+    skip.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Source commit dates predate target init</h3>
+  <p class="from">From <a class="ref ref-c" href="#c4">C4</a></p>
+  <p>
+    Replayed commits keep their original author dates, which are typically older than the
+    target&rsquo;s init commit. <code>git log --date-order</code> on the target therefore looks
+    jumpy &mdash; old commits appearing &ldquo;after&rdquo; the target&rsquo;s init. Topology is
+    correct (<code>merge-base</code> answers properly) and <code>git log --topo-order</code>
+    reads naturally; only date-ordered views surprise.
   </p>
 </div>
 

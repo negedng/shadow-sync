@@ -8,8 +8,7 @@
   ],
 
   "trailers": {
-    "replayed": "Shadow-replayed",
-    "seed": "Shadow-seed"
+    "replayed": "Shadow-replayed"
   },
 
   "gitConfigOverrides": {

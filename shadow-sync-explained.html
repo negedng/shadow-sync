@@ -256,7 +256,12 @@
   or a standalone orchestrator repo (both are added as remotes).
 </p>
 
-<h3>Seed, shadow sync, and merge at a glance</h3>
+<h3>Bootstrap, shadow sync, and merge at a glance</h3>
+<p style="font-size: 0.9rem; color: #555; margin-bottom: 0.6rem;">
+  The dashed vertical line in the diagram below marks the <em>common ancestor</em> &mdash;
+  the target side&rsquo;s init commit (typically the empty initial commit on a fresh monorepo)
+  to which every replayed root commit gets parented. There is no separate setup step.
+</p>
 
 <figure class="flow-figure">
   <svg viewBox="0 0 1200 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Shadow sync flow diagram">
@@ -273,9 +278,9 @@
     <rect x="0" y="30" width="1200" height="230" fill="#f3f7ff"/>
     <rect x="0" y="290" width="1200" height="230" fill="#f1fbf4"/>
 
-    <!-- Seed vertical dashed line (full height) -->
+    <!-- Common-ancestor vertical dashed line (full height) -->
     <line x1="300" y1="0" x2="300" y2="560" stroke="#555" stroke-width="1.2" stroke-dasharray="3 4"/>
-    <text x="285" y="555" font-size="12" font-weight="700" fill="#333">seed</text>
+    <text x="285" y="555" font-size="12" font-weight="700" fill="#333">init</text>
 
     <!-- Track labels (left) -->
     <text x="8"  y="70"  font-size="12" font-weight="600" fill="#1d60d9">A / feature</text>
@@ -467,10 +472,6 @@
 <table>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr>
-    <td><code>npm run setup -- -r backend</code></td>
-    <td><strong>Bootstrap.</strong> Builds a seed commit via <code>git commit-tree</code> and pushes it to the target remote, anchoring shared history. Run once per pair &mdash; by default it seeds every branch present on both remotes and is idempotent (re-running skips already-seeded branches). Pass <code>-b &lt;branch&gt;</code> to seed a single branch.</td>
-  </tr>
-  <tr>
     <td><code>npm run sync -- --from b</code></td>
     <td><strong>Pull.</strong> Replay RepoB's new commits into <code>shadow/</code> branches on RepoA. The <code>backend/</code> prefix is added.</td>
   </tr>
@@ -484,7 +485,7 @@
   </tr>
   <tr>
     <td><code>npm test</code></td>
-    <td>Run the 17 automated test files (covers pull, push, merges, branches, multi-seed, echo mapping, multi-pair root files, edge cases, multi-repo).</td>
+    <td>Run the 16 automated test files (covers pull, push, merges, branches, echo mapping, multi-pair root files, edge cases, multi-repo).</td>
   </tr>
 </table>
 
@@ -508,7 +509,7 @@
 <p style="margin: 0.3rem 0 0.6rem; padding-left: 0;"><strong><a href="#walkthrough">Walkthrough</a>:</strong> Joining two mature repos into a monorepo</p>
 <ol>
   <li><a href="#config">Configuration</a></li>
-  <li><a href="#seed">Seed &amp; Bootstrap</a></li>
+  <li><a href="#bootstrap">Bootstrap from Init</a></li>
   <li><a href="#sync-steps">Steps of a Sync</a></li>
   <li><a href="#engine">The Replay Engine (Phases)</a></li>
   <li><a href="#diff">How the Diff Works</a></li>
@@ -563,36 +564,16 @@ org/monorepo
 ├─ README.md                  (monorepo-only, not synced)
 └─ .github/workflows/         (monorepo-only, not synced)</div>
 
-<h3>Step 1 &mdash; Populate the monorepo with current tips</h3>
+<h3>Step 1 &mdash; Start with an empty (or near-empty) monorepo</h3>
 <p>
-  Copy the current contents of each source repo into its target subdirectory. This is a plain
-  file copy &mdash; <em>not</em> a merge or a clone &mdash; because we&rsquo;re establishing the
-  divergence point, not importing prior history (see <a href="#seed">&sect;2</a>).
+  No content copy is needed up front. The monorepo&rsquo;s init commit (or whatever its current
+  <code>main</code> tip is) becomes the natural common ancestor for both pairs&rsquo; shadow
+  branches once the first sync runs.
 </p>
 
 <pre><code>git clone https://github.com/org/monorepo.git
 cd monorepo
-
-# Grab current frontend tip as plain files
-git clone --depth 1 https://github.com/org/frontend.git /tmp/frontend-tip
-mkdir frontend
-cp -r /tmp/frontend-tip/. frontend/
-rm -rf frontend/.git
-
-# Same for backend
-git clone --depth 1 https://github.com/org/backend.git /tmp/backend-tip
-mkdir backend
-cp -r /tmp/backend-tip/. backend/
-rm -rf backend/.git
-
-git add -A
-git commit -m "Initial frontend/ and backend/ (from live repos as of today)"
-git push origin main</code></pre>
-
-<p>
-  Everything older than this commit &mdash; four years of frontend history, three of backend
-  &mdash; stays on the original repos. The monorepo starts fresh from this point.
-</p>
+# (or just git init + push if it doesn't exist yet)</code></pre>
 
 <h3>Step 2 &mdash; Install and configure</h3>
 <p>
@@ -602,11 +583,10 @@ git push origin main</code></pre>
 
 <pre><code>npm install negedng/shadow-sync cross-env tsx</code></pre>
 
-<p>Add the scripts to the monorepo&rsquo;s <code>package.json</code>:</p>
+<p>Add the script to the monorepo&rsquo;s <code>package.json</code>:</p>
 
 <pre><code>{
   "scripts": {
-    "setup": "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-setup.ts",
     "sync":  "cross-env SHADOW_CONFIG=./shadow-config.json tsx node_modules/shadow-sync/shadow-sync.ts"
   }
 }</code></pre>
@@ -628,20 +608,27 @@ git push origin main</code></pre>
   ]
 }</code></pre>
 
-<h3>Step 3 &mdash; Seed both pairs</h3>
+<h3>Step 3 &mdash; First sync (bootstrap)</h3>
 <p>
-  Anchors the ancestry on both sides so future syncs can do a plain 3-way merge. Idempotent &mdash;
-  re-running skips already-seeded branches.
+  Replays each source repo&rsquo;s full history into the matching <code>shadow/</code> branch on
+  the monorepo. Each pair&rsquo;s root commit gets parented to the monorepo&rsquo;s current
+  <code>main</code> tip, so all shadow branches share the same common ancestor &mdash; plain
+  <code>git merge</code> works from day one.
 </p>
 
-<pre><code>npm run setup -- -r frontend
-npm run setup -- -r backend</code></pre>
+<pre><code>npm run sync -- -r frontend --from b
+npm run sync -- -r backend  --from b
+git fetch origin
+git merge origin/shadow/frontend/main
+git merge origin/shadow/backend/main
+git push origin main</code></pre>
 
 <p>
-  After this, <code>org/frontend/main</code> has one new commit (a <code>Shadow-seed</code>
-  carrying its existing tree unchanged, parented on the old tip), and <code>org/monorepo/main</code>
-  has one as well. Those two seeds are what give plain <code>git merge</code> a merge-base to
-  find later. No other history on either repo is touched.
+  The first sync is proportional to source-side history (per-commit replay). For mature repos this
+  can take minutes to tens of minutes, so it&rsquo;s typically run locally once and the resulting
+  shadow branches pushed; CI then handles only deltas. The
+  <code>Shadow-replayed-&lt;remote&gt;</code> trailer makes already-replayed commits a no-op skip
+  on subsequent runs.
 </p>
 
 <h3>Step 4 &mdash; Sync, both directions</h3>
@@ -672,21 +659,21 @@ manual commands above are just for first-time testing.</p>
   from a pre-monorepo world.
 </p>
 
-<h3>What about pre-seed <code>git blame</code>?</h3>
+<h3>What about <code>git blame</code> for old code?</h3>
 <p>
-  On the monorepo side, <code>git blame frontend/src/foo.ts</code> resolves to the seed commit
-  for any line that existed before sync began; for deeper archaeology, developers go to
-  <code>org/frontend</code>, which still has its full four-year history intact. This is the
-  deliberate trade for a fast, reversible bootstrap (design choice C4 in the
-  <a href="shadow-sync-design.html">design plan</a>).
+  Replayed commits keep their original author, date, and message, so
+  <code>git blame frontend/src/foo.ts</code> on the monorepo resolves to the actual commit that
+  introduced each line, with the original SHA recorded in the
+  <code>Shadow-replayed-&lt;remote&gt;</code> trailer. Deep archaeology works the same on both
+  sides.
 </p>
 
 <h3>What if you want the reverse direction &mdash; split an existing monorepo out?</h3>
 <p>
   Same mechanics, flipped. Start with a monorepo, create two empty target repos
-  (<code>org/frontend</code>, <code>org/backend</code>), populate each with the current contents
-  of the respective subdirectory from the monorepo (plain file copy + initial commit), configure
-  and seed. Sync now flows both ways from day one.
+  (<code>org/frontend</code>, <code>org/backend</code>), and run the first sync with
+  <code>--from a</code>. The monorepo&rsquo;s history under each <code>dir/</code> gets replayed
+  into the new repos. Sync flows both ways from day one.
 </p>
 
 <!-- ── Configuration ──────────────────────────────────────────────────── -->
@@ -708,7 +695,7 @@ manual commands above are just for first-time testing.</p>
       "b": { "remote": "repo-b", "url": "https://github.com/org/repo-b.git", "dir": "" }
     }
   ],
-  "trailers": { "replayed": "Shadow-replayed", "seed": "Shadow-seed" },
+  "trailers": { "replayed": "Shadow-replayed" },
   "gitConfigOverrides": {
     "core.autocrlf": "false",
     "core.safecrlf": "false",
@@ -723,11 +710,11 @@ manual commands above are just for first-time testing.</p>
 <h3>Key fields</h3>
 <table>
   <tr><th>Field</th><th>Purpose</th></tr>
-  <tr><td><code>name</code></td><td>Pair identifier. Used in shadow branch names (<code>shadow/backend/main</code>) and in the seed trailer.</td></tr>
+  <tr><td><code>name</code></td><td>Pair identifier. Used in shadow branch names (<code>shadow/backend/main</code>).</td></tr>
   <tr><td><code>remote</code></td><td>Git remote name. Use <code>"origin"</code> if the tool runs inside that repo.</td></tr>
   <tr><td><code>url</code></td><td>Remote URL. Omit if the remote already exists (e.g. <code>origin</code>).</td></tr>
   <tr><td><code>dir</code></td><td>Path prefix on that side. <code>"backend"</code> means files live under <code>backend/</code>; <code>""</code> means repo root.</td></tr>
-  <tr><td><code>trailers</code></td><td>Trailer key bases. <code>replayed</code> becomes <code>Shadow-replayed-{remote}</code>; <code>seed</code> stays literal.</td></tr>
+  <tr><td><code>trailers</code></td><td>Trailer key base. <code>replayed</code> becomes <code>Shadow-replayed-{remote}</code> on every replayed commit.</td></tr>
   <tr><td><code>gitConfigOverrides</code></td><td>Per-command <code>-c key=value</code> overrides for every <code>git</code> invocation.</td></tr>
   <tr><td><code>maxBuffer</code></td><td>Max bytes for a single git subprocess output. Default 50&nbsp;MB; raise for large-diff commits.</td></tr>
   <tr><td><code>shadowBranchPrefix</code></td><td>First segment of shadow branch names. Default <code>"shadow"</code>.</td></tr>
@@ -769,11 +756,6 @@ manual commands above are just for first-time testing.</p>
     <td>Required for both directions. Must have Contents: Read+Write on every external repo the config references.</td>
   </tr>
   <tr>
-    <td><strong>Seed lands on</strong></td>
-    <td>The target remote (same plumbing either way &mdash; see <a href="#seed">section 2</a>).</td>
-    <td>The target remote (same).</td>
-  </tr>
-  <tr>
     <td><strong>Example in this repo</strong></td>
     <td><code>sht2-main</code> (main-plus-two-pair-repos, monorepo runs the tool).</td>
     <td><code>sht3-orchestrator</code> (runs against <code>sht3-main</code> + <code>sht3-backend</code> + <code>sht3-frontend</code>).</td>
@@ -791,51 +773,45 @@ manual commands above are just for first-time testing.</p>
   section for copy-pastable templates.
 </div>
 
-<!-- ── 2. Seed & Bootstrap ─────────────────────────────────────────────── -->
+<!-- ── 2. Bootstrap from Init ──────────────────────────────────────────── -->
 
-<h2 id="seed">2. Seed &amp; Bootstrap</h2>
-
-<p>
-  Before the first sync, you must record a <strong>seed</strong>. The seed is a marker commit that tells
-  the replay engine where history begins &mdash; everything before it is skipped.
-</p>
-
-<pre><code>npm run setup -- -r backend</code></pre>
+<h2 id="bootstrap">2. Bootstrap from Init</h2>
 
 <p>
-  <code>shadow-setup.ts</code> uses plumbing (<code>git commit-tree</code>) to build the seed commit
-  as a child of the target branch's current tip and pushes it directly to the target remote
-  (<code>git push &lt;target&gt; &lt;seedSHA&gt;:refs/heads/&lt;branch&gt;</code>). The workspace's HEAD is never touched.
-  This means setup behaves identically in workspace mode (target is <code>origin</code>) and orchestrator mode
-  (target is an external remote) &mdash; no more "seed landed on the wrong repo" footgun.
-</p>
-
-<p>The seed commit carries a trailer:</p>
-<pre><code>Seed shadow-sync for backend from repo-b/main
-
-Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
-
-<p>
-  The trailer records the pair name and the tip hash of the source branch at that moment.
-  During replay, <code>findSeeds()</code> scans the log for this trailer and uses matching hashes as
-  boundaries in <code>git rev-list</code> to exclude ancestor commits.
+  There is no separate setup step. The first <code>npm run sync</code> against a fresh target
+  replays each source branch&rsquo;s full history into the matching <code>shadow/</code> branch,
+  parenting the very first replayed root commit to the target&rsquo;s current <code>main</code>
+  tip. That tip &mdash; typically the empty init commit on a brand-new monorepo &mdash; becomes
+  the natural common ancestor for every shadow branch the tool ever creates, so plain
+  <code>git merge origin/shadow/&hellip;</code> always finds a merge base.
 </p>
 
 <div class="highlight-box">
-  <strong>Seed mapping:</strong> the engine maps <code>seedTrailerHash &harr; seedCommitHash</code>
-  bidirectionally. When a replayed commit's first parent predates the seed, the mapping substitutes the seed
-  commit itself, giving the shadow branch shared ancestry with the target's main branch &mdash; so plain
-  <code>git merge</code> works.
+  <strong>Per-commit replay through plumbing.</strong> <code>commit-tree</code> reproduces each
+  source commit on the target side with the same author, date, and message, plus a
+  <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;originalSHA&gt;</code> trailer. A subsequent sync
+  scans the target&rsquo;s shadow branches for those trailers, treats any commit it finds there as
+  &ldquo;already replayed,&rdquo; and skips it &mdash; making the operation idempotent and
+  re-runnable from any environment.
 </div>
 
 <div class="highlight-box">
-  <strong>Multi-seed (per branch):</strong> setup is additive and idempotent. The default invocation
-  (<code>npm run setup -- -r backend</code>) seeds every branch present on both remotes, skipping any that
-  already have a seed trailer in their history. Pass <code>-b client-x</code> to seed a single branch.
-  <code>findSeeds()</code> returns every seed for a pair; <code>findSeedBoundaries()</code> then picks, for each seed,
-  whichever of its two hashes is reachable from any source ref and uses those as rev-list boundaries.
-  This supports the case where both sides already have long-lived divergent branches at setup time &mdash;
-  each branch gets its own anchor without replaying pre-seed history.
+  <strong>Bootstrap cost.</strong> First sync is proportional to source-side history length.
+  Mature repos can take minutes to tens of minutes (per-commit <code>commit-tree</code> is slower
+  than a bulk import but preserves the trailer-based dedup that the rest of the design relies on).
+  Steady-state syncs only handle deltas, since already-replayed commits are skipped via the
+  trailer scan. Practical pattern: run the first sync locally once, push the resulting shadow
+  branches, and let CI take over from there.
+</div>
+
+<div class="highlight-box">
+  <strong>Unmapped parents fall back to target&rsquo;s tip.</strong> Some source commits reference
+  parents the replay can&rsquo;t map &mdash; merges that pulled in branches we don&rsquo;t sync,
+  or roots of orphan branches merged into <code>main</code>. Each such parent is wired to the
+  target branch&rsquo;s current tip via <code>fallbackParent</code>, keeping merges merges and
+  <code>merge-base</code> answering correctly. Root commits also adopt
+  <code>fallbackParent</code>, which is what anchors the bootstrap to the target&rsquo;s init in
+  the first place.
 </div>
 
 <!-- ── 3. Steps of a Sync ──────────────────────────────────────────────── -->
@@ -855,11 +831,10 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
   </div></li>
   <li><span class="step-num">2</span><div>
     <strong>Fetch both remotes.</strong> <code>git fetch {source.remote}</code> for the commits to replay,
-    and <code>git fetch {target.remote}</code> so target-side objects &mdash; seed trailer hashes (which are
-    target-side commit SHAs carried in the seed trailer), the <code>fallbackParent</code>
-    (<code>{target}/main</code>'s tip), and the current shadow-branch tips &mdash; all exist locally before
-    the replay engine starts resolving them. On a fresh CI runner, neither is cached, so both fetches are
-    mandatory up front.
+    and <code>git fetch {target.remote}</code> so target-side objects &mdash; the
+    <code>fallbackParent</code> (<code>{target}/main</code>'s tip) and the current shadow-branch tips
+    used by the replayed-trailer scan &mdash; exist locally before the replay engine starts resolving
+    them. On a fresh CI runner, neither is cached, so both fetches are mandatory up front.
   </div></li>
   <li><span class="step-num">3</span><div>
     <strong>Determine branches.</strong>
@@ -879,9 +854,10 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     <strong>Compose the shadow tip.</strong> For each replayed branch, fetch the target remote so local
     tracking refs are current, then run <code>composeShadowTip()</code>. It rewrites the tip commit's tree so
     <em>non-pair</em> content (files outside <code>target.dir</code>) tracks the target branch's current state
-    instead of freezing at the seed-era tree. No-op when <code>target.dir</code> is empty or when the composed
-    tree already matches the replayed tree. The result is the SHA actually destined for the target
-    (<code>replayedSHA</code>). See <a href="#tree">section 6</a> for the splice mechanics.
+    instead of freezing at whatever non-pair tree the replay chain inherited from its first commit.
+    No-op when <code>target.dir</code> is empty or when the composed tree already matches the replayed tree.
+    The result is the SHA actually destined for the target (<code>replayedSHA</code>). See
+    <a href="#tree">section 6</a> for the splice mechanics.
   </div></li>
   <li><span class="step-num">7</span><div>
     <strong>Reconcile and push.</strong> For each branch, compare <code>replayedSHA</code> with the target's current
@@ -923,19 +899,15 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     and reuse the existing replayed SHA instead of duplicating work.
   </div></li>
   <li><span class="step-num">2</span><div>
-    <strong>Find all seeds.</strong> <code>findSeeds()</code> searches the local log (<code>--all</code>) for
-    every <code>Shadow-seed: {pairName} {hash}</code> trailer matching the pair. Each entry yields a
-    <code>{seedTrailerHash, seedCommitHash}</code> record. For each seed, <code>findSeedBoundaries()</code> tests
-    both hashes against the source refs and keeps whichever is reachable &mdash; so a pair with multiple
-    anchored branches produces multiple boundaries.
+    <strong>Collect commits in topological order.</strong> <code>collectSourceCommits()</code> runs
+    <code>git rev-list --topo-order --reverse</code> from each branch tip, narrowing to commits that touch
+    the source subdirectory (where <code>dir</code> is non-empty). Then a separate
+    <code>git log --no-walk --format=%H&nbsp;%P</code> pass reads each commit&rsquo;s <em>true</em> parent
+    list. This second pass is what protects merge topology: <code>rev-list --parents</code> with a path
+    filter silently rewrites away any merge parent whose ancestors are TREESAME at the path, which would
+    otherwise demote merges to linear commits on the shadow side.
   </div></li>
   <li><span class="step-num">3</span><div>
-    <strong>Collect commits in topological order.</strong> <code>collectSourceCommits()</code> runs
-    <code>git rev-list --topo-order --reverse</code> from each branch tip, excluding commits reachable from
-    any seed boundary (<code>^seed1 ^seed2 &hellip;</code>) and (where <code>dir</code> is non-empty) narrowing
-    to commits that touch the source subdirectory.
-  </div></li>
-  <li><span class="step-num">4</span><div>
     <strong>Filter.</strong> <code>filterNewCommits()</code> drops commits already in the mapping (skipped &mdash;
     already replayed) and echo commits that carry the <em>target's</em> remote trailer (round-trip prevention &mdash;
     see <a href="#dedup">Deduplication</a>). For each echo, the original target-side hash is read out of the
@@ -943,14 +915,13 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
     as <code>echo &rarr; original</code>. Subsequent commits whose parent is the echo will then be wired to
     the original commit object directly.
   </div></li>
-  <li><span class="step-num">5</span><div>
-    <strong>Seed mapping &amp; fallback parent.</strong> <code>seedShaMapping()</code> records
-    <code>seedTrailerHash &harr; seedCommitHash</code> in both directions for every seed. <code>fallbackParent</code>
-    is set to the target's main tip &mdash; any source parent that <em>still</em> doesn't map after the echo
-    pass (seed boundary, path filter, orphan merge, or an echo whose original was force-removed) falls back
-    to this, so merge commits stay merges on the shadow side.
+  <li><span class="step-num">4</span><div>
+    <strong>Set the fallback parent.</strong> <code>fallbackParent</code> is the target&rsquo;s
+    <code>main</code> tip. Any source parent that doesn&rsquo;t map (orphan-branch root, merge with an
+    out-of-scope parent, or root commit at the start of bootstrap) falls back to this &mdash; so merge
+    commits stay merges and the bootstrap chain anchors to the target&rsquo;s init.
   </div></li>
-  <li><span class="step-num">6</span><div>
+  <li><span class="step-num">5</span><div>
     <strong>Replay loop.</strong> <code>runReplayLoop()</code> walks the remaining commits in topo order:
     load <code>.shadowignore</code> from the source tree, compute the diff (see section 5), build a remapped tree
     (section 6), resolve parents via the SHA mapping, and create a new commit preserving original author,
@@ -1043,11 +1014,13 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 <h3>Tip-tree refresh before push (<code>composeShadowTip</code>)</h3>
 <p>
   The replay chain above is path-scoped. Each replayed tree is built from the <em>previous</em> replayed
-  tree, which traces back to the seed tree. Files outside <code>{pair.dir}/</code> are carried through
-  every replayed commit unchanged, so they stay frozen at their seed-era content. If the target side has
-  since modified any such file &mdash; a root README, another pair's directory, CI config &mdash; a later
-  <code>git merge origin/shadow/{pair}/{branch}</code> on the target would silently revert it, because
-  the shadow tree holds seed-era content where the target's current branch holds up-to-date content.
+  tree, which traces back to the bootstrap tree (the target&rsquo;s init at the moment of first sync).
+  Files outside <code>{pair.dir}/</code> are carried through every replayed commit unchanged, so they
+  stay frozen at whatever the target&rsquo;s tree looked like when the replay chain was first built.
+  If the target side has since modified any such file &mdash; a root README, another pair's directory,
+  CI config &mdash; a later <code>git merge origin/shadow/{pair}/{branch}</code> on the target would
+  silently revert it, because the shadow tree holds stale non-pair content where the target's current
+  branch holds up-to-date content.
 </p>
 <p>
   <code>composeShadowTip()</code> fixes this at push time with a single tree splice: take the target
@@ -1088,8 +1061,8 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
   directory, CI config &mdash; and the replay engine never touches them: the path filter drops them at
   commit collection, and they never produce replayed counterparts. But the shadow branch is still what the
   target team merges into their main branch, and <code>git merge</code> compares the <em>whole</em> tree,
-  not just the pair dir. Without the splice, the shadow tip's non-pair files would be frozen at the seed,
-  and the user-facing merge would silently revert <code>x</code> and <code>y</code>.
+  not just the pair dir. Without the splice, the shadow tip's non-pair files would be frozen at the
+  bootstrap tree, and the user-facing merge would silently revert <code>x</code> and <code>y</code>.
 </p>
 <p>
   <code>composeShadowTip</code> runs on every <code>--from b</code> (and symmetrically on
@@ -1110,7 +1083,7 @@ Shadow-seed: backend 3fcc1ed4a5c0bdc92f4a7...</code></pre>
 <p>
   When source history contains merge commits, the replay engine preserves them.
   <code>resolveParents()</code> maps each source parent hash to its replayed equivalent using the SHA mapping,
-  and falls back to <code>fallbackParent</code> for anything that doesn't map (seed boundary, path filter, orphan merges).
+  and falls back to <code>fallbackParent</code> for anything that doesn't map (orphan merges, root commits at the start of a bootstrap, or merge parents on branches we don&rsquo;t sync).
   Duplicates are removed. The replayed merge is created with all resolved parents:
 </p>
 <pre><code>git commit-tree {tree} -p {parent1} -p {parent2} ... -m {message}</code></pre>
@@ -1406,10 +1379,9 @@ const result = runSync({ from: "b", pair: "backend" });
   <tr><th>File</th><th>Purpose</th></tr>
   <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine, tree builder, trailer management, preflight checks</td></tr>
   <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, merge reconciliation. Also exports <code>runSync</code> for in-process use.</td></tr>
-  <tr><td><code>shadow-setup.ts</code></td><td>Bootstrap: builds seed commits via <code>git commit-tree</code> and pushes them to the target remote. Default seeds every common branch; <code>-b &lt;branch&gt;</code> seeds one. Idempotent — re-running skips already-seeded branches.</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
   <tr><td><code>.shadowignore</code></td><td>Per-repo file-exclusion patterns (auto-discovered from source tree)</td></tr>
-  <tr><td><code>shadow-tests/</code></td><td>17 consolidated test files: pull-content, pull-paths, pull-branches, pull-multi-branch-seed, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, pull-echo-mapping, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, multi-pair-root-files, round-trip</td></tr>
+  <tr><td><code>shadow-tests/</code></td><td>16 consolidated test files: pull-content, pull-paths, pull-branches, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, pull-echo-mapping, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, multi-pair-root-files, round-trip</td></tr>
   <tr><td><code>.github/workflows/shadow-sync.yml</code></td><td>CI workflow: pull from B on schedule</td></tr>
   <tr><td><code>.github/workflows/shadow-forward.yml</code></td><td>CI workflow: push from A on schedule (needs PAT)</td></tr>
 </table>
