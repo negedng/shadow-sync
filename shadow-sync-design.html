@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R5</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C7</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C4 are the major ones, C5&ndash;C7 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M6</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C8</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C8 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -199,31 +199,29 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 
 <h2 id="requirements">1. Requirements</h2>
-<p>What the product has to do. Five items, nothing more. Everything else in this document derives from these.</p>
+<p>What the product has to do. Six items, nothing more. Everything else in this document derives from these.</p>
 
 <div class="card" id="r1">
-  <h3><span class="ref ref-r">R1</span> One deployment supports multiple independent pairs of repos</h3>
+  <h3><span class="ref ref-r">R1</span> One deployment, multiple sync pairs</h3>
   <p>
-    A pair is two repos that share a subdirectory of content; the same deployment needs to run
-    several pairs side by side &mdash; e.g. a <em>backend</em> pair and a <em>frontend</em> pair,
-    each with its own two repos, its own <code>dir</code>, and its own <code>.shadowignore</code>.
-    Pairs are named and independently addressable. Each pair is self-contained: one pair&rsquo;s
-    history, trailers, and shadow branches must not collide with another&rsquo;s.
+    A pair contains two repos that share a synchronized directory of content. The deployment can 
+    contain multiple pairs: one repo can have multiple subdirectories synced with different repos through
+    pair mechanisms. For example <em>backend</em> and <em>frontend</em> are subdirectories on a monorepo,
+    while they same context are in the root directory of a <em>backend</em> and a <em>frontend</em> repository.
   </p>
 </div>
 
 <div class="card" id="r2">
-  <h3><span class="ref ref-r">R2</span> Commits are copied with the same content and behaviour</h3>
+  <h3><span class="ref ref-r">R2</span> Commits are copied with the same content and behavior</h3>
   <p>
     A replayed commit has to look and act like the original from the target side: same tree, same
-    author and author date, same merge topology, same handling of binary files, LFS pointers,
-    symlinks, and submodules. <code>git blame</code> and <code>git log --graph</code> on the target
+    author and author date, same merge topology. <code>git blame</code> and <code>git log --graph</code> on the target
     must reflect what actually happened on the source.
   </p>
 </div>
 
 <div class="card" id="r3">
-  <h3><span class="ref ref-r">R3</span> Each side can exclude files via <code>.shadowignore</code></h3>
+  <h3><span class="ref ref-r">R3</span> Monorepo side can exclude files via <code>.shadowignore</code></h3>
   <p>
     Each side controls what it exports. The filter is part of the repo&rsquo;s own content, not a
     separately-deployed config.
@@ -231,20 +229,25 @@
 </div>
 
 <div class="card" id="r4">
-  <h3><span class="ref ref-r">R4</span> Only a declared subdirectory per side is in scope</h3>
-  <p>
-    A monorepo might share only <code>backend/</code>; the counterpart repo has that content at the
-    root. The prefix is part of the config, not fixed in code, and the two sides don&rsquo;t have to use
-    the same prefix.
-  </p>
-</div>
-
-<div class="card" id="r5">
-  <h3><span class="ref ref-r">R5</span> Runs unattended on CI (GitHub Actions or equivalent)</h3>
+  <h3><span class="ref ref-r">R4</span> Runs unattended on CI (GitHub Actions or equivalent)</h3>
   <p>
     No human is there to clear a prompt, resolve a conflict, or fix a line-ending surprise. The tool
     must be safe to retry, safe to schedule, and safe to run cross-platform (Linux and Windows
     runners).
+  </p>
+</div>
+
+<div class="card" id="r5">
+  <h3><span class="ref ref-r">R5</span> No merge conflict on shadow branches</h3>
+  <p>
+    Shadow branch replays clean code from the other repo, it should not result in merge conflict.
+  </p>
+</div>
+
+<div class="card" id="r6">
+  <h3><span class="ref ref-r">R6</span> Multiple branches, multiple shadow branches</h3>
+  <p>
+    Each branch can have a shadow branch on the other side of the pair.
   </p>
 </div>
 
@@ -256,70 +259,102 @@
 <p>Points where we had a real alternative and picked one. Each card names the requirement(s) it derives from and the alternative it ruled out. Mechanisms that fall out of a choice without a meaningful alternative of their own live in <a href="#consequences">&sect;3</a>, not here.</p>
 
 <div class="card" id="c1">
-  <h3><span class="ref ref-c">C1</span> Land changes via plain <code>git merge</code> of a <code>shadow/</code> branch</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
-  <p class="from"><strong>Rejected alternative:</strong> force-push replayed commits onto the target&rsquo;s <code>main</code>; auto-merge via a bot; or require consumers to use a special merge invocation (<code>-s subtree</code>, <code>git subtree merge --prefix=&lt;dir&gt;</code>, <code>git merge --allow-unrelated-histories</code>).</p>
+  <h3><span class="ref ref-c">C1</span> Each direction lands changes via a <code>shadow/</code> branch on the target side</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r6">R6</a></p>
+  <p class="from"><strong>Rejected alternatives:</strong> force-push replayed commits onto the target&rsquo;s <code>main</code>; auto-merge via a bot; or commit to one direction (single shadow branch on a single side, treating the other side as source-of-truth).</p>
   <p>
-    Sync is bidirectional (<a class="ref ref-r" href="#r2">R2</a>), so both sides can have new commits. Force-pushing replayed
-    commits onto the target&rsquo;s <code>main</code> would destroy the target&rsquo;s own commits &mdash;
-    violating <a class="ref ref-r" href="#r2">R2</a> applied to the target side. Conflict resolution at sync time has no human
-    under <a class="ref ref-r" href="#r5">R5</a>.
-  </p>
-  <p>
-    Instead we materialise incoming history on a tracking branch named
-    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code> and let the team that owns <code>main</code>
-    land it. The landing command has to be <em>plain</em> <code>git merge origin/shadow/&hellip;</code>
-    &mdash; anything more exotic (subtree strategies, unrelated-histories flags) becomes a tax on
-    every consumer and a new way to get it wrong. That commitment forces two more decisions
-    downstream: how to bootstrap ancestry (<a class="ref ref-c" href="#c4">C4</a>) and how shadow branches are laid out
-    (<a class="ref ref-m" href="#m1">M1</a>).
+    Sync is bidirectional &mdash; both sides accumulate new commits between syncs, and
+    <a class="ref ref-r" href="#r2">R2</a> says neither side can be silently overwritten. The model
+    that follows: each direction gets its own <em>shadow branch</em> on the target side, named
+    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code>. The replay engine produces the branch; the team
+    that owns the target&rsquo;s <code>main</code> lands it via <code>git merge</code> when they&rsquo;re
+    ready.
   </p>
 </div>
 
 <div class="card" id="c2">
-  <h3><span class="ref ref-c">C2</span> Deduplicate replayed commits via git trailers, scoped by source remote</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <h3><span class="ref ref-c">C2</span> Shadow branch tip carries the target&rsquo;s full outer tree, with only <code>dir/</code> swapped in</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> shadow branch tip contains only the rewritten synced content &mdash; nothing outside <code>dir/</code>.</p>
+  <p>
+    Given <a class="ref ref-c" href="#c1">C1</a> &mdash; we have a shadow branch on the target side
+    &mdash; the next question is what its tip&rsquo;s tree should look like. <a class="ref ref-r" href="#r5">R5</a>
+    sets the bar: when the consumer merges, the only conflicts they should see are the ones their
+    own contributors caused inside <code>dir/</code>. Everything else &mdash; missing files, modified
+    files, modify/delete pairs &mdash; is a phantom conflict the engine produced. Two valid shapes:
+  </p>
+  <ul>
+    <li>
+      <strong>Mirror the outer layout</strong> (what we do): shadow tip&rsquo;s tree equals the
+      target&rsquo;s current tree, with <code>dir/</code> replaced by the replayed pair content. Plain
+      <code>git merge origin/shadow/&hellip;</code> just works &mdash; the diff outside <code>dir/</code>
+      is empty by construction. Mirror layout forces a splice (<a class="ref ref-m" href="#m1">M1</a>). The
+      shadow tip&rsquo;s non-pair content has to be rewritten on every push to track the target&rsquo;s
+      current <code>main</code>, otherwise a later merge silently reverts any change the target made
+      outside <code>dir/</code> between syncs (root README edits, CI config, another pair&rsquo;s
+      directory).
+    </li>
+    <li>
+      <strong>Subtree-only:</strong> shadow tip&rsquo;s tree contains only the rewritten synced
+      content. Plain <code>git merge</code> would treat the absence of files outside <code>dir/</code>
+      as deletions and wipe most of the target&rsquo;s tree, so consumers would have to run
+      <code>git subtree merge --prefix=&lt;dir&gt;</code> or a scripted equivalent instead. Subtree-only forces a special consumer command. Forgetting it &mdash; running
+      plain <code>git merge</code> instead &mdash; corrupts silently: most of the target&rsquo;s tree
+      gets wiped in one apparently successful merge. Under <a class="ref ref-r" href="#r4">R4</a>
+      there&rsquo;s no human to spot the damage before it lands.
+    </li>
+  </ul>
+</div>
+
+<div class="card" id="c3">
+  <h3><span class="ref ref-c">C3</span> Deduplicate replayed commits via git trailers, scoped by source remote</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r4">R4</a></p>
   <p class="from"><strong>Rejected alternative:</strong> <code>git notes</code> (separate ref, easy to drop on a fresh clone); a sidecar mapping file outside git; or content-based dedup on tree SHAs (silently drops legitimate no-op commits).</p>
   <p>
-    CI reruns, manual retries, and cron-triggered syncs all have to converge to the same result
-    under <a class="ref ref-r" href="#r5">R5</a>. Each replayed commit carries
+    Syncs have to converge to the same result
+    under <a class="ref ref-r" href="#r4">R4</a>. Each replayed commit carries
     <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
     target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
     map. Anything already present is skipped. Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
     honest: two pairs that both read from <code>origin</code> (a backend pair and a frontend pair
     in workspace mode, for example) can&rsquo;t step on each other&rsquo;s trailers.
   </p>
-  <p>
-    Keying dedup on source SHAs is what forces per-commit replay as a mechanism (<a class="ref ref-m" href="#m4">M4</a>) &mdash;
-    a whole-repo <code>filter-repo</code> pre-pass would mangle those SHAs before we got a chance
-    to put them in trailers.
-  </p>
-</div>
-
-<div class="card" id="c3">
-  <h3><span class="ref ref-c">C3</span> Support workspace mode and orchestrator mode from the same codebase</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r5">R5</a></p>
-  <p class="from"><strong>Rejected alternative:</strong> commit to one mode only &mdash; either the tool must live inside one of the synced repos, or it must run from a standalone orchestrator.</p>
-  <p>
-    <a class="ref ref-r" href="#r5">R5</a> doesn&rsquo;t pick where the CI job lives. Workspace mode (tool runs inside one of the
-    synced repos, that side is <code>origin</code>) is the simplest setup; orchestrator mode (tool
-    runs from a third, standalone repo; both sides are external) is the cleanest separation. The
-    engine takes both because the choice belongs to the consumer, not to us.
-  </p>
-  <p>
-    Supporting both is what forces the CI mechanisms in <a href="#consequences">&sect;3</a>: auth has to handle
-    both &ldquo;caller is one of the synced repos&rdquo; and &ldquo;caller is a third repo&rdquo;
-    (<a class="ref ref-m" href="#m5">M5</a>), and CI logic has to be callable from whichever repo the consumer puts it in
-    (<a class="ref ref-m" href="#m6">M6</a>).
-  </p>
 </div>
 
 <div class="card" id="c4">
-  <h3><span class="ref ref-c">C4</span> Bootstrap by replaying full source history, parented to target&rsquo;s init</h3>
-  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a></p>
-  <p class="from"><strong>Rejected alternative:</strong> <em>seed at divergence</em> &mdash; create a marker commit on each target branch anchoring the two trees at the moment sync begins, and replay only commits after the seed.</p>
+  <h3><span class="ref ref-c">C4</span> Tool runs from a standalone orchestrator repo</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r4">R4</a></p>
+  <p class="from"><strong>Rejected alternatives:</strong> <em>workspace mode</em> &mdash; the tool runs inside one of the synced repos, with that side as <code>origin</code> (no <code>url</code> needed); or <em>support both</em> from the same codebase, letting the consumer pick.</p>
   <p>
-    <a class="ref ref-c" href="#c1">C1</a> demands a merge-base between source and target. Two real ways to establish one:
+    Both modes can satisfy <a class="ref ref-r" href="#r4">R4</a> &mdash; the question is what the
+    engine has to handle. Workspace mode looks attractive: one less repo to set up, one config field
+    saved (the workspace endpoint omits <code>url</code>), and the consumer can run the sync directly
+    from their checkout. The cost shows up in three places:
+  </p>
+  <p>
+    Supporting <em>both</em> from the same codebase nominally lets the consumer pick, but bakes
+    workspace-mode complexity into every code path and roughly doubles the test matrix (every test
+    has to exercise the workspace shape and the orchestrator shape). Picking one keeps the engine
+    simple; we picked orchestrator.
+  </p>
+  <p>
+    The choice still forces <a class="ref ref-m" href="#m5">M5</a> (CI auth, now simplified to a
+    single <code>insteadOf</code> rule) and <a class="ref ref-m" href="#m6">M6</a> (reusable
+    <code>workflow_call</code> so the orchestrator&rsquo;s thin caller workflow inherits engine
+    updates).
+  </p>
+</div>
+
+<div class="card" id="c5">
+  <h3><span class="ref ref-c">C5</span> Bootstrap by replaying full source history, parented to target&rsquo;s init</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-c" href="#c2">C2</a> &middot; <a class="ref ref-r" href="#r5">R5</a> &middot; <a class="ref ref-r" href="#r6">R6</a></p>
+  <p class="from"><strong>Rejected alternatives:</strong> <em>seed at divergence</em> &mdash; create a marker commit on each target branch anchoring the two trees at the moment sync begins, and replay only commits after the seed; <em>no anchor at all</em> &mdash; skip merge-base establishment entirely and require <code>git merge --allow-unrelated-histories</code> on the consumer side.</p>
+  <p>
+    <a class="ref ref-c" href="#c2">C2</a> demands a merge-base between source and target so plain <code>git merge</code>
+    (the contract from <a class="ref ref-c" href="#c1">C1</a>) finds one; <a class="ref ref-r" href="#r5">R5</a>
+    further demands that the merge produce no phantom conflicts when it does. Without a real merge-base, git
+    falls back to either &ldquo;unrelated histories&rdquo; refusal or a 2-way merge that flags the entire
+    other tree as additions &mdash; either way, R5 violation. Three ways to give git a real merge-base:
   </p>
   <ul>
     <li>
@@ -333,6 +368,19 @@
       <strong>Seed at divergence</strong>: create one no-op commit per pair+branch, anchoring shared
       ancestry without replaying prior history. Faster to bootstrap, but loses pre-seed
       archaeology and adds a separate setup phase consumers have to remember to run.
+    </li>
+    <li>
+      <strong>No anchor + <code>--allow-unrelated-histories</code></strong>: don&rsquo;t establish a
+      merge-base at all. Replay produces orphan commits on shadow branches; the consumer passes
+      <code>--allow-unrelated-histories</code> to <code>git merge</code> the first time each new shadow
+      branch is merged. The engine simplifies (no <code>fallbackParent</code> for roots, no anchor
+      scaffolding); the cost lands on the consumer. After the first merge, the merge commit relates
+      the two histories &mdash; so subsequent merges of <em>that</em> branch don&rsquo;t need the flag
+      &mdash; but every <em>new</em> shadow branch&rsquo;s first merge needs it again. Ruled out by
+      <a class="ref ref-c" href="#c1">C1</a>: <code>--allow-unrelated-histories</code> is a special
+      merge invocation, exactly the consumer-side tax C1 says the engine should absorb. For a single-
+      branch deployment it&rsquo;s a one-time hassle; in active multi-branch syncing it&rsquo;s a recurring
+      stumble.
     </li>
   </ul>
   <p>
@@ -349,30 +397,30 @@
     <em>Degree of freedom within &ldquo;sync from init&rdquo;:</em> per-commit replay vs. a single
     bulk import (e.g. <code>git filter-repo --to-subdirectory-filter</code> followed by a merge).
     The bulk approach mangles SHAs before they can be put into trailers, breaking
-    <a class="ref ref-c" href="#c2">C2</a>&rsquo;s dedup &mdash; so per-commit replay is the only path
+    <a class="ref ref-c" href="#c3">C3</a>&rsquo;s dedup &mdash; so per-commit replay is the only path
     consistent with the rest of the design.
   </p>
 </div>
 
 <h3 class="subsection">Minor choices</h3>
-<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C4. Listed briefly.</p>
+<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C5. Listed briefly.</p>
 
-<div class="card compact" id="c5">
-  <h3><span class="ref ref-c">C5</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
+<div class="card compact" id="c6">
+  <h3><span class="ref ref-c">C6</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r2">R2</a>. <strong>Rejected:</strong> separate push/pull scripts, or a primary/secondary model where one side is source-of-truth.</p>
   <p>One code path, tested once, serves both directions; push and pull can&rsquo;t drift out of sync. Direction is chosen at the command line with <code>--from a</code> or <code>--from b</code>.</p>
 </div>
 
-<div class="card compact" id="c6">
-  <h3><span class="ref ref-c">C6</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
-  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter is just a normal commit on each side, not a config redeploy.</p>
+<div class="card compact" id="c7">
+  <h3><span class="ref ref-c">C7</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
+  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter on the monorepo side is just a normal commit, not a config redeploy. The engine reads <code>.shadowignore</code> from whichever side is exporting in a given direction; in practice <a class="ref ref-r" href="#r3">R3</a> only mandates the monorepo-side filter, but the symmetric implementation costs nothing extra and keeps the code path uniform under <a class="ref ref-c" href="#c6">C6</a>.</p>
 </div>
 
-<div class="card compact" id="c7">
-  <h3><span class="ref ref-c">C7</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
-  <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay.</p>
+<div class="card compact" id="c8">
+  <h3><span class="ref ref-c">C8</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
+  <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -380,27 +428,141 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 
 <h2 id="consequences">3. Mechanisms &mdash; what the choices force us to build</h2>
-<p>Once a choice is made, some machinery follows without a real alternative. Six mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
+<p>Once a choice is made, some machinery follows without a real alternative. Nine mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
 
 <div class="card" id="m1">
-  <h3><span class="ref ref-m">M1</span> Shadow branch tips carry the target&rsquo;s full layout</h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c1">C1</a></p>
+  <h3><span class="ref ref-m">M1</span> Splice the target&rsquo;s current outer tree under the synced subtree at push time</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a></p>
   <p>
-    <code>git merge</code> on the target applies the shadow branch&rsquo;s tree against the target&rsquo;s
-    own. If the shadow tip held only the synced <code>dir</code>, merging would need a
-    subtree-style invocation to drop the files at the right prefix &mdash; which
-    <a class="ref ref-c" href="#c1">C1</a> rules out. So we compose the shadow tip&rsquo;s tree to mirror the target&rsquo;s layout:
-    the synced <code>dir</code> carries the incoming changes, and everything outside <code>dir</code>
-    is spliced through from the target&rsquo;s current tip. Merge mechanics stay on our side; consumers
-    keep running <code>git merge origin/shadow/&hellip;</code>.
+    <a class="ref ref-c" href="#c2">C2</a> commits us to the shadow tip carrying the target&rsquo;s full
+    outer tree &mdash; that&rsquo;s the shape that delivers <a class="ref ref-r" href="#r5">R5</a>&rsquo;s
+    no-phantom-conflict guarantee. The tree of any individual replayed commit only knows about the
+    synced <code>dir</code> (replay walks the source side, where the rest of the target&rsquo;s tree
+    doesn&rsquo;t exist), so the tip&rsquo;s outer-tree content has to be added at push time.
+  </p>
+  <p>
+    <strong>The splice (per pushed branch).</strong> Read the target branch&rsquo;s current tip tree;
+    <code>rm -r --cached dir/</code> to clear the slot; <code>read-tree --prefix=dir/</code> the
+    replayed tip&rsquo;s synced subtree; <code>write-tree</code>; then <code>commit-tree</code> with
+    the replayed tip&rsquo;s parents, author, committer, and message. The result is the SHA the engine
+    actually pushes to <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code>.
+  </p>
+  <p>
+    <strong>Why it&rsquo;s load-bearing.</strong> Without the splice, the shadow tip&rsquo;s tree
+    contains only <code>dir/</code> &mdash; nothing outside it. Plain <code>git merge</code> at the
+    consumer end is a 3-way merge between:
+  </p>
+  <ul>
+    <li><em>base:</em> the previous shadow merge on target/main (which carried the target&rsquo;s outer tree as it was at that point);</li>
+    <li><em>target/main now:</em> the target&rsquo;s current state, with whatever has happened to the outer tree since;</li>
+    <li><em>shadow tip:</em> only <code>dir/</code> content, no outer tree at all.</li>
+  </ul>
+  <p>
+    For any file <em>outside</em> <code>dir/</code>, git interprets the shadow side as having deleted
+    it. Two failure modes follow:
+  </p>
+  <ul>
+    <li>
+      <strong>Silent deletion.</strong> Base has the file, target hasn&rsquo;t changed it, shadow
+      doesn&rsquo;t carry it &rarr; git reads &ldquo;shadow deleted, target untouched&rdquo; and the
+      file <em>disappears</em> from the merge commit&rsquo;s tree. No conflict marker, no warning;
+      <code>git log -p main</code> just shows the file removed in the merge commit, mixed in with the
+      legitimate <code>dir/</code> changes.
+    </li>
+    <li>
+      <strong>Modify/delete conflicts.</strong> Base has the file, target modified it, shadow
+      doesn&rsquo;t carry it &rarr; git flags a conflict on every such file. The consumer has to
+      manually resolve dozens of conflicts on every merge for files they never touched.
+    </li>
+  </ul>
+  <p>
+    Concrete examples of files this hits on every merge for a typical monorepo:
+    <code>.github/workflows/*.yml</code>, root <code>README.md</code> and other monorepo-only docs,
+    other pairs&rsquo; directories (e.g. <code>frontend/</code> when this push is for the
+    <code>backend/</code> pair), repo-root tooling configs (<code>tsconfig.json</code>,
+    <code>package.json</code> at root, etc.).
+  </p>
+  <p>
+    The splice makes the shadow tip&rsquo;s outer tree byte-for-byte identical to target/main&rsquo;s
+    current outer tree. The 3-way merge then sees zero diff outside <code>dir/</code> &mdash; only
+    the synced subdirectory&rsquo;s changes surface, which is what the consumer expects.
+  </p>
+  <p>
+    <strong>Why the round-trip doesn&rsquo;t fix this.</strong> Tempting reasoning: target/main
+    never merges directly into shadow, but the round-trip echo (A &rarr; B &rarr; A&rsquo;s shadow)
+    re-identifies an A-side commit <code>x</code> as the parent of the replayed merge on shadow.
+    Since <code>x</code> is on A/main and has all of A&rsquo;s outer-tree content, isn&rsquo;t the
+    outer-tree state already &ldquo;on shadow&rdquo;? It is &mdash; in <em>ancestry</em> &mdash; but
+    that&rsquo;s the wrong shape of &ldquo;on shadow.&rdquo; A 3-way merge looks at exactly three
+    trees:
+  </p>
+  <ul>
+    <li><code>tree(merge-base)</code></li>
+    <li><code>tree(A)</code> (target/main&rsquo;s tip)</li>
+    <li><code>tree(B)</code> (shadow&rsquo;s tip <em>commit</em>)</li>
+  </ul>
+  <p>
+    The algorithm doesn&rsquo;t walk back through shadow&rsquo;s history to read <code>x</code>&rsquo;s
+    tree. It reads the shadow tip&rsquo;s tree directly. And the shadow tip is built by the replay
+    engine, which constructs each tree as <code>previous_replayed_tree + path_filtered_diff</code> &mdash;
+    outer-tree changes from <code>x</code> never enter that diff because of <a class="ref ref-m" href="#m4">M4</a>&rsquo;s
+    filter on <code>source.dir/</code>. So the shadow tip&rsquo;s tree stays frozen at the bootstrap
+    chain&rsquo;s inherited outer tree, even though <code>x</code> is reachable as an ancestor.
+  </p>
+  <p>
+    Concrete failure trace without the splice:
+  </p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+A makes commit x: modifies frontend/file.ts AND README.md (outer).
+
+Push A&rarr;B. The path filter strips x's README.md change; only
+frontend/file.ts crosses to B's shadow.
+
+B merges, pull A&larr;B. Echo maps the round-tripped commit back to x.
+M' on A's shadow has parents [fallback, x].
+
+At merge time on A:
+  merge-base(A/main, M') = x         &lt;- x IS the merge-base
+  tree(base = x)         = init + frontend/file.ts + README.md modified
+  tree(A = A/main tip)   = same as base (no further A commits)
+  tree(B = M')           = init + frontend/file.ts + frontend/README.md
+                            (replay-built; no README.md outer change)
+
+Diff base&rarr;A:  none
+Diff base&rarr;B:  README.md DELETED (B doesn't have it)
+
+Result: README.md is removed from the merge commit. Silent revert.
+</pre>
+  <p>
+    The round-trip + echo gives merge a real merge-base (<code>x</code>), which is what we want.
+    What it doesn&rsquo;t give is shadow&rsquo;s tip tree matching <code>x</code>&rsquo;s outer
+    state &mdash; the path filter sees to that. The splice closes the gap by overwriting shadow
+    tip&rsquo;s outer tree with target/main&rsquo;s current outer tree at push time, so the
+    base&rarr;B diff outside <code>dir/</code> is empty by construction. Round-trip handles
+    ancestry; splice handles tree state. They&rsquo;re both load-bearing and they don&rsquo;t
+    substitute for each other.
+  </p>
+  <p>
+    <strong>Could echo mapping be extended to also fix the tree?</strong> One could imagine making
+    the replay engine, when it echo-maps <code>x'</code> to <code>x</code>, also lift
+    <code>x</code>&rsquo;s outer tree onto the replayed commit&rsquo;s tree &mdash; effectively a
+    mini-splice keyed on the echo&rsquo;d commit instead of target/main&rsquo;s tip. This would
+    work, but it&rsquo;s strictly weaker than the splice we already have. <code>x</code> is by
+    construction an ancestor of target/main, so its outer tree is at most as recent as
+    target/main&rsquo;s tip &mdash; usually older. And echo only fires when something round-trips;
+    outer-only commits the target makes that never cross to B (most of them, since the path filter
+    drops them on the way out) would never trigger an echo-driven splice. The current splice
+    sidesteps both limits: it always fires (every push) and it always reads the freshest available
+    source (target/main&rsquo;s current tip). Echo and splice end up doing genuinely different jobs;
+    neither would be cleaner if folded into the other.
   </p>
 </div>
 
 <div class="card" id="m2">
   <h3><span class="ref ref-m">M2</span> Unmapped parents (including roots) fall back to the target&rsquo;s branch tip</h3>
-  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-c" href="#c4">C4</a></p>
+  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-c" href="#c5">C5</a></p>
   <p>
-    <a class="ref ref-r" href="#r2">R2</a> demands that merge topology survive. <a class="ref ref-c" href="#c4">C4</a>
+    <a class="ref ref-r" href="#r2">R2</a> demands that merge topology survive. <a class="ref ref-c" href="#c5">C5</a>
     starts replay from each source root and parents it to the target&rsquo;s current
     <code>main</code> tip. Some source commits still reference parents we can&rsquo;t map &mdash;
     typically merges that pull in branches we don&rsquo;t sync, or root commits of orphan branches
@@ -426,59 +588,203 @@
 
 <div class="card" id="m3">
   <h3><span class="ref ref-m">M3</span> Build replayed commits via <code>git commit-tree</code> plumbing; never touch the working tree</h3>
-  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a></p>
   <p>
     <a class="ref ref-r" href="#r2">R2</a> requires explicit control over author name, email, author date, committer and parents
     &mdash; values we set via <code>GIT_AUTHOR_*</code>/<code>GIT_COMMITTER_*</code> on the
     <code>commit-tree</code> call. A porcelain <code>checkout + commit</code> approach would route
     through the user&rsquo;s hooks, signing config, and working-tree state, any of which can corrupt the
-    replay. <a class="ref ref-r" href="#r5">R5</a> also means there may not be a working tree at all (orchestrator mode). Between
+    replay. <a class="ref ref-r" href="#r4">R4</a> also means there may not be a working tree at all (orchestrator mode). Between
     these, plumbing isn&rsquo;t a real choice &mdash; it&rsquo;s the only path that survives both constraints.
   </p>
 </div>
 
 <div class="card" id="m4">
   <h3><span class="ref ref-m">M4</span> Process replay one commit at a time (not via a whole-repo pre-pass)</h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a></p>
+  <p class="from">Forced by <a class="ref ref-c" href="#c3">C3</a></p>
   <p>
-    <a class="ref ref-c" href="#c2">C2</a> keys dedup on source SHAs &mdash; each replayed commit carries the original&rsquo;s SHA in
+    <a class="ref ref-c" href="#c3">C3</a> keys dedup on source SHAs &mdash; each replayed commit carries the original&rsquo;s SHA in
     a trailer. A <code>git filter-repo</code> or <code>git subtree</code> pre-pass that produced a
     transformed &ldquo;view&rdquo; of each side would rewrite those SHAs before we ever got to the
     trailer stage, breaking dedup on every re-run. So we process commits one at a time: diff against
-    the source parent, swap the prefix (<a class="ref ref-r" href="#r4">R4</a>), write the tree with <a class="ref ref-m" href="#m3">M3</a>, add the
+    the source parent, swap the prefix (<a class="ref ref-r" href="#r1">R1</a>), write the tree with <a class="ref ref-m" href="#m3">M3</a>, add the
     trailer. Renames and copies surface as delete+add pairs; we don&rsquo;t depend on
     <code>-M</code>/<code>-C</code> heuristics.
   </p>
 </div>
 
 <div class="card" id="m5">
-  <h3><span class="ref ref-m">M5</span> CI auth via <code>insteadOf</code> rewrites: caller-specific first, generic fallback</h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c3">C3</a></p>
+  <h3><span class="ref ref-m">M5</span> CI auth via a single <code>insteadOf</code> rewrite to the PAT</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c4">C4</a></p>
   <p>
-    <a class="ref ref-c" href="#c3">C3</a> says the caller&rsquo;s repo can be one of the synced pair or a third orchestrator.
-    GitHub scopes <code>GITHUB_TOKEN</code> to the caller&rsquo;s own repo; cross-repo operations need a
-    PAT (<code>EXTERNAL_REPO_TOKEN</code>). The workflow installs two URL rewrites: a
-    caller-specific one pointing the caller&rsquo;s own URL at <code>github.token</code>, and a generic
-    one pointing <code>https://github.com/</code> at the PAT. Longest-prefix match wins, so a PAT
-    scoped only to the B-side can&rsquo;t accidentally break pushes to the caller&rsquo;s origin.
-  </p>
-  <p class="from">
-    <em>Degree of freedom:</em> the two-rule structure vs. a single wildcard rule. A single
-    wildcard is simpler but fails whenever the PAT&rsquo;s scope is narrower than the set of repos
-    the workflow touches &mdash; it gets applied to URLs it has no access to and returns 403.
-    Longest-prefix matching avoids that.
+    Under <a class="ref ref-c" href="#c4">C4</a> the orchestrator pushes only to external repos &mdash;
+    every push is cross-repo, so <code>GITHUB_TOKEN</code> (scoped to the caller&rsquo;s own repo)
+    is never sufficient. The workflow installs one URL rewrite: <code>https://github.com/</code> &rarr;
+    <code>https://x-access-token:${PAT}@github.com/</code>. The PAT
+    (<code>EXTERNAL_REPO_TOKEN</code>) must have <code>Contents: Read+Write</code> on every external
+    repo named in <code>shadow-config.json</code> &mdash; both the A-side and every B-side. No
+    layering, no caller-specific exception rules, no fallback to <code>github.token</code>.
   </p>
 </div>
 
 <div class="card" id="m6">
-  <h3><span class="ref ref-m">M6</span> Distribute CI logic via reusable <code>workflow_call</code> workflows</h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c3">C3</a></p>
+  <h3><span class="ref ref-m">M6</span> Distribute CI logic via a reusable <code>workflow_call</code> workflow</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c4">C4</a></p>
   <p>
-    Because <a class="ref ref-c" href="#c3">C3</a> lets the tool live in different repos, consumers in different places all
-    need to invoke the same sync logic. A reusable <code>workflow_call</code> workflow lets each
-    consumer ship a thin caller that inherits updates from one central definition. Permissions are
-    declared at the call site, so the caller can&rsquo;t grant the callee more than it meant to. The
-    copy-paste-YAML-per-consumer alternative drifts silently under <a class="ref ref-r" href="#r5">R5</a>.
+    The orchestrator (<a class="ref ref-c" href="#c4">C4</a>) is a separate repo from this one. Its
+    workflow has to invoke our sync logic without copy-pasting YAML &mdash; otherwise every
+    orchestrator drifts on its own schedule. A reusable <code>workflow_call</code> workflow lets the
+    orchestrator ship a thin caller that <code>uses:</code> the central definition; engine updates
+    flow through automatically. Permissions are declared at the call site, so the caller can&rsquo;t
+    grant the callee more than it meant to.
+  </p>
+</div>
+
+<div class="card" id="m7">
+  <h3><span class="ref ref-m">M7</span> Preflight gate: halt on silent-corruption hazards, warn on ambiguous ones</h3>
+  <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-r" href="#r4">R4</a></p>
+  <p>
+    <a class="ref ref-r" href="#r2">R2</a> says the replay must faithfully reproduce source history.
+    <a class="ref ref-r" href="#r4">R4</a> says no human is around to inspect. Together they rule out the &ldquo;run
+    anyway and hope&rdquo; failure mode &mdash; a few specific environment conditions silently produce
+    wrong results, and a CI job that returns exit 0 with corrupted output is worse than one that
+    halts. <code>preflightChecks()</code> runs against each source branch tip before replay starts:
+  </p>
+  <ul>
+    <li>
+      <strong>Shallow clone &mdash; error, halts.</strong> <code>rev-list</code> on a truncated
+      history silently elides commits. The replay would produce a tree-correct but
+      ancestry-wrong shadow branch. The fix (<code>git fetch --unshallow</code>) is one command,
+      so blocking is cheap and right.
+    </li>
+    <li>
+      <strong>Case conflict in tree &mdash; error, halts.</strong> Two paths differing only in case
+      (e.g. <code>Foo.ts</code> and <code>foo.ts</code>) collapse to one file on Windows and macOS
+      runners. Discovered post-hoc this looks like a phantom file deletion in the merge.
+    </li>
+    <li>
+      <strong>Submodules, symlinks, LFS pointers &mdash; warn, continues.</strong> All three
+      <em>can</em> work depending on what the consumer is doing &mdash; submodules outside the
+      synced <code>dir</code> are irrelevant; symlinks that stay within the synced dir are fine;
+      LFS pointer transfer (without object content) is sometimes exactly what&rsquo;s wanted. The
+      tool flags them in the log so a successful sync still surfaces hazards, but doesn&rsquo;t
+      decide for the operator.
+    </li>
+  </ul>
+  <p class="from">
+    <em>Degree of freedom:</em> where the line falls between &ldquo;error&rdquo; and
+    &ldquo;warn.&rdquo; The rule we apply is: anything that produces a tree git would happily merge
+    but is semantically wrong gets halted; anything where reasonable people disagree about
+    whether it&rsquo;s wrong gets warned. Submodules-as-warning rather than error is the closest
+    call &mdash; we picked warn because the alternative blocks every repo that has a single
+    third-party submodule outside the synced subtree.
+  </p>
+</div>
+
+<div class="card" id="m8">
+  <h3><span class="ref ref-m">M8</span> Per-branch sync; splice base falls back through the branch&rsquo;s parent</h3>
+  <p class="from">Forced by <a class="ref ref-r" href="#r6">R6</a></p>
+  <p>
+    <a class="ref ref-r" href="#r6">R6</a> says each source branch gets its own shadow branch on the
+    target. Mechanically: the engine enumerates source-side branches via <code>git branch -r</code>
+    (filtering out <code>shadow/*</code> refs so we don&rsquo;t recursively sync our own output),
+    then runs the replay loop once per branch. Each push lands at
+    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code> on the target, so syncing <em>main</em> and
+    <em>feature/x</em> produces two distinct refs without sharing tip state.
+  </p>
+  <p>
+    The non-trivial part is <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice when the target
+    side doesn&rsquo;t have a matching branch yet. A new <em>feature/x</em> branch on the source has
+    no <code>target/feature/x</code> to read the outer tree from. The lookup chain in
+    <code>composeShadowTip</code>:
+  </p>
+  <ol>
+    <li><code>target.remote/&lt;branch&gt;</code> if it exists. Most syncs hit this case &mdash;
+    both sides are tracking the same branch.</li>
+    <li>The branch&rsquo;s <em>parent</em> on the source side: among the source&rsquo;s other
+    branches, pick whichever one&rsquo;s merge-base with the new branch is most recent &mdash;
+    that&rsquo;s the branch this one was forked from. Use <em>that</em> branch&rsquo;s target tree.
+    Lets a brand-new <em>feature/x</em> forked from <em>main</em> splice over <em>main</em>&rsquo;s
+    outer tree on the very first sync.</li>
+    <li><code>target.remote/main</code> as last resort &mdash; for orphan branches with no
+    common ancestor anywhere on the source side.</li>
+  </ol>
+  <p>
+    Stale shadow detection: when syncing every branch (no <code>--branch</code> flag), the engine
+    compares the set of remote-tracking <code>shadow/&lt;pair&gt;/*</code> refs against the source
+    branches it just synced. Anything left over &mdash; a shadow ref whose source branch was deleted
+    &mdash; gets logged with the explicit <code>git push --delete</code> command. The engine
+    doesn&rsquo;t auto-delete: deletion of a branch on the target is destructive and crosses out of
+    R4&rsquo;s &ldquo;safe to schedule&rdquo; comfort zone.
+  </p>
+  <p class="from">
+    <em>Degree of freedom:</em> the parent-branch heuristic. We pick &ldquo;most recent merge-base
+    among existing source branches.&rdquo; Alternatives: always splice from <code>main</code>
+    (simpler but stale for divergent feature work); use a naming convention
+    (<code>feature/x</code> &rarr; <code>feature</code>) (brittle); fail when no matching target
+    branch exists (forces a manual setup step on the consumer for every new branch). The
+    merge-base heuristic works without naming conventions and degrades gracefully to
+    <code>main</code> only when nothing else is reachable.
+  </p>
+</div>
+
+<div class="card" id="m9">
+  <h3><span class="ref ref-m">M9</span> When a replayed commit has an echo&rsquo;d source parent, splice the echo&rsquo;d outer into <em>that commit&rsquo;s</em> <code>parentTree</code></h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> applied to intermediate shadow commits, not just the tip</p>
+  <p>
+    <a class="ref ref-m" href="#m1">M1</a> rewrites the shadow tip&rsquo;s tree so non-pair content
+    matches target/main&rsquo;s current state. That fixes consumer merges, which only ever look at
+    the tip. But anyone checking out an <em>older</em> shadow commit (<code>git checkout shadow~5</code>,
+    <code>git bisect</code>, archaeology) would see the chain&rsquo;s frozen outer state &mdash;
+    whatever the bootstrap or an earlier splice left there &mdash; not the outer state at the time
+    that commit corresponds to. M9 closes this gap during replay, without adding any commits to
+    shadow&rsquo;s history.
+  </p>
+  <p>
+    <strong>The mechanism.</strong> When <code>runReplayLoop</code> processes a source commit
+    <code>M</code> whose source parents include an echo&rsquo;d one (a B-side commit <code>x'</code>
+    whose trailer maps to an A-side commit <code>x</code>), the replayed commit <code>M'</code>
+    <em>is</em> the splice commit. There&rsquo;s no separate insertion. The change is in how the
+    engine constructs <code>M'</code>&rsquo;s <code>parentTree</code>:
+  </p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+parentTree(M&prime;) = splice(x^{tree}, target.dir, previous_shadow_tip:target.dir)
+                        &uarr;                                  &uarr;
+                        outer from echo&rsquo;d A-side parent      dir/ from existing shadow chain
+                        (preserves x&rsquo;s outer)              (preserves earlier B-side commits like b1)
+</pre>
+  <p>
+    Then <code>buildRemappedTree</code> applies M&rsquo;s diff (= x&rsquo;s contributions on B side,
+    mapped to <code>target.dir/</code>) on top of that spliced parentTree, exactly as it does for
+    any other commit. The result has all three layers preserved:
+  </p>
+  <ul>
+    <li><strong>x&rsquo;s outer</strong> &mdash; from the outer portion of <code>x^{tree}</code>, kept by the splice.</li>
+    <li><strong>Earlier Fornax commits&rsquo; <code>dir/</code> changes</strong> (b1, b2&hellip; before x round-tripped) &mdash; from <code>previous_shadow_tip:target.dir</code>, kept by the splice.</li>
+    <li><strong>x&rsquo;s frontend contributions</strong> &mdash; from M&rsquo;s applied diff, overlaid on top.</li>
+  </ul>
+  <p>
+    Subsequent regular Fornax commits replayed after M&prime; inherit M&prime;&rsquo;s tree as
+    their <code>parentTree</code> (via <code>mappedParents[0]</code> normal lookup), so they
+    automatically carry x&rsquo;s outer forward until the next round-trip echoes a fresher A-side
+    commit. <code>git checkout</code> on any commit between two round-trips shows Realogic&rsquo;s
+    state at the most recent round-trip &mdash; useful for inspection, with no extra commits
+    cluttering shadow&rsquo;s history.
+  </p>
+  <p>
+    <strong>Relationship to M1.</strong> Both still needed:
+  </p>
+  <ul>
+    <li>M9 keeps intermediate-commit outer fresh as far back as the most recent round-tripped commit. But M9 only fires when an echo&rsquo;d parent is present. Outer-only A commits (e.g. <code>.claude/state.json</code> updates that never touch <code>dir/</code>) don&rsquo;t round-trip, don&rsquo;t echo, and so don&rsquo;t trigger M9.</li>
+    <li>M1 catches everything else at push time: tip&rsquo;s outer = target/main&rsquo;s <em>current</em>, including outer-only commits made after the latest round-trip. The tip is what consumers merge, so it has to be the freshest.</li>
+  </ul>
+  <p class="from">
+    <em>Degree of freedom:</em> use the echo&rsquo;d parent&rsquo;s tree raw vs. splice it with the
+    previous shadow tip&rsquo;s <code>dir/</code>. We splice. Using <code>x^{tree}</code> raw would
+    overwrite any earlier B-side <code>dir/</code> contributions (b1, b2&hellip;) with x&rsquo;s
+    A-side view of the synced subdirectory, losing Fornax&rsquo;s commits that landed on shadow
+    before x round-tripped. The splice keeps both: outer from the A-side, <code>dir/</code> from
+    the existing shadow chain, M&rsquo;s diff overlaid.
   </p>
 </div>
 
@@ -496,7 +802,7 @@
 
 <div class="card">
   <h3><span class="tag tag-red">!</span> First sync is proportional to source history length</h3>
-  <p class="from">From <a class="ref ref-c" href="#c4">C4</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c5">C5</a></p>
   <p>
     Because we replay every source commit per-pair on bootstrap, the first sync against a mature
     source repo can take minutes to tens of minutes. The expected workflow is to run the first
@@ -509,7 +815,7 @@
 
 <div class="card">
   <h3><span class="tag tag-red">!</span> Source commit dates predate target init</h3>
-  <p class="from">From <a class="ref ref-c" href="#c4">C4</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c5">C5</a></p>
   <p>
     Replayed commits keep their original author dates, which are typically older than the
     target&rsquo;s init commit. <code>git log --date-order</code> on the target therefore looks
@@ -528,33 +834,86 @@
     &mdash; <code>merge-base</code> still answers the right question &mdash; but visually the edge
     jumps across the graph. Our echo-mapping test exists specifically to lock this behaviour down.
   </p>
-</div>
+  <p>Concrete walkthrough:</p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+1. A commits `a`              A/main:    init_A &mdash;&mdash; a
 
-<div class="card">
-  <h3><span class="tag tag-red">!</span> Commits that touch only non-pair paths are silently skipped</h3>
-  <p class="from">From <a class="ref ref-m" href="#m4">M4</a></p>
+2. Push A&rarr;B replays           B/shadow:    a&prime;
+                              a&prime; carries trailer:
+                                  Shadow-replayed-A: sha(a)
+
+3. B merges shadow,           B/main:    init_B &mdash;&mdash; m &mdash;&mdash; b
+   then commits `b`                                  &#x2571;
+                              B/shadow:    a&prime; &mdash;&mdash;&mdash;&#x2571;
+
+4. Pull B&rarr;A replays           Replay sees m has parents [init_B, a&prime;]:
+                                  init_B  &rarr; fallbackParent
+                                  a&prime;      &rarr; echo-mapped to `a`
+                                              (original A commit, same SHA)
+
+                              A/shadow:  m&prime; &mdash;&mdash; b&prime;
+                                          &uarr;
+                                          &lfloor; second parent of m&prime; IS `a`
+
+5. A consumer merges shadow.
+
+   git log --graph A/main:
+
+       *  M           &lt;-- consumer's merge of shadow
+       |&#x2572;
+       | *  b&prime;
+       | *  m&prime;       &lt;-- replayed B-side merge
+       | |&#x2572;
+       |/  |
+       *   |  a        &lt;-- m&prime;'s second parent edge "jumps" back to `a`
+       *   .  init_A
+</pre>
   <p>
-    If a source commit changes only files outside the declared <code>dir</code>, the remapped tree
-    is identical to its parent&rsquo;s and the commit is not replayed. Correct by design, but users
-    periodically ask &ldquo;where did my merge commit go?&rdquo; The answer is usually &ldquo;it had no files
-    in the pair&rsquo;s <code>dir</code>&rdquo;.
+    The edge from <code>m&prime;</code> back to <code>a</code> is what looks jumpy:
+    <code>m&prime;</code> is a recent commit, <code>a</code> is on the main line further back, and
+    the line between them crosses other commits in <code>git log --graph</code> output. Topologically
+    it&rsquo;s exactly right &mdash; <code>git merge-base m&prime; A/main</code> returns <code>a</code>
+    correctly, no information is lost. The visual just looks unusual because most graph viewers
+    aren&rsquo;t used to merge edges spanning that distance.
   </p>
 </div>
 
 <div class="card">
-  <h3><span class="tag tag-red">!</span> Multi-pair configs force one PAT to cover every listed repo</h3>
+  <h3><span class="tag tag-red">!</span> Commits that touch only non-pair paths are silently skipped (monorepo &rarr; external direction only)</h3>
+  <p class="from">From <a class="ref ref-m" href="#m4">M4</a></p>
+  <p>
+    When the source endpoint has a <code>dir</code> prefix (i.e., the source is the monorepo side),
+    the engine uses <code>git rev-list main -- dir/</code> to collect commits, so any commit that
+    doesn&rsquo;t touch a file under <code>dir/</code> never enters the replay queue. Correct by
+    design &mdash; a commit that edits only <code>.github/workflows/</code> or another pair&rsquo;s
+    directory has nothing to send to the external repo &mdash; but users periodically ask &ldquo;where
+    did my merge commit go?&rdquo; The answer is usually &ldquo;it had no files in the pair&rsquo;s
+    <code>dir</code>.&rdquo;
+  </p>
+  <p>
+    The other direction (external &rarr; monorepo, where the source has no prefix) replays every
+    commit on the source branch &mdash; there&rsquo;s no path filter to skip anything. So this
+    asymmetry only bites monorepo developers wondering why a root-only commit didn&rsquo;t propagate.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Adding a new pair silently breaks if the PAT&rsquo;s scope isn&rsquo;t widened</h3>
   <p class="from">From <a class="ref ref-r" href="#r1">R1</a> &times; <a class="ref ref-m" href="#m5">M5</a></p>
   <p>
-    The sharpness of this one is specifically an <a class="ref ref-r" href="#r1">R1</a> consequence: as soon as a deployment has
-    more than one pair, <code>EXTERNAL_REPO_TOKEN</code> (one secret per workflow) has to cover
-    every external repo across every pair. Adding a new pair without widening the PAT silently
-    fails at push time. There is no per-pair credential.
+    With orchestrator mode (<a class="ref ref-c" href="#c4">C4</a>), one PAT covers every listed repo
+    by design &mdash; that&rsquo;s how M5&rsquo;s single <code>insteadOf</code> rule works. The
+    surprise is the failure mode when scope drifts out of sync with config: adding a pair to
+    <code>shadow-config.json</code> without also widening the PAT&rsquo;s repo allow-list silently
+    fails at push time. The fetch succeeds (pull is read-only on the source); the push to the new
+    target returns 403, the sync run is marked failed, and the operator goes hunting before
+    realising the PAT was the missing piece. There is no per-pair credential to scope around it.
   </p>
 </div>
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> Running the same sync locally after CI &ldquo;just works&rdquo;</h3>
-  <p class="from">From <a class="ref ref-c" href="#c2">C2</a> + <a class="ref ref-m" href="#m3">M3</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c3">C3</a> + <a class="ref ref-m" href="#m3">M3</a></p>
   <p>
     Trailers are the dedup key and the working tree is never touched, so a developer can fetch the
     target remote and re-run the sync from their workstation. The second run is a no-op. We didn&rsquo;t
@@ -564,7 +923,7 @@
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> One bug fix covers both directions</h3>
-  <p class="from">From <a class="ref ref-c" href="#c5">C5</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c6">C6</a></p>
   <p>
     Symmetric <code>a</code>/<code>b</code> means push and pull are the same code. A regression
     found on one direction is fixed on both at once; a test that covers pull covers almost all of
@@ -575,7 +934,7 @@
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> Retroactive <code>.shadowignore</code> changes work without ceremony</h3>
-  <p class="from">From <a class="ref ref-c" href="#c6">C6</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c7">C7</a></p>
   <p>
     Because the filter is read out of the source commit&rsquo;s tree, adding an entry to
     <code>.shadowignore</code> takes effect on the next sync without touching config, CI, or the
