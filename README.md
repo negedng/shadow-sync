@@ -24,42 +24,16 @@ shadow-sync --from a:  RepoA → shadow/backend/main on RepoB → git merge → 
 
 ### Where does the tool run?
 
-The tool needs a git repo as its workspace (for the git object database). Two modes:
-
-**From inside one of the repos (workspace mode)** — install shadow-sync and run it directly. That repo is `origin`, the other is added as a remote.
-
-```bash
-npm install negedng/shadow-sync
-```
-
-**Standalone orchestrator** — the tool runs from its own repo, independent of both synced repos. Both are added as remotes. Set `SHADOW_CONFIG` to point at your config.
+The tool runs from a standalone orchestrator repo, independent of both synced repos. Both are added as remotes. Set `SHADOW_CONFIG` to point at your config.
 
 ```bash
 npm install negedng/shadow-sync
 cross-env SHADOW_CONFIG=./shadow-config.json npx tsx node_modules/shadow-sync/shadow-sync.ts
 ```
 
-Both modes use the same code and config. The only difference is whether one endpoint uses `"remote": "origin"` (no url needed) or both have explicit urls.
-
 ## Configuration
 
-Create a `shadow-config.json` (copy from `shadow-config.example.json`).
-
-**Workspace mode** — running from inside one of the repos:
-
-```json
-{
-  "pairs": [
-    {
-      "name": "backend",
-      "a": { "remote": "origin", "dir": "backend" },
-      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git", "dir": "" }
-    }
-  ]
-}
-```
-
-**Orchestrator mode** — running from a standalone repo:
+Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 
 ```json
 {
@@ -75,7 +49,7 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`).
 
 - `a` and `b` are symmetric — direction is chosen at runtime with `--from`
 - `dir` is the path prefix in that repo (`""` for root, `"backend"` for a subdirectory)
-- `url` tells the tool how to reach the repo (omit if the remote already exists, e.g. `origin`)
+- `url` tells the tool how to reach the repo
 
 ## Usage
 

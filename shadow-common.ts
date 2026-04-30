@@ -4,33 +4,13 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
-// TODO(orchestrator-only): the design committed to orchestrator-only operation
-// (C4 in shadow-sync-design.html). The following workspace-mode codepaths can
-// be removed in a follow-up cleanup:
-//
-//   - getCurrentBranch(): only called when source.url is absent (workspace
-//     mode reads HEAD on the workspace repo). Orchestrator never has a current
-//     branch — both endpoints are remotes.
-//   - The `useLocalBranch` branch in collectSourceCommits(): selects local refs
-//     instead of remote-tracking refs when source.url is absent.
-//   - source.url being optional in RepoEndpoint and shadow-config.json:
-//     orchestrator mode requires url on every endpoint.
-//   - In shadow-sync.ts: the `else if (!source.url)` fallback that defaults
-//     to the current branch, and the dirty-tree guard for source.dir/.
-//   - In .github/workflows/shadow-sync.yml: the conditional EXTERNAL_REPO_TOKEN
-//     check + github.token fallback, and the caller-specific insteadOf rule.
-//     Single insteadOf https://github.com/ -> PAT covers everything.
-//   - In shadow-tests/harness.ts: buildPairs() currently produces workspace
-//     style configs (a-side has remote: "origin" with no url). Should switch
-//     to orchestrator-style with explicit url on both endpoints.
-
 // ── Config ────────────────────────────────────────────────────────────────────
 
 export interface RepoEndpoint {
   /** Git remote name */
   remote: string;
-  /** URL for the repo. If absent, the remote must already exist. */
-  url?: string;
+  /** URL for the repo */
+  url: string;
   /** Path prefix in this repo ("backend", "" for root) */
   dir: string;
 }
@@ -74,12 +54,7 @@ function loadConfig(): ShadowSyncConfig {
   const maxBuffer = (doc.maxBuffer as number) ?? 50 * 1024 * 1024;
   const shadowBranchPrefix = (doc.shadowBranchPrefix as string) ?? "shadow";
 
-  let pairs: SyncPair[];
-  if (doc.pairs) {
-    pairs = (doc.pairs as SyncPair[]);
-  } else {
-    pairs = [];
-  }
+  const pairs = (doc.pairs as SyncPair[]) ?? [];
 
   return { pairs, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
 }
@@ -89,19 +64,12 @@ const config = loadConfig();
 export const PAIRS: SyncPair[] = [...config.pairs];
 const REPLAYED_TRAILER = config.trailers.replayed;
 let _shadowBranchPrefix = config.shadowBranchPrefix;
-export { _shadowBranchPrefix as SHADOW_BRANCH_PREFIX };
-
-// Allow tests to inject config via environment variable.
-if (process.env.SHADOW_TEST_PAIRS) {
-  PAIRS.length = 0;
-  PAIRS.push(...JSON.parse(process.env.SHADOW_TEST_PAIRS));
-}
 
 // ── Core utilities ───────────────────────────────────────────────────────────
 
 const MAX_BUFFER = config.maxBuffer;
 
-/** Workspace root — ensures git commands use paths relative to the repo, not the cwd. */
+/** Orchestrator repo root — git commands use paths relative to it, not the cwd. */
 let _repoRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" })
   .stdout.trim();
 
@@ -192,14 +160,6 @@ function refsExist(refs: string[]): Set<string> {
   return existing;
 }
 
-export function getCurrentBranch(): string {
-  const result = git(["symbolic-ref", "--short", "HEAD"], { safe: true });
-  if (!result.ok) {
-    die("You are in a detached HEAD state. Check out a branch first.");
-  }
-  return result.stdout;
-}
-
 export function listBranches(remote: string): string[] {
   return git(["branch", "-r"])
     .split("\n")
@@ -223,9 +183,8 @@ export function appendTrailer(message: string, trailer: string): string {
   return result.stdout;
 }
 
-/** Ensure a git remote is configured. If the endpoint has a url, add or update it. */
+/** Ensure a git remote is configured at the endpoint's URL — add or update as needed. */
 export function ensureRemote(endpoint: RepoEndpoint): void {
-  if (!endpoint.url) return;
   const existing = git(["remote", "get-url", endpoint.remote], { safe: true });
   if (!existing.ok) {
     git(["remote", "add", endpoint.remote, endpoint.url]);
@@ -602,11 +561,11 @@ function crossRepoMerge(opts: {
   }
   if (!echoTargetSHA) return null;
 
-  const aTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
-  if (!aTreeRes.ok) return null;
+  const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
+  if (!echoTreeRes.ok) return null;
   const shadowDirRes = git(["rev-parse", `${mappedParents[0]}:${target.dir}`], { safe: true });
-  if (!shadowDirRes.ok) return aTreeRes.stdout;
-  return composeSubtree(aTreeRes.stdout, target.dir, shadowDirRes.stdout);
+  if (!shadowDirRes.ok) return echoTreeRes.stdout;
+  return composeSubtree(echoTreeRes.stdout, target.dir, shadowDirRes.stdout);
 }
 
 /**
@@ -657,27 +616,23 @@ function collectWithTrueParents(revListArgs: string[]): TopoCommit[] {
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
-/** Collect commits from remote-tracking branches in topo order. */
-function collectBranchCommits(refs: string[]): TopoCommit[] {
-  return collectWithTrueParents(["rev-list", "--topo-order", "--reverse", ...refs]);
-}
-
-type CommitSource =
-  | { kind: "remoteRefs"; refs: string[] }
-  | { kind: "localBranch"; branch: string };
-
-/** Collect commits from branches, optionally filtered to those touching dir/. */
-function collectCommitsForDir(source: CommitSource, dir: string): TopoCommit[] {
-  const args = ["rev-list", "--topo-order", "--reverse"];
-  if (source.kind === "localBranch") {
-    args.push(source.branch);
-  } else {
-    args.push(...source.refs);
-  }
-  if (dir) args.push("--", `${dir}/`);
+/** Collect source commits in topo order, optionally scoped to source.dir/. */
+function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+  const args = ["rev-list", "--topo-order", "--reverse",
+    ...branches.map(b => `${source.remote}/${b}`)];
+  if (source.dir) args.push("--", `${source.dir}/`);
   return collectWithTrueParents(args);
 }
 
+/**
+ * Map each source branch to its corresponding replayed tip on the target.
+ *
+ * Walks the branch's history newest-first looking for the most recent ancestor
+ * that landed in `shaMapping`. The branch HEAD itself may be an outer-only
+ * commit (didn't touch source.dir/) and therefore not in the mapping — in
+ * that case we still want to advance the shadow branch to the most recent
+ * commit that *did* touch the synced subdir.
+ */
 function buildBranchMapping(
   remote: string,
   branches: string[],
@@ -685,9 +640,17 @@ function buildBranchMapping(
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
-    const headSHA = git(["rev-parse", `${remote}/${branch}`]);
-    const replayedSHA = shaMapping.get(headSHA);
-    if (replayedSHA) branchMapping.set(branch, replayedSHA);
+    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
+    if (!log.ok) continue;
+    for (const line of log.stdout.split("\n")) {
+      const hash = line.trim();
+      if (!hash) continue;
+      const replayed = shaMapping.get(hash);
+      if (replayed) {
+        branchMapping.set(branch, replayed);
+        break;
+      }
+    }
   }
   return branchMapping;
 }
@@ -728,8 +691,7 @@ function directionConfig(sourceRemote: string, targetRemote: string): DirectionC
  * pair — no cross-pair `--all` fallback, because the
  * `Shadow-replayed-{sourceRemote}` trailer doesn't encode the pair name,
  * so a broader scan would pick up trailers from other pairs that happen
- * to share the same source remote (e.g., both pairs sourcing from
- * `origin` in workspace mode).
+ * to share the same source remote.
  */
 function scanReplayedMapping(opts: {
   pair: SyncPair;
@@ -752,9 +714,9 @@ function scanReplayedMapping(opts: {
 }
 
 /**
- * Phase 6: walk newCommits in topo order, building each replayed tree by
- * diff-applying the source commit onto the previous tree, then committing
- * with the original author/committer identity and an added trailer.
+ * Walk newCommits in topo order, building each replayed tree by diff-applying
+ * the source commit onto the previous tree, then committing with the original
+ * author/committer identity and an added trailer.
  *
  * `shaMapping` is mutated: every replayed source hash is recorded so later
  * commits in the same batch can resolve their parents.
@@ -766,7 +728,7 @@ function runReplayLoop(opts: {
   source: RepoEndpoint;
   target: RepoEndpoint;
   dc: DirectionConfig;
-}): { lastSHA: string | null } {
+}): void {
   const { newCommits, shaMapping, targetInit, source, target, dc } = opts;
   const tmpIndex = path.join(
     os.tmpdir(),
@@ -774,13 +736,12 @@ function runReplayLoop(opts: {
   );
 
   let lastTree: string | null = null;
-  let lastSHA: string | null = null;
   try {
     for (const commit of newCommits) {
       const meta = getCommitMeta(commit.hash);
 
-      // Commits that carry the skip trailer came from the other direction
-      // (e.g. forwarded by us then echoed back) — record but don't replay content
+      // Commits that already carry our own add-trailer were forwarded by us
+      // and round-tripped back to source via a merge — record but don't replay.
       const isEcho = hasTrailerLine(meta.trailers, dc.addTrailerKey);
 
       if (isEcho) {
@@ -839,36 +800,11 @@ function runReplayLoop(opts: {
 
       shaMapping.set(commit.hash, newSHA);
       lastTree = tree;
-      lastSHA = newSHA;
       console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
     }
   } finally {
     fs.rmSync(tmpIndex, { force: true });
   }
-
-  return { lastSHA };
-}
-
-/** Build source rev-list refs and collect candidate commits in topo order. */
-function collectSourceCommits(opts: {
-  source: RepoEndpoint;
-  branches: string[];
-  sourceBranch: string | undefined;
-}): TopoCommit[] {
-  const { source, branches, sourceBranch } = opts;
-  const useLocalBranch = !!sourceBranch && !source.url;
-  const sourceRefs = sourceBranch
-    ? [source.url ? `${source.remote}/${sourceBranch}` : sourceBranch]
-    : branches.map(b => `${source.remote}/${b}`);
-
-  return source.dir
-    ? collectCommitsForDir(
-        useLocalBranch
-          ? { kind: "localBranch", branch: sourceBranch! }
-          : { kind: "remoteRefs", refs: sourceRefs },
-        source.dir,
-      )
-    : collectBranchCommits(sourceRefs);
 }
 
 /**
@@ -905,17 +841,14 @@ function filterNewCommits(
  * Replay commits from one side of a pair to the other.
  *
  * @param from - "a" or "b": which side's commits to replay
- * @param branches - branches to replay (remote-tracking refs for the source)
- * @param sourceBranch - when replaying from a workspace branch (not remote refs),
- *                       the branch name to collect commits from
+ * @param branches - branches to replay (resolved as remote-tracking refs on the source)
  */
 export function replayCommits(opts: {
   pair: SyncPair;
   from: "a" | "b";
   branches: string[];
-  sourceBranch?: string;
 }): { mirrored: number; branchMapping: Map<string, string>; upToDate: boolean } {
-  const { pair, from, branches, sourceBranch } = opts;
+  const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
   const dc = directionConfig(source.remote, target.remote);
@@ -924,14 +857,15 @@ export function replayCommits(opts: {
   const shaMapping = scanReplayedMapping({ pair, target, branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  const allCommits = collectSourceCommits({ source, branches, sourceBranch });
+  const allCommits = collectSourceCommits(source, branches);
   const newCommits = filterNewCommits(allCommits, shaMapping, dc);
 
   if (newCommits.length === 0) {
-    const branchMapping = sourceBranch
-      ? new Map<string, string>()
-      : buildBranchMapping(source.remote, branches, shaMapping);
-    return { mirrored: 0, branchMapping, upToDate: true };
+    return {
+      mirrored: 0,
+      branchMapping: buildBranchMapping(source.remote, branches, shaMapping),
+      upToDate: true,
+    };
   }
 
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
@@ -946,17 +880,14 @@ export function replayCommits(opts: {
         .stdout.split("\n")[0] || null)
     : null;
 
-  const { lastSHA } = runReplayLoop({
-    newCommits, shaMapping, targetInit, source, target, dc,
-  });
-
-  // lastSHA can remain null if every commit in newCommits was skipped (buildRemappedTree returned null).
-  const branchMapping: Map<string, string> = sourceBranch
-    ? (lastSHA ? new Map([[branches[0] ?? "main", lastSHA]]) : new Map())
-    : buildBranchMapping(source.remote, branches, shaMapping);
+  runReplayLoop({ newCommits, shaMapping, targetInit, source, target, dc });
 
   console.log();
   console.log(`Done. ${newCommits.length} commit(s) replayed.`);
 
-  return { mirrored: newCommits.length, branchMapping, upToDate: false };
+  return {
+    mirrored: newCommits.length,
+    branchMapping: buildBranchMapping(source.remote, branches, shaMapping),
+    upToDate: false,
+  };
 }

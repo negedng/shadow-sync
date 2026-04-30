@@ -214,13 +214,21 @@ export interface RunResult {
 function buildPairs(env: TestEnv): SyncPair[] {
   return env.remotes.map(r => ({
     name: r.subdir,
-    a: { remote: "origin", dir: r.subdir },
+    a: { remote: "origin", url: env.originBare, dir: r.subdir },
     b: { remote: r.remoteName, url: r.remoteBare, dir: r.remoteSubdir },
   }));
 }
 
 /** Apply test overrides and run sync in-process. */
 function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string }): RunResult {
+  // Orchestrator mode reads source state from the remote-tracking ref. Tests
+  // commit on localRepo without pushing, so mirror localRepo branches up to
+  // originBare before each "from a" sync — otherwise origin/<branch> is stale
+  // and the orchestrator sees nothing to replay.
+  if (opts.from === "a") {
+    try { git("push origin --all", env.localRepo); } catch { /* nothing to push */ }
+  }
+
   applyTestOverrides({
     repoRoot: env.localRepo,
     pairs: buildPairs(env),
@@ -239,36 +247,17 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string }
   };
 }
 
-/**
- * Run shadow-ci-sync.ts — simulates the CI pull workflow.
- * Replays external remote commits into shadow branches on origin.
- * After running, checks out main so the local repo is in a clean state.
- */
+/** Pull: replay external remote commits into shadow branches on origin. */
 export function runCiSync(env: TestEnv): RunResult {
-  const result = runSyncInProcess(env, { from: "b" });
-  // CI sync switches branches; restore main for subsequent operations
-  try { git("checkout main", env.localRepo); } catch { /* may already be on main */ }
-  return result;
+  return runSyncInProcess(env, { from: "b" });
 }
 
-/**
- * Run shadow-ci-forward.ts — simulates the CI forward workflow.
- * Forwards shadow branch content to the external remote.
- */
-/** Run shadow-ci-forward.ts — replay local commits to external shadow branch. */
-export function runCiForward(env: TestEnv, remote?: RemoteInfo): RunResult {
+/** Push: replay local commits to the external shadow branch.
+ *  `_message` and `_extraArgs` are vestigial — kept to avoid touching every test call site. */
+export function runPush(env: TestEnv, _message?: string, _extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
   const pairName = remote?.subdir ?? env.subdir;
   return runSyncInProcess(env, { from: "a", pair: pairName });
 }
-
-/** Alias — runExport and runCiForward are now the same operation. */
-export function runExport(env: TestEnv, _message?: string, extraArgs: string[] = [], remote?: RemoteInfo): RunResult {
-  const pairName = remote?.subdir ?? env.subdir;
-  return runSyncInProcess(env, { from: "a", pair: pairName });
-}
-
-/** Alias for runExport. */
-export const runPush = runExport;
 
 
 /** Pull latest from bare remote into the remote working copy. */

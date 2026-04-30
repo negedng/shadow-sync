@@ -14,7 +14,7 @@
 import { parseArgs } from "util";
 import {
   PAIRS, ShadowSyncError,
-  git, refExists, listBranches, getCurrentBranch,
+  git, refExists, listBranches,
   shadowBranchName, ensureRemote,
   replayCommits, preflightChecks, handlePreflightResults,
   validateName, die,
@@ -98,24 +98,9 @@ function _runSyncCore(options: SyncOptions): number {
       console.error(`    Continuing with local tracking refs — divergence checks may be stale.`);
     }
 
-    // Determine branches to replay.
-    // If source has no url, it's the workspace — default to current branch.
-    // If source has a url, it's a remote — list all its branches.
-    let branches: string[];
-    let sourceBranch: string | undefined;
-
-    if (options.branch) {
-      branches = [options.branch];
-      sourceBranch = options.branch;
-    } else if (!source.url) {
-      // Source is the workspace — use current branch
-      const current = getCurrentBranch();
-      sourceBranch = current;
-      branches = [current];
-    } else {
-      // Source is a remote — list all branches
-      branches = listBranches(source.remote);
-    }
+    const branches = options.branch
+      ? [options.branch]
+      : listBranches(source.remote);
 
     if (branches.length === 0) {
       console.log(`  No branches found on '${source.remote}'.`);
@@ -125,7 +110,7 @@ function _runSyncCore(options: SyncOptions): number {
     // Pre-flight checks on source branches
     const validBranches: string[] = [];
     for (const branch of branches) {
-      const ref = sourceBranch ? branch : `${source.remote}/${branch}`;
+      const ref = `${source.remote}/${branch}`;
       if (!refExists(ref)) {
         console.error(`  Branch '${ref}' does not exist, skipping.`);
         continue;
@@ -142,82 +127,65 @@ function _runSyncCore(options: SyncOptions): number {
 
     if (validBranches.length === 0) continue;
 
-    // Check for uncommitted changes when replaying from workspace branches
-    if (sourceBranch && source.dir) {
-      const dirty = !git(["diff", "--cached", "--quiet", "--", `${source.dir}/`], { safe: true, plain: true }).ok
-        || !git(["diff", "--quiet", "HEAD", "--", `${source.dir}/`], { safe: true, plain: true }).ok;
-      if (dirty) {
-        die(`'${source.dir}/' has uncommitted changes. Commit or stash them first.`);
-      }
-    }
-
     try {
       console.log(`\n── Replaying commits for ${pair.name} (${validBranches.length} branch(es)) ──`);
       const result = replayCommits({
         pair,
         from: fromSide,
         branches: validBranches,
-        sourceBranch,
       });
 
-      {
-        // Update shadow branches on target's remote
-        for (const branch of validBranches) {
-          const shadow = shadowBranchName(pair.name, branch);
-          const originalSHA = result.branchMapping.get(branch);
+      // Update shadow branches on target's remote
+      for (const branch of validBranches) {
+        const shadow = shadowBranchName(pair.name, branch);
+        const replayedSHA = result.branchMapping.get(branch);
 
-          if (!originalSHA) {
-            if (result.upToDate) {
-              console.log(`  ${shadow}: already up to date.`);
-            } else {
-              console.log(`  ${shadow}: no mapping found, skipping.`);
-            }
-            continue;
-          }
-
-          const replayedSHA = originalSHA;
-
-          // Check if update is needed
-          const currentSHA = refExists(`${target.remote}/${shadow}`)
-            ? git(["rev-parse", `${target.remote}/${shadow}`])
-            : null;
-
-          if (currentSHA === replayedSHA) {
-            console.log(`  ${shadow} is up to date.`);
-            continue;
-          }
-
-          if (currentSHA) {
-            const isAncestor = git(
-              ["merge-base", "--is-ancestor", replayedSHA, currentSHA], { safe: true },
-            ).ok;
-            if (isAncestor) {
-              console.log(`  ${shadow} is up to date (${target.remote} is ahead or equal).`);
-              continue;
-            }
-          }
-
-          // Check fast-forward, create merge if diverged
-          let pushSHA = replayedSHA;
-          if (currentSHA) {
-            const isFF = git(
-              ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
-            ).ok;
-            if (!isFF) {
-              console.log(`  ${shadow}: ${target.remote} diverged, creating merge to reconcile...`);
-              const syncedTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
-              pushSHA = git([
-                "commit-tree", syncedTree,
-                "-p", currentSHA, "-p", replayedSHA,
-                "-m", `Merge replayed commits into ${shadow}`,
-              ]);
-            }
-          }
-
-          console.log(`  Pushing to ${target.remote}/${shadow}...`);
-          git(["push", target.remote, `${pushSHA}:refs/heads/${shadow}`]);
-          console.log(`  ✓ Pushed.`);
+        if (!replayedSHA) {
+          console.log(result.upToDate
+            ? `  ${shadow}: already up to date.`
+            : `  ${shadow}: no mapping found, skipping.`);
+          continue;
         }
+
+        const currentSHA = refExists(`${target.remote}/${shadow}`)
+          ? git(["rev-parse", `${target.remote}/${shadow}`])
+          : null;
+
+        if (currentSHA === replayedSHA) {
+          console.log(`  ${shadow} is up to date.`);
+          continue;
+        }
+
+        if (currentSHA) {
+          const isAncestor = git(
+            ["merge-base", "--is-ancestor", replayedSHA, currentSHA], { safe: true },
+          ).ok;
+          if (isAncestor) {
+            console.log(`  ${shadow} is up to date (${target.remote} is ahead or equal).`);
+            continue;
+          }
+        }
+
+        // Fast-forward when possible, otherwise reconcile divergence with a merge.
+        let pushSHA = replayedSHA;
+        if (currentSHA) {
+          const isFF = git(
+            ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
+          ).ok;
+          if (!isFF) {
+            console.log(`  ${shadow}: ${target.remote} diverged, creating merge to reconcile...`);
+            const syncedTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
+            pushSHA = git([
+              "commit-tree", syncedTree,
+              "-p", currentSHA, "-p", replayedSHA,
+              "-m", `Merge replayed commits into ${shadow}`,
+            ]);
+          }
+        }
+
+        console.log(`  Pushing to ${target.remote}/${shadow}...`);
+        git(["push", target.remote, `${pushSHA}:refs/heads/${shadow}`]);
+        console.log(`  ✓ Pushed.`);
       }
     } catch (err: any) {
       console.error(`  ✘ Failed to sync ${pair.name}: ${err.message}`);
@@ -225,7 +193,7 @@ function _runSyncCore(options: SyncOptions): number {
     }
 
     // Detect stale shadow branches (only when syncing all branches from a remote)
-    if (!sourceBranch) {
+    if (!options.branch) {
       const shadowPrefix = `${target.remote}/${shadowBranchName(pair.name, "")}`;
       const allShadow = git(["branch", "-r"])
         .split("\n").map(l => l.trim())

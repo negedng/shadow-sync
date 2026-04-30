@@ -10,11 +10,8 @@ on:
         default: '20'
     secrets:
       EXTERNAL_REPO_TOKEN:
-        description: >
-          Optional. PAT with Contents: Read+Write on cross-repo push targets.
-          Required in orchestrator mode (target-A is not the caller's origin).
-          Not needed in workspace mode — GITHUB_TOKEN covers pushes to origin.
-        required: false
+        description: PAT with Contents Read+Write on every repo listed in shadow-config.json.
+        required: true
 
 concurrency:
   group: shadow-sync-pull
@@ -39,22 +36,10 @@ jobs:
       - run: npm ci
 
       - name: Configure git
-        env:
-          # Caller's own origin is always authed with github.token (always valid,
-          # right scope). Any other github.com URL uses EXTERNAL_REPO_TOKEN if
-          # provided — required in orchestrator mode where pushes target repos
-          # outside the caller. Longest-prefix wins in git's insteadOf matching,
-          # so the caller-specific rewrite takes precedence over the generic one.
-          GITHUB_TOKEN: ${{ github.token }}
-          EXTERNAL_REPO_TOKEN: ${{ secrets.EXTERNAL_REPO_TOKEN }}
-          CALLER_REPO: ${{ github.repository }}
         run: |
           git config --global user.name "Shadow Sync"
           git config --global user.email "shadow-sync@users.noreply.github.com"
-          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/${CALLER_REPO}".insteadOf "https://github.com/${CALLER_REPO}"
-          if [ -n "$EXTERNAL_REPO_TOKEN" ]; then
-            git config --global url."https://x-access-token:${EXTERNAL_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
-          fi
+          git config --global url."https://x-access-token:${{ secrets.EXTERNAL_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Pull from B into shadow branches on A
         run: npm run sync -- --from b

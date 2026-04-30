@@ -57,8 +57,11 @@ export default function run() {
     assertEqual(r4.status, 0, "[phase 4: no-changes] push should exit cleanly");
     assertIncludes(r4.stdout, "up to date", "[phase 4] stdout reports up-to-date");
 
-    // ── phase 5: uncommitted ────────────────────────────────────────────
-    // 5a: untracked file does NOT block push and does NOT reach shadow
+    // ── phase 5: uncommitted edits are invisible to the orchestrator ────
+    // Orchestrator-only mode (C4): only committed+pushed state propagates;
+    // working-tree edits in the source repo never reach shadow.
+
+    // 5a: untracked file does not reach shadow
     const untrackedPath = path.join(env.localRepo, env.subdir, "local-notes.txt");
     fs.writeFileSync(untrackedPath, "my personal notes\n");
     commitOnLocal(env, { "feature2.ts": "export const y = 2;\n" }, "Add feature2 (with untracked present)");
@@ -67,21 +70,19 @@ export default function run() {
     assertEqual(readExternalShadowFile(env, "feature2.ts"), "export const y = 2;\n", "[phase 5a] tracked file on shadow");
     assertEqual(readExternalShadowFile(env, "local-notes.txt"), null, "[phase 5a] untracked file NOT on shadow");
 
-    // 5b: unstaged changes to tracked file → push refused
+    // 5b: unstaged + staged-but-uncommitted edits don't propagate (push succeeds, shadow unchanged)
     const basePath = path.join(env.localRepo, env.subdir, "base.txt");
     fs.writeFileSync(basePath, "base content\nlocal WIP modification\n");
     const r5b = runPush(env, "Push with dirty working tree");
-    assertEqual(r5b.status, 1, "[phase 5b] push should fail with unstaged changes");
-    assertIncludes(r5b.stderr, "uncommitted changes", "[phase 5b] error mentions uncommitted changes");
-    assertEqual(readExternalShadowFile(env, "base.txt"), "base content\n", "[phase 5b] shadow unchanged");
+    assertEqual(r5b.status, 0, "[phase 5b] push succeeds; uncommitted edits are invisible");
+    assertEqual(readExternalShadowFile(env, "base.txt"), "base content\n", "[phase 5b] shadow unchanged by uncommitted edit");
 
-    // 5c: staged but uncommitted → still refused
     git(`add ${env.subdir}/base.txt`, env.localRepo);
     const r5c = runPush(env, "Push with staged but uncommitted");
-    assertEqual(r5c.status, 1, "[phase 5c] push should fail with staged uncommitted");
-    assertIncludes(r5c.stderr, "uncommitted changes", "[phase 5c] error mentions uncommitted changes");
+    assertEqual(r5c.status, 0, "[phase 5c] push succeeds; staged-uncommitted edits are invisible");
+    assertEqual(readExternalShadowFile(env, "base.txt"), "base content\n", "[phase 5c] shadow still unchanged");
 
-    // 5d: commit the WIP, clean up untracked, push works and content propagates
+    // 5d: once committed, the edit propagates
     git('commit -m "Commit the WIP edit"', env.localRepo);
     fs.unlinkSync(untrackedPath);
     const r5d = runPush(env, "Push after committing");
