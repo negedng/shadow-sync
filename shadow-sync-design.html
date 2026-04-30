@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C8</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C8 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M8</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M8</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -319,6 +319,11 @@
     honest: two pairs that both read from <code>origin</code> (a backend pair and a frontend pair
     in workspace mode, for example) can&rsquo;t step on each other&rsquo;s trailers.
   </p>
+  <p>
+    On round-trip echoes (a source commit that already carries a prior <code>Shadow-replayed-*</code>
+    from an earlier direction), strip the prior trailer before appending the new one &mdash; otherwise
+    trailers accumulate without bound across cycles.
+  </p>
 </div>
 
 <div class="card" id="c4">
@@ -405,7 +410,7 @@
 </div>
 
 <h3 class="subsection">Minor choices</h3>
-<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C5. Listed briefly.</p>
+<p>Four more decisions with genuine alternatives but narrower blast radius than C1&ndash;C5. Listed briefly.</p>
 
 <div class="card compact" id="c6">
   <h3><span class="ref ref-c">C6</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
@@ -423,6 +428,12 @@
   <h3><span class="ref ref-c">C8</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
   <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
+</div>
+
+<div class="card compact" id="c9">
+  <h3><span class="ref ref-c">C9</span> Reconcile target-side shadow divergence with a 2-parent merge at push time</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> <code>--force</code> push (clobbers any independently-pushed work on the shadow ref); abort and require operator action (violates <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract); fast-forward-only (same failure whenever the target has moved at all).</p>
+  <p>When the target&rsquo;s shadow-ref tip is neither equal to the engine&rsquo;s newly replayed tip nor an ancestor of it, the engine builds a 2-parent commit (<code>commit-tree replayedTree -p current -p replayed</code>) and pushes that. The replayed tree wins on content; both histories survive on topology. The next run&rsquo;s dedup scan picks up the merge as a normal shadow commit, so the resolution stays idempotent.</p>
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -721,7 +732,10 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     (filtering out <code>shadow/*</code> refs so we don&rsquo;t recursively sync our own output),
     then runs the replay loop once per branch. Each push lands at
     <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code> on the target, so syncing <em>main</em> and
-    <em>feature/x</em> produces two distinct refs without sharing tip state.
+    <em>feature/x</em> produces two distinct refs without sharing tip state. When the source has
+    a path filter (monorepo&rarr;external direction) and the branch&rsquo;s HEAD doesn&rsquo;t
+    touch <code>dir/</code>, the shadow tip points at the most-recent commit on that branch that
+    did &mdash; not the HEAD itself, which has nothing to replay.
   </p>
   <p>
     A new source branch needs no per-branch bootstrap. Commits inherited from already-synced
