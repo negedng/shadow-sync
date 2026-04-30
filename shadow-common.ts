@@ -7,18 +7,16 @@ import * as os from "os";
 // ── Module setup ──────────────────────────────────────────────────────────────
 
 export interface RepoEndpoint {
-  /** Git remote name */
   remote: string;
-  /** URL for the repo */
   url: string;
-  /** Path prefix in this repo ("backend", "" for root) */
+  /** "" = repo root; otherwise the synced subdirectory. */
   dir: string;
 }
 
 export interface SyncPair {
-  /** Stable identifier — used in shadow branch names. */
+  /** Baked into shadow branch names — renaming breaks dedup. */
   name: string;
-  /** The two repo endpoints. Symmetric — direction is chosen at runtime via --from. */
+  /** Symmetric: direction is chosen at runtime via --from. */
   a: RepoEndpoint;
   b: RepoEndpoint;
 }
@@ -35,7 +33,6 @@ const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-co
 
 function loadConfig(): ShadowSyncConfig {
   if (!fs.existsSync(CONFIG_PATH)) {
-    // No config file — return defaults (tests override via applyTestOverrides)
     return {
       pairs: [],
       trailers: { replayed: "Shadow-replayed" },
@@ -79,10 +76,7 @@ export class ShadowSyncError extends Error {
   constructor(msg: string) { super(msg); this.name = "ShadowSyncError"; }
 }
 
-/**
- * Override module-level state for in-process testing.
- * Call before each in-process sync invocation.
- */
+/** Mutates module state — call before each in-process runSync(). */
 export function applyTestOverrides(opts: {
   repoRoot: string;
   pairs: SyncPair[];
@@ -246,6 +240,7 @@ function extractTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string
   return mapping;
 }
 
+/** Trailer keys/regexes resolved for one replay direction. */
 interface DirectionConfig {
   addTrailerKey: string;
   scanRe: RegExp;
@@ -253,23 +248,11 @@ interface DirectionConfig {
   skipScanRe: RegExp;
 }
 
-/**
- * Build direction config from remote names.
- * Trailer format: "Shadow-replayed-{remote}: {hash}" — remote is sanitized
- * into the key so git's trailer parser (strict `[A-Za-z0-9-]+` token
- * grammar) recognizes it. When replaying from source, skip commits tagged
- * with the target's remote (they originated from the target and were
- * already replayed back).
- */
 function buildDirectionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
   return {
-    /** Trailer key to add: "Shadow-replayed-{sourceRemote}" — value is the hash */
     addTrailerKey: replayedTrailerKey(sourceRemote),
-    /** Regex to scan for already-replayed commits from this source */
     scanRe: replayedTrailerRegex(sourceRemote),
-    /** Trailer key to skip: commits tagged with the target's remote came from there */
     skipTrailerKey: replayedTrailerKey(targetRemote),
-    /** Regex to extract the original target-side hash from a skipped commit's trailer */
     skipScanRe: replayedTrailerRegex(targetRemote),
   };
 }
@@ -307,7 +290,7 @@ export function runPreflightChecks(ref: string): PreflightWarning[] {
   return warnings;
 }
 
-/** Pure formatter: turns warnings into stderr lines plus a pass/fail decision. */
+/** Pure (no I/O) — see printPreflightResults for the side-effecting version. */
 export function formatPreflightResults(warnings: PreflightWarning[]): { lines: string[]; errorCount: number; ok: boolean } {
   const lines = warnings.map(w => `${w.level === "error" ? "✘" : "⚠"} [${w.code}] ${w.message}`);
   const errorCount = warnings.filter(w => w.level === "error").length;
@@ -337,9 +320,7 @@ interface CommitMeta {
 }
 
 function getCommitMeta(hash: string): CommitMeta {
-  // NUL-separated fields. %B (message) goes last so any internal newlines
-  // can't shift field positions. Commit messages cannot contain NUL bytes,
-  // so split("\0") is unambiguous.
+  // NUL-separated; %B last so its newlines can't shift fields.
   const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%h: %s", "%(trailers:only,unfold=true)", "%B"]
     .join("%x00");
   const raw = git(["log", "-1", `--format=${format}`, hash]);
@@ -375,13 +356,8 @@ interface TopoCommit {
 }
 
 /**
- * Fetch true parents for the given commit hashes via `git log --no-walk`.
- * Bypasses path-filter history simplification, which silently drops merge
- * parents whose ancestors are TREESAME at the path. Without this, a merge
- * that brought changes from a branch we don't sync would lose the parent
- * edge to its first parent on replay.
- *
- * Batched in chunks to stay under OS argv limits on large histories.
+ * `--no-walk` bypasses path-filter simplification, which would silently drop
+ * merge parents TREESAME at the path. Chunked for argv limits.
  */
 function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   const map = new Map<string, string[]>();
@@ -399,11 +375,6 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-/**
- * Two-step rev-list: select hashes via the given args, then fetch true
- * parents via `git log --no-walk` to bypass any path-filter simplification
- * that would have rewritten merge parents. See `fetchTrueParents`.
- */
 function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
   const result = git(revListArgs, { safe: true });
   if (!result.ok || !result.stdout) return [];
@@ -412,7 +383,6 @@ function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
-/** Collect source commits in topo order, optionally scoped to source.dir/. */
 function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
   const args = ["rev-list", "--topo-order", "--reverse",
     ...branches.map(b => `${source.remote}/${b}`)];
@@ -435,13 +405,10 @@ function compileIgnorePattern(pattern: string): RegExp {
 }
 
 /**
- * Build a remapped tree by applying the source commit's diff (against its
- * first parent) to the previous replayed tree. Only files that actually
- * changed in the source commit are touched — producing clean, minimal diffs.
- *
- * For root commits (no parent), all files in sourceDir are treated as added.
+ * Apply this commit's diff (vs first parent) to parentTree. Root commits
+ * are treated as additions of every file in sourceDir.
  */
-function buildRemappedTree(opts: {
+function buildReplayedTree(opts: {
   commitHash: string;
   sourceDir: string;
   targetDir: string;
@@ -452,30 +419,26 @@ function buildRemappedTree(opts: {
   const { commitHash, sourceDir, targetDir, parentTree, tmpIndex, shadowIgnorePatterns } = opts;
   const idxEnv = { GIT_INDEX_FILE: tmpIndex };
 
-  // Start from the previous replayed commit's tree (or empty for the first)
   if (parentTree) {
     git(["read-tree", parentTree], { env: idxEnv });
   } else {
     git(["read-tree", "--empty"], { env: idxEnv });
   }
 
-  // Compute what changed in the source commit.
-  // diff-tree -r gives: :oldmode newmode oldhash newhash status\tpath
+  // diff-tree -r format: :oldmode newmode oldhash newhash status\tpath
   const sourceParent = git(["rev-parse", `${commitHash}^`], { safe: true });
   let diffOutput: string;
 
   if (sourceParent.ok) {
-    // Normal commit — diff against first parent, scoped to sourceDir
     const diffArgs = ["diff-tree", "-r", sourceParent.stdout, commitHash];
     if (sourceDir) diffArgs.push("--", `${sourceDir}/`);
     diffOutput = git(diffArgs, { safe: true }).stdout;
   } else {
-    // Root commit — list all files as additions
     const lsArgs = ["ls-tree", "-r", commitHash];
     if (sourceDir) lsArgs.push("--", `${sourceDir}/`);
     const lsResult = git(lsArgs, { safe: true });
     if (!lsResult.ok || !lsResult.stdout) return null;
-    // Convert ls-tree format to diff-tree-like "A" entries
+    // Reshape ls-tree into diff-tree's "A" entries.
     diffOutput = lsResult.stdout.split("\n").filter(Boolean)
       .map(line => {
         const m = line.match(/^(\d+)\s+\w+\s+([0-9a-f]+)\t(.+)$/);
@@ -486,8 +449,7 @@ function buildRemappedTree(opts: {
 
   if (!diffOutput) return parentTree ?? null;
 
-  // Parse and apply each change. diff-tree is invoked without -M/-C above,
-  // so renames/copies surface as D+A pairs — we only handle A/M/D/T here.
+  // No -M/-C above, so renames surface as D+A — we only handle A/M/D/T.
   const removals: string[] = [];
   const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
   for (const line of diffOutput.split("\n").filter(Boolean)) {
@@ -495,14 +457,12 @@ function buildRemappedTree(opts: {
     if (!m) continue;
     const [, newMode, newHash, status, filePath] = m;
 
-    // Map source path to target path
     let srcRelative = filePath;
     if (sourceDir) {
       if (!srcRelative.startsWith(`${sourceDir}/`)) continue;
       srcRelative = srcRelative.slice(sourceDir.length + 1);
     }
 
-    // Skip files matching .shadowignore patterns
     if (shadowIgnorePatterns.some(p => p.test(srcRelative))) continue;
 
     const targetPath = targetDir ? `${targetDir}/${srcRelative}` : srcRelative;
@@ -514,12 +474,10 @@ function buildRemappedTree(opts: {
     }
   }
 
-  // Batch-remove deleted paths (single spawn)
   if (removals.length > 0) {
     git(["rm", "--cached", "-f", "--quiet", "--", ...removals], { env: idxEnv, safe: true });
   }
 
-  // Batch-add/update entries via --index-info (single spawn)
   if (additions.length > 0) {
     git(["update-index", "--index-info"], { env: idxEnv, input: additions.join("\n") + "\n" });
   }
@@ -527,12 +485,7 @@ function buildRemappedTree(opts: {
   return git(["write-tree"], { env: idxEnv });
 }
 
-/**
- * Produce a new tree that equals `baseTree` with `subdir/` replaced by
- * `subtreeContent`. Used to keep shadow branches carrying the target side's
- * *current* non-pair content rather than the snapshot the replay chain
- * would otherwise freeze at its first commit.
- */
+/** Splice `subtreeContent` into `baseTree` at `subdir/`, replacing what was there. */
 function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
   const tmpIndex = path.join(
     os.tmpdir(),
@@ -551,16 +504,10 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
 }
 
 /**
- * For a merge commit whose parents straddle the two repos — one shadow-side
- * (non-echo) parent and one echo'd target-side parent (carries the skip
- * trailer pointing back to a commit on the target) — build a parent tree
- * that combines:
- *   - outer (non-target.dir) files from the echo'd parent (work-branch state)
- *   - target.dir/ subtree from the shadow chain's first mapped parent
- *
- * Returns null when no echo'd parent is found, target.dir is empty, or the
- * echo'd target-side tree can't be resolved — caller falls back to the
- * standard first-parent tree.
+ * Cross-repo merge: splice the shadow chain's target.dir/ over the echo'd
+ * parent's outer files, so checking out an old shadow commit reflects the
+ * target's outer state then — not a frozen bootstrap snapshot. Returns null
+ * to fall back to the plain first-parent tree.
  */
 function composeCrossRepoMergeTree(opts: {
   commit: TopoCommit;
@@ -592,12 +539,7 @@ function composeCrossRepoMergeTree(opts: {
   return composeSubtree(echoTreeRes.stdout, target.dir, shadowDirRes.stdout);
 }
 
-/**
- * Walk `parentHash`'s source-side ancestry in topo order, returning the
- * mapped value of the closest commit already in `shaMapping`. Used by M2 as
- * the "echo anchor" — the most recent shared point between source and target.
- * Returns null when no ancestor has been mapped (truly disjoint history).
- */
+/** Echo anchor: closest mapped ancestor of `parentHash`, or null if disjoint. */
 function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
   const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
   if (!result.ok) return null;
@@ -615,12 +557,8 @@ function resolveTargetParents(
   shaMapping: Map<string, string>,
   targetInit: string | null,
 ): string[] {
-  // M2: an unmapped parent (or a root commit) anchors at the closest echo'd
-  // ancestor's mapped value, falling back to target's init commit when no
-  // echo exists in the ancestry. Anchoring at init (rather than target/main's
-  // current tip) keeps merge-base aligned with the most recent round-trip
-  // instead of jumping ahead to outer-only commits the consumer made between
-  // syncs — which is what would silently revert non-pair files at merge time.
+  // Orphan parents anchor at the closest echo'd ancestor, then targetInit —
+  // never target/main's tip, which would silently revert outer files at merge.
   if (commit.parents.length === 0) {
     return targetInit ? [targetInit] : [];
   }
@@ -641,12 +579,9 @@ function resolveTargetParents(
 // ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
- * Build the source→target SHA mapping from existing replayed commits
- * on the target side. Scans only the target's own shadow branches for this
- * pair — no cross-pair `--all` fallback, because the
- * `Shadow-replayed-{sourceRemote}` trailer doesn't encode the pair name,
- * so a broader scan would pick up trailers from other pairs that happen
- * to share the same source remote.
+ * Source→target SHA mapping from this pair's shadow branches only.
+ * No --all fallback: trailers don't encode the pair name, so cross-pair
+ * scans would pick up unrelated mappings sharing a source remote.
  */
 function loadReplayedMappings(opts: {
   pair: SyncPair;
@@ -669,15 +604,9 @@ function loadReplayedMappings(opts: {
 }
 
 /**
- * Drop commits that are already replayed or were echoed back from the target.
- *
- * For echoed commits (those carrying the target's replayed trailer), extract
- * the original target-side hash from the trailer and — when that commit still
- * exists locally — record echo → original in shaMapping. Downstream parent
- * resolution then re-uses the original target commit directly (same SHA),
- * instead of creating a new replayed copy or falling back to the target's
- * current branch tip. This keeps ancestry aligned across repos so later merges
- * find the real common ancestor.
+ * Drop already-replayed and echoed commits. Echoes get echo→original
+ * recorded in shaMapping so parent resolution reuses the real target SHA
+ * rather than re-replaying or falling back to the branch tip.
  */
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
@@ -699,13 +628,9 @@ function filterNotReplayedCommits(
 }
 
 /**
- * Map each source branch to its corresponding replayed tip on the target.
- *
- * Walks the branch's history newest-first looking for the most recent ancestor
- * that landed in `shaMapping`. The branch HEAD itself may be an outer-only
- * commit (didn't touch source.dir/) and therefore not in the mapping — in
- * that case we still want to advance the shadow branch to the most recent
- * commit that *did* touch the synced subdir.
+ * Newest-first walk to each branch's most recent mapped ancestor. The branch
+ * HEAD may be outer-only (didn't touch source.dir/), so we still advance the
+ * shadow tip to the most recent commit inside the synced subdir.
  */
 function mapBranchesToTargetTips(
   remote: string,
@@ -730,12 +655,8 @@ function mapBranchesToTargetTips(
 }
 
 /**
- * Walk newCommits in topo order, building each replayed tree by diff-applying
- * the source commit onto the previous tree, then committing with the original
- * author/committer identity and an added trailer.
- *
- * `shaMapping` is mutated: every replayed source hash is recorded so later
- * commits in the same batch can resolve their parents.
+ * Replay newCommits in topo order, mutating `shaMapping` so each replayed
+ * commit is visible to later parent resolution in the same batch.
  */
 function replayCommits(opts: {
   newCommits: TopoCommit[];
@@ -756,8 +677,7 @@ function replayCommits(opts: {
     for (const commit of newCommits) {
       const meta = getCommitMeta(commit.hash);
 
-      // Commits that already carry our own add-trailer were forwarded by us
-      // and round-tripped back to source via a merge — record but don't replay.
+      // Carries our own trailer → forwarded earlier and merged back; record only.
       const isEcho = hasTrailer(meta.trailers, dc.addTrailerKey);
 
       if (isEcho) {
@@ -773,25 +693,20 @@ function replayCommits(opts: {
 
       const mappedParents = resolveTargetParents(commit, shaMapping, targetInit);
 
-      // M9: cross-repo merges (one shadow-side parent, one echo'd target-side
-      // parent) get a composed parent tree so shadow's intermediate commits'
-      // outer state stays aligned with the most recent round-tripped commit
-      // — checking out an old shadow commit reflects the target's outer at
-      // that point rather than a frozen bootstrap snapshot.
+      // Cross-repo merge tree (see composeCrossRepoMergeTree).
       const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc });
       const parentTree: string | null = composedParentTree
         ?? (mappedParents.length > 0
           ? git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true }).stdout || lastTree
           : lastTree);
 
-      // Load .shadowignore from this commit's tree
       const ignorePath = source.dir ? `${source.dir}/.shadowignore` : ".shadowignore";
       const ignoreContent = git(["show", `${commit.hash}:${ignorePath}`], { safe: true });
       const shadowIgnorePatterns = ignoreContent.ok && ignoreContent.stdout
         ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
         : [];
 
-      const tree = buildRemappedTree({
+      const tree = buildReplayedTree({
         commitHash: commit.hash,
         sourceDir: source.dir,
         targetDir: target.dir,
@@ -823,12 +738,7 @@ function replayCommits(opts: {
   }
 }
 
-/**
- * Replay commits from one side of a pair to the other.
- *
- * @param from - "a" or "b": which side's commits to replay
- * @param branches - branches to replay (resolved as remote-tracking refs on the source)
- */
+/** Replay one side of a pair onto the other; `from` selects the source. */
 export function mirrorHistory(opts: {
   pair: SyncPair;
   from: "a" | "b";
@@ -856,11 +766,7 @@ export function mirrorHistory(opts: {
 
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
 
-  // M2: orphans anchor at target's init commit (or the closest echo'd
-  // ancestor when one exists in the unmapped parent's history). Pinning to
-  // init keeps merge-base aligned with the most recent round-trip rather
-  // than jumping to target/main's current tip and shadowing outer-only
-  // commits made between syncs.
+  // Fallback root for orphan parents (see resolveTargetParents).
   const targetInit = refExists(`${target.remote}/main`)
     ? (git(["rev-list", "--max-parents=0", `${target.remote}/main`], { safe: true })
         .stdout.split("\n")[0] || null)

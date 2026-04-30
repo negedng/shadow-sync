@@ -454,7 +454,7 @@
     <li>
       <strong><code>target.dir/</code> subtree</strong> comes from the shadow-chain parent
       (the first mapped parent&rsquo;s <code>target.dir/</code>), with the source merge
-      commit&rsquo;s own diff overlaid on top via <code>buildRemappedTree</code>. The source
+      commit&rsquo;s own diff overlaid on top via <code>buildReplayedTree</code>. The source
       side already resolved any merge conflicts inside the synced subtree
       (<a class="ref ref-r" href="#r5">R5</a>: each conflict resolved at most once), so we
       accept that resolution verbatim. The work-branch contributions that round-tripped through
@@ -464,7 +464,7 @@
   </ul>
 <pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
 parentTree  = compose(echo&rsquo;d^{tree}, target.dir, shadow_parent:target.dir/)
-finalTree   = parentTree + sourceMerge.diff      (via buildRemappedTree)
+finalTree   = parentTree + sourceMerge.diff      (via buildReplayedTree)
 commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 </pre>
   <p>
