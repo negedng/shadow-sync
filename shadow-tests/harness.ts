@@ -34,6 +34,18 @@ function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 
+/**
+ * Append [user] + core.autocrlf to .git/config in one fs write — replaces
+ * 3 separate `git config` spawns. Each git spawn on Windows pays a hefty
+ * AV-scan tax, so removing them adds up across 18 tests.
+ */
+function writeRepoConfig(workDir: string, identity: { email: string; name: string }): void {
+  fs.appendFileSync(
+    path.join(workDir, ".git", "config"),
+    `[user]\n\temail = ${identity.email}\n\tname = ${identity.name}\n[core]\n\tautocrlf = false\n`,
+  );
+}
+
 /** Create an isolated test environment with three git repos.
  *  `remoteSubdir` (default "") places B-side files under a subdir so both
  *  A and B use non-root directories. */
@@ -51,9 +63,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
 
   // 2) Working clone of remote — create initial commit so branch exists
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
-  git('config user.email "team@test.com"', remoteWorking);
-  git('config user.name "Team Member"', remoteWorking);
-  git("config core.autocrlf false", remoteWorking);
+  writeRepoConfig(remoteWorking, { email: "team@test.com", name: "Team Member" });
   fs.writeFileSync(path.join(remoteWorking, "README.md"), "# Remote Repo\n");
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
@@ -66,9 +76,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   // 4) Local internal repo
   fs.mkdirSync(localRepo);
   git("init", localRepo);
-  git('config user.email "local@test.com"', localRepo);
-  git('config user.name "Local Dev"', localRepo);
-  git("config core.autocrlf false", localRepo);
+  writeRepoConfig(localRepo, { email: "local@test.com", name: "Local Dev" });
   fs.writeFileSync(path.join(localRepo, "mono.txt"), "internal repo root\n");
   fs.mkdirSync(path.join(localRepo, subdir), { recursive: true });
   git("add -A", localRepo);
@@ -99,9 +107,7 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
 
   // Working clone
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
-  git('config user.email "team@test.com"', remoteWorking);
-  git('config user.name "Team Member"', remoteWorking);
-  git("config core.autocrlf false", remoteWorking);
+  writeRepoConfig(remoteWorking, { email: "team@test.com", name: "Team Member" });
   fs.writeFileSync(path.join(remoteWorking, "README.md"), `# ${remoteName}\n`);
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
@@ -127,20 +133,21 @@ export function commitOnRemote(
 ): void {
   const workDir = remote?.remoteWorking ?? env.remoteWorking;
   const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
+  const paths: string[] = [];
   for (const [rel, content] of Object.entries(files)) {
     const prefixed = prefix ? `${prefix}/${rel}` : rel;
     const full = path.join(workDir, prefixed);
     if (content === null) {
-      if (fs.existsSync(full)) {
-        fs.unlinkSync(full);
-        git(`rm "${prefixed}"`, workDir);
-      }
+      if (fs.existsSync(full)) fs.unlinkSync(full);
     } else {
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content);
-      git(`add "${prefixed}"`, workDir);
     }
+    paths.push(prefixed);
   }
+  // Path-scoped add covers our writes/deletes in a single spawn, but leaves
+  // other untracked files in the working tree alone (tests rely on that).
+  git(`add -A -- ${paths.map(p => `"${p}"`).join(" ")}`, workDir);
   git(`commit -m "${message}"`, workDir);
   git("push origin main", workDir);
 }
@@ -154,19 +161,19 @@ export function commitOnLocal(
   remote?: RemoteInfo,
 ): void {
   const subdir = remote?.subdir ?? env.subdir;
+  const paths: string[] = [];
   for (const [rel, content] of Object.entries(files)) {
+    const relPath = `${subdir}/${rel}`;
     const full = path.join(env.localRepo, subdir, rel);
     if (content === null) {
-      if (fs.existsSync(full)) {
-        fs.unlinkSync(full);
-        git(`rm "${subdir}/${rel}"`, env.localRepo);
-      }
+      if (fs.existsSync(full)) fs.unlinkSync(full);
     } else {
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content);
-      git(`add "${subdir}/${rel}"`, env.localRepo);
     }
+    paths.push(relPath);
   }
+  git(`add -A -- ${paths.map(p => `"${p}"`).join(" ")}`, env.localRepo);
   git(`commit -m "${message}"`, env.localRepo);
 }
 
