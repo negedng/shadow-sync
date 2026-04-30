@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Module setup ──────────────────────────────────────────────────────────────
 
 export interface RepoEndpoint {
   /** Git remote name */
@@ -64,9 +64,6 @@ const config = loadConfig();
 export const PAIRS: SyncPair[] = [...config.pairs];
 const REPLAYED_TRAILER = config.trailers.replayed;
 let _shadowBranchPrefix = config.shadowBranchPrefix;
-
-// ── Core utilities ───────────────────────────────────────────────────────────
-
 const MAX_BUFFER = config.maxBuffer;
 
 /** Orchestrator repo root — git commands use paths relative to it, not the cwd. */
@@ -77,8 +74,6 @@ let _repoRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "
 const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
   ([key, value]) => ["-c", `${key}=${value}`],
 );
-
-// ── Test overrides ───────────────────────────────────────────────────────────
 
 export class ShadowSyncError extends Error {
   constructor(msg: string) { super(msg); this.name = "ShadowSyncError"; }
@@ -110,6 +105,8 @@ export function validateName(value: string, label: string): void {
   if (value.startsWith("/") || value.startsWith("\\")) fail(`${label} must not be an absolute path.`);
   if (value.startsWith("-")) fail(`${label} must not start with '-'.`);
 }
+
+// ── Git primitives ────────────────────────────────────────────────────────────
 
 type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
 type GitOpts = { cwd?: string; plain?: boolean; raw?: boolean; env?: Record<string, string>; input?: string };
@@ -173,16 +170,6 @@ export function shadowBranchName(pairName: string, branch: string): string {
   return `${_shadowBranchPrefix}/${pairName}/${branch}`;
 }
 
-export function appendTrailer(message: string, trailer: string): string {
-  const result = git(["interpret-trailers", "--trailer", trailer],
-    { safe: true, input: message, raw: true });
-  if (!result.ok) {
-    const trimmed = message.trimEnd();
-    return `${trimmed}\n\n${trailer}\n`;
-  }
-  return result.stdout;
-}
-
 /** Ensure a git remote is configured at the endpoint's URL — add or update as needed. */
 export function ensureRemote(endpoint: RepoEndpoint): void {
   const existing = git(["remote", "get-url", endpoint.remote], { safe: true });
@@ -193,7 +180,103 @@ export function ensureRemote(endpoint: RepoEndpoint): void {
   }
 }
 
-// ── Pre-flight checks ─────────────────────────────────────────────────────────
+// ── Trailer machinery ─────────────────────────────────────────────────────────
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sanitizeTrailerToken(s: string): string {
+  return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+function replayedTrailerKey(remote: string): string {
+  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(remote)}`;
+}
+
+/** Build a regex to match replay trailers: Shadow-replayed-{remote}: {hash} */
+function replayedTrailerRegex(remote: string): RegExp {
+  return new RegExp(`^${escapeRegex(replayedTrailerKey(remote))}:\\s*([0-9a-f]{7,40})`);
+}
+
+export function appendTrailer(message: string, trailer: string): string {
+  const result = git(["interpret-trailers", "--trailer", trailer],
+    { safe: true, input: message, raw: true });
+  if (!result.ok) {
+    const trimmed = message.trimEnd();
+    return `${trimmed}\n\n${trailer}\n`;
+  }
+  return result.stdout;
+}
+
+function hasTrailer(trailers: string, key: string): boolean {
+  return new RegExp(`^${escapeRegex(key)}:`, "m").test(trailers);
+}
+
+function stripReplayedTrailers(message: string): string {
+  return message.split("\n")
+    .filter(l => !l.startsWith(REPLAYED_TRAILER))
+    .join("\n").trimEnd();
+}
+
+/**
+ * Walk `git log` output where each commit is marked with `MARKER<hash>`
+ * followed by its body. Calls `onLine(hash, line)` for every body line.
+ */
+function scanLogLines(logArgs: string[], onLine: (hash: string, line: string) => void): void {
+  const MARKER = "SCANLOG ";
+  const log = git([...logArgs, `--format=${MARKER}%H%n%B`], { safe: true });
+  if (!log.ok || !log.stdout) return;
+  let currentHash: string | null = null;
+  for (const line of log.stdout.split("\n")) {
+    if (line.startsWith(MARKER)) {
+      currentHash = line.slice(MARKER.length).trim();
+      continue;
+    }
+    if (currentHash) onLine(currentHash, line);
+  }
+}
+
+function extractTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
+  const mapping = new Map<string, string>();
+  scanLogLines(logArgs, (hash, line) => {
+    const match = line.match(trailerRe);
+    if (match) mapping.set(match[1], hash);
+  });
+  return mapping;
+}
+
+interface DirectionConfig {
+  addTrailerKey: string;
+  scanRe: RegExp;
+  skipTrailerKey: string;
+  skipScanRe: RegExp;
+}
+
+/**
+ * Build direction config from remote names.
+ * Trailer format: "Shadow-replayed-{remote}: {hash}" — remote is sanitized
+ * into the key so git's trailer parser (strict `[A-Za-z0-9-]+` token
+ * grammar) recognizes it. When replaying from source, skip commits tagged
+ * with the target's remote (they originated from the target and were
+ * already replayed back).
+ */
+function buildDirectionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
+  return {
+    /** Trailer key to add: "Shadow-replayed-{sourceRemote}" — value is the hash */
+    addTrailerKey: replayedTrailerKey(sourceRemote),
+    /** Regex to scan for already-replayed commits from this source */
+    scanRe: replayedTrailerRegex(sourceRemote),
+    /** Trailer key to skip: commits tagged with the target's remote came from there */
+    skipTrailerKey: replayedTrailerKey(targetRemote),
+    /** Regex to extract the original target-side hash from a skipped commit's trailer */
+    skipScanRe: replayedTrailerRegex(targetRemote),
+  };
+}
+
+// ── Preflight checks ──────────────────────────────────────────────────────────
+
+type PreflightWarning = { level: "error" | "warn"; code: string; message: string };
 
 export function runPreflightChecks(ref: string): PreflightWarning[] {
   const warnings: PreflightWarning[] = [];
@@ -237,8 +320,6 @@ export function runPreflightChecks(ref: string): PreflightWarning[] {
   return warnings;
 }
 
-type PreflightWarning = { level: "error" | "warn"; code: string; message: string };
-
 /** Pure formatter: turns warnings into stderr lines plus a pass/fail decision. */
 export function formatPreflightResults(warnings: PreflightWarning[]): { lines: string[]; errorCount: number; ok: boolean } {
   const lines = warnings.map(w => `${w.level === "error" ? "✘" : "⚠"} [${w.code}] ${w.message}`);
@@ -253,7 +334,7 @@ export function printPreflightResults(warnings: PreflightWarning[]): boolean {
   return ok;
 }
 
-// ── Replay engine ─────────────────────────────────────────────────────────────
+// ── Commit metadata & collection ──────────────────────────────────────────────
 
 interface CommitMeta {
   hash: string;
@@ -301,49 +382,6 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
   };
 }
 
-function stripReplayedTrailers(message: string): string {
-  return message.split("\n")
-    .filter(l => !l.startsWith(REPLAYED_TRAILER))
-    .join("\n").trimEnd();
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function sanitizeTrailerToken(s: string): string {
-  return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-}
-
-function replayedTrailerKey(remote: string): string {
-  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(remote)}`;
-}
-
-/** Build a regex to match replay trailers: Shadow-replayed-{remote}: {hash} */
-function replayedTrailerRegex(remote: string): RegExp {
-  return new RegExp(`^${escapeRegex(replayedTrailerKey(remote))}:\\s*([0-9a-f]{7,40})`);
-}
-
-/**
- * Walk `git log` output where each commit is marked with `MARKER<hash>`
- * followed by its body. Calls `onLine(hash, line)` for every body line.
- */
-function scanLogLines(logArgs: string[], onLine: (hash: string, line: string) => void): void {
-  const MARKER = "SCANLOG ";
-  const log = git([...logArgs, `--format=${MARKER}%H%n%B`], { safe: true });
-  if (!log.ok || !log.stdout) return;
-  let currentHash: string | null = null;
-  for (const line of log.stdout.split("\n")) {
-    if (line.startsWith(MARKER)) {
-      currentHash = line.slice(MARKER.length).trim();
-      continue;
-    }
-    if (currentHash) onLine(currentHash, line);
-  }
-}
-
-// ── Shared helpers ──────────────────────────────────────────────────────────
-
 interface TopoCommit {
   hash: string;
   parents: string[];
@@ -374,63 +412,39 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-function extractTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
-  const mapping = new Map<string, string>();
-  scanLogLines(logArgs, (hash, line) => {
-    const match = line.match(trailerRe);
-    if (match) mapping.set(match[1], hash);
-  });
-  return mapping;
-}
-
 /**
- * Walk `parentHash`'s source-side ancestry in topo order, returning the
- * mapped value of the closest commit already in `shaMapping`. Used by M2 as
- * the "echo anchor" — the most recent shared point between source and target.
- * Returns null when no ancestor has been mapped (truly disjoint history).
+ * Two-step rev-list: select hashes via the given args, then fetch true
+ * parents via `git log --no-walk` to bypass any path-filter simplification
+ * that would have rewritten merge parents. See `fetchTrueParents`.
  */
-function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
-  const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
-  if (!result.ok) return null;
-  for (const line of result.stdout.split("\n")) {
-    const hash = line.trim();
-    if (!hash) continue;
-    const mapped = shaMapping.get(hash);
-    if (mapped) return mapped;
-  }
-  return null;
+function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
+  const result = git(revListArgs, { safe: true });
+  if (!result.ok || !result.stdout) return [];
+  const hashes = result.stdout.split("\n").filter(Boolean);
+  const parentsMap = fetchTrueParents(hashes);
+  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
-function resolveTargetParents(
-  commit: TopoCommit,
-  shaMapping: Map<string, string>,
-  targetInit: string | null,
-): string[] {
-  // M2: an unmapped parent (or a root commit) anchors at the closest echo'd
-  // ancestor's mapped value, falling back to target's init commit when no
-  // echo exists in the ancestry. Anchoring at init (rather than target/main's
-  // current tip) keeps merge-base aligned with the most recent round-trip
-  // instead of jumping ahead to outer-only commits the consumer made between
-  // syncs — which is what would silently revert non-pair files at merge time.
-  if (commit.parents.length === 0) {
-    return targetInit ? [targetInit] : [];
-  }
-  const parents: string[] = [];
-  const seen = new Set<string>();
-  for (const parentHash of commit.parents) {
-    const mapped = shaMapping.get(parentHash)
-      ?? findEchoAnchor(parentHash, shaMapping)
-      ?? targetInit;
-    if (mapped && !seen.has(mapped)) {
-      parents.push(mapped);
-      seen.add(mapped);
-    }
-  }
-  return parents;
+/** Collect source commits in topo order, optionally scoped to source.dir/. */
+function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+  const args = ["rev-list", "--topo-order", "--reverse",
+    ...branches.map(b => `${source.remote}/${b}`)];
+  if (source.dir) args.push("--", `${source.dir}/`);
+  return collectCommitsWithTrueParents(args);
 }
 
-function hasTrailer(trailers: string, key: string): boolean {
-  return new RegExp(`^${escapeRegex(key)}:`, "m").test(trailers);
+// ── Tree composition & parent resolution ──────────────────────────────────────
+
+/** Compile a .shadowignore pattern (supports * and ** globs) into a regex. */
+function compileIgnorePattern(pattern: string): RegExp {
+  const regex = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
+    .replace(/\*\*/g, "<<GLOBSTAR>>")
+    .replace(/\*/g, "[^/]*")
+    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
+    .replace(/<<GLOBSTAR>>/g, ".*");
+  return new RegExp(`^${regex}$`);
 }
 
 /**
@@ -527,6 +541,29 @@ function buildRemappedTree(opts: {
 }
 
 /**
+ * Produce a new tree that equals `baseTree` with `subdir/` replaced by
+ * `subtreeContent`. Used to keep shadow branches carrying the target side's
+ * *current* non-pair content rather than the snapshot the replay chain
+ * would otherwise freeze at its first commit.
+ */
+function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
+  const tmpIndex = path.join(
+    os.tmpdir(),
+    `shadow-compose-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
+  );
+  const idxEnv = { GIT_INDEX_FILE: tmpIndex };
+  try {
+    git(["read-tree", baseTree], { env: idxEnv });
+    // Clear any existing entries under subdir so --prefix read-tree can succeed.
+    git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
+    git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
+    return git(["write-tree"], { env: idxEnv });
+  } finally {
+    fs.rmSync(tmpIndex, { force: true });
+  }
+}
+
+/**
  * For a merge commit whose parents straddle the two repos — one shadow-side
  * (non-echo) parent and one echo'd target-side parent (carries the skip
  * trailer pointing back to a commit on the target) — build a parent tree
@@ -569,59 +606,109 @@ function composeCrossRepoMergeTree(opts: {
 }
 
 /**
- * Produce a new tree that equals `baseTree` with `subdir/` replaced by
- * `subtreeContent`. Used to keep shadow branches carrying the target side's
- * *current* non-pair content rather than the snapshot the replay chain
- * would otherwise freeze at its first commit.
+ * Walk `parentHash`'s source-side ancestry in topo order, returning the
+ * mapped value of the closest commit already in `shaMapping`. Used by M2 as
+ * the "echo anchor" — the most recent shared point between source and target.
+ * Returns null when no ancestor has been mapped (truly disjoint history).
  */
-function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
-  const tmpIndex = path.join(
-    os.tmpdir(),
-    `shadow-compose-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
-  );
-  const idxEnv = { GIT_INDEX_FILE: tmpIndex };
-  try {
-    git(["read-tree", baseTree], { env: idxEnv });
-    // Clear any existing entries under subdir so --prefix read-tree can succeed.
-    git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
-    git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
-    return git(["write-tree"], { env: idxEnv });
-  } finally {
-    fs.rmSync(tmpIndex, { force: true });
+function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
+  const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
+  if (!result.ok) return null;
+  for (const line of result.stdout.split("\n")) {
+    const hash = line.trim();
+    if (!hash) continue;
+    const mapped = shaMapping.get(hash);
+    if (mapped) return mapped;
   }
+  return null;
 }
 
-/** Compile a .shadowignore pattern (supports * and ** globs) into a regex. */
-function compileIgnorePattern(pattern: string): RegExp {
-  const regex = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
-    .replace(/\*\*/g, "<<GLOBSTAR>>")
-    .replace(/\*/g, "[^/]*")
-    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
-    .replace(/<<GLOBSTAR>>/g, ".*");
-  return new RegExp(`^${regex}$`);
+function resolveTargetParents(
+  commit: TopoCommit,
+  shaMapping: Map<string, string>,
+  targetInit: string | null,
+): string[] {
+  // M2: an unmapped parent (or a root commit) anchors at the closest echo'd
+  // ancestor's mapped value, falling back to target's init commit when no
+  // echo exists in the ancestry. Anchoring at init (rather than target/main's
+  // current tip) keeps merge-base aligned with the most recent round-trip
+  // instead of jumping ahead to outer-only commits the consumer made between
+  // syncs — which is what would silently revert non-pair files at merge time.
+  if (commit.parents.length === 0) {
+    return targetInit ? [targetInit] : [];
+  }
+  const parents: string[] = [];
+  const seen = new Set<string>();
+  for (const parentHash of commit.parents) {
+    const mapped = shaMapping.get(parentHash)
+      ?? findEchoAnchor(parentHash, shaMapping)
+      ?? targetInit;
+    if (mapped && !seen.has(mapped)) {
+      parents.push(mapped);
+      seen.add(mapped);
+    }
+  }
+  return parents;
+}
+
+// ── Mirror orchestration ──────────────────────────────────────────────────────
+
+/**
+ * Build the source→target SHA mapping from existing replayed commits
+ * on the target side. Scans only the target's own shadow branches for this
+ * pair — no cross-pair `--all` fallback, because the
+ * `Shadow-replayed-{sourceRemote}` trailer doesn't encode the pair name,
+ * so a broader scan would pick up trailers from other pairs that happen
+ * to share the same source remote.
+ */
+function loadReplayedMappings(opts: {
+  pair: SyncPair;
+  target: RepoEndpoint;
+  branches: string[];
+  dc: DirectionConfig;
+}): Map<string, string> {
+  const { pair, target, branches, dc } = opts;
+  const candidateRefs = branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`);
+  const existingRefs = filterExistingRefs(candidateRefs);
+  const shadowRefs = candidateRefs.filter(r => existingRefs.has(r));
+
+  if (shadowRefs.length === 0) {
+    return new Map();
+  }
+  return extractTrailerMapping(
+    ["log", ...shadowRefs, `--grep=^${dc.addTrailerKey}`],
+    dc.scanRe,
+  );
 }
 
 /**
- * Two-step rev-list: select hashes via the given args, then fetch true
- * parents via `git log --no-walk` to bypass any path-filter simplification
- * that would have rewritten merge parents. See `fetchTrueParents`.
+ * Drop commits that are already replayed or were echoed back from the target.
+ *
+ * For echoed commits (those carrying the target's replayed trailer), extract
+ * the original target-side hash from the trailer and — when that commit still
+ * exists locally — record echo → original in shaMapping. Downstream parent
+ * resolution then re-uses the original target commit directly (same SHA),
+ * instead of creating a new replayed copy or falling back to the target's
+ * current branch tip. This keeps ancestry aligned across repos so later merges
+ * find the real common ancestor.
  */
-function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
-  const result = git(revListArgs, { safe: true });
-  if (!result.ok || !result.stdout) return [];
-  const hashes = result.stdout.split("\n").filter(Boolean);
-  const parentsMap = fetchTrueParents(hashes);
-  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
-}
-
-/** Collect source commits in topo order, optionally scoped to source.dir/. */
-function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
-  const args = ["rev-list", "--topo-order", "--reverse",
-    ...branches.map(b => `${source.remote}/${b}`)];
-  if (source.dir) args.push("--", `${source.dir}/`);
-  return collectCommitsWithTrueParents(args);
+function filterNotReplayedCommits(
+  allCommits: TopoCommit[],
+  shaMapping: Map<string, string>,
+  dc: DirectionConfig,
+): TopoCommit[] {
+  return allCommits.filter(c => {
+    if (shaMapping.has(c.hash)) return false;
+    const meta = getCommitMeta(c.hash);
+    if (!hasTrailer(meta.trailers, dc.skipTrailerKey)) return true;
+    const match = meta.trailers.split("\n")
+      .map(l => l.match(dc.skipScanRe))
+      .find(m => m);
+    if (match && refExists(match[1])) {
+      shaMapping.set(c.hash, match[1]);
+    }
+    return false;
+  });
 }
 
 /**
@@ -653,64 +740,6 @@ function mapBranchesToTargetTips(
     }
   }
   return branchMapping;
-}
-
-// ── Unified replay ──────────────────────────────────────────────────────────
-
-interface DirectionConfig {
-  addTrailerKey: string;
-  scanRe: RegExp;
-  skipTrailerKey: string;
-  skipScanRe: RegExp;
-}
-
-/**
- * Build direction config from remote names.
- * Trailer format: "Shadow-replayed-{remote}: {hash}" — remote is sanitized
- * into the key so git's trailer parser (strict `[A-Za-z0-9-]+` token
- * grammar) recognizes it. When replaying from source, skip commits tagged
- * with the target's remote (they originated from the target and were
- * already replayed back).
- */
-function buildDirectionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
-  return {
-    /** Trailer key to add: "Shadow-replayed-{sourceRemote}" — value is the hash */
-    addTrailerKey: replayedTrailerKey(sourceRemote),
-    /** Regex to scan for already-replayed commits from this source */
-    scanRe: replayedTrailerRegex(sourceRemote),
-    /** Trailer key to skip: commits tagged with the target's remote came from there */
-    skipTrailerKey: replayedTrailerKey(targetRemote),
-    /** Regex to extract the original target-side hash from a skipped commit's trailer */
-    skipScanRe: replayedTrailerRegex(targetRemote),
-  };
-}
-
-/**
- * Build the source→target SHA mapping from existing replayed commits
- * on the target side. Scans only the target's own shadow branches for this
- * pair — no cross-pair `--all` fallback, because the
- * `Shadow-replayed-{sourceRemote}` trailer doesn't encode the pair name,
- * so a broader scan would pick up trailers from other pairs that happen
- * to share the same source remote.
- */
-function loadReplayedMappings(opts: {
-  pair: SyncPair;
-  target: RepoEndpoint;
-  branches: string[];
-  dc: DirectionConfig;
-}): Map<string, string> {
-  const { pair, target, branches, dc } = opts;
-  const candidateRefs = branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`);
-  const existingRefs = filterExistingRefs(candidateRefs);
-  const shadowRefs = candidateRefs.filter(r => existingRefs.has(r));
-
-  if (shadowRefs.length === 0) {
-    return new Map();
-  }
-  return extractTrailerMapping(
-    ["log", ...shadowRefs, `--grep=^${dc.addTrailerKey}`],
-    dc.scanRe,
-  );
 }
 
 /**
@@ -805,36 +834,6 @@ function replayCommits(opts: {
   } finally {
     fs.rmSync(tmpIndex, { force: true });
   }
-}
-
-/**
- * Drop commits that are already replayed or were echoed back from the target.
- *
- * For echoed commits (those carrying the target's replayed trailer), extract
- * the original target-side hash from the trailer and — when that commit still
- * exists locally — record echo → original in shaMapping. Downstream parent
- * resolution then re-uses the original target commit directly (same SHA),
- * instead of creating a new replayed copy or falling back to the target's
- * current branch tip. This keeps ancestry aligned across repos so later merges
- * find the real common ancestor.
- */
-function filterNotReplayedCommits(
-  allCommits: TopoCommit[],
-  shaMapping: Map<string, string>,
-  dc: DirectionConfig,
-): TopoCommit[] {
-  return allCommits.filter(c => {
-    if (shaMapping.has(c.hash)) return false;
-    const meta = getCommitMeta(c.hash);
-    if (!hasTrailer(meta.trailers, dc.skipTrailerKey)) return true;
-    const match = meta.trailers.split("\n")
-      .map(l => l.match(dc.skipScanRe))
-      .find(m => m);
-    if (match && refExists(match[1])) {
-      shaMapping.set(c.hash, match[1]);
-    }
-    return false;
-  });
 }
 
 /**
