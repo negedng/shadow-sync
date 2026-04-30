@@ -676,43 +676,39 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 </div>
 
 <div class="card" id="m7">
-  <h3><span class="ref ref-m">M7</span> Preflight gate: halt on silent-corruption hazards, warn on ambiguous ones</h3>
+  <h3><span class="ref ref-m">M7</span> Preflight gate: halt only on conditions the engine can&rsquo;t handle</h3>
   <p class="from">Forced by <a class="ref ref-r" href="#r2">R2</a> &times; <a class="ref ref-r" href="#r4">R4</a></p>
   <p>
     <a class="ref ref-r" href="#r2">R2</a> says the replay must faithfully reproduce source history.
     <a class="ref ref-r" href="#r4">R4</a> says no human is around to inspect. Together they rule out the &ldquo;run
-    anyway and hope&rdquo; failure mode &mdash; a few specific environment conditions silently produce
-    wrong results, and a CI job that returns exit 0 with corrupted output is worse than one that
-    halts. <code>runPreflightChecks()</code> runs against each source branch tip before replay starts:
+    anyway and hope&rdquo; failure mode &mdash; a CI job that returns exit 0 with corrupted output is
+    worse than one that halts. The rule we apply: if the engine can produce a faithful tree, no
+    check; if it can&rsquo;t, halt. No advisory warnings &mdash; they&rsquo;re log noise nobody acts
+    on. <code>runPreflightChecks()</code> runs against each source branch tip before replay starts:
   </p>
   <ul>
     <li>
-      <strong>Shallow clone &mdash; error, halts.</strong> <code>rev-list</code> on a truncated
-      history silently elides commits. The replay would produce a tree-correct but
+      <strong>Shallow clone &mdash; halts.</strong> <code>rev-list</code> on a truncated history
+      silently elides commits past the shallow boundary, and <code>findEchoAnchor</code>&rsquo;s
+      ancestor walk truncates the same way. The replay would produce a tree-correct but
       ancestry-wrong shadow branch. The fix (<code>git fetch --unshallow</code>) is one command,
       so blocking is cheap and right.
     </li>
     <li>
-      <strong>Case conflict in tree &mdash; error, halts.</strong> Two paths differing only in case
-      (e.g. <code>Foo.ts</code> and <code>foo.ts</code>) collapse to one file on Windows and macOS
-      runners. Discovered post-hoc this looks like a phantom file deletion in the merge.
-    </li>
-    <li>
-      <strong>Submodules, symlinks, LFS pointers &mdash; warn, continues.</strong> All three
-      <em>can</em> work depending on what the consumer is doing &mdash; submodules outside the
-      synced <code>dir</code> are irrelevant; symlinks that stay within the synced dir are fine;
-      LFS pointer transfer (without object content) is sometimes exactly what&rsquo;s wanted. The
-      tool flags them in the log so a successful sync still surfaces hazards, but doesn&rsquo;t
-      decide for the operator.
+      <strong>Case conflict in tree &mdash; halts on Windows/macOS.</strong> With
+      <code>core.ignorecase=true</code> (the default on those platforms),
+      <code>update-index --index-info</code> folds two paths that differ only in case into one
+      index entry, silently dropping the loser from the replayed tree. Linux preserves both, so
+      the check is platform-gated.
     </li>
   </ul>
   <p class="from">
-    <em>Degree of freedom:</em> where the line falls between &ldquo;error&rdquo; and
-    &ldquo;warn.&rdquo; The rule we apply is: anything that produces a tree git would happily merge
-    but is semantically wrong gets halted; anything where reasonable people disagree about
-    whether it&rsquo;s wrong gets warned. Submodules-as-warning rather than error is the closest
-    call &mdash; we picked warn because the alternative blocks every repo that has a single
-    third-party submodule outside the synced subtree.
+    <em>Degree of freedom:</em> what counts as &ldquo;can&rsquo;t handle.&rdquo; Submodules,
+    symlinks, and LFS pointers all round-trip through the engine as ordinary tree entries
+    (gitlink, symlink blob, pointer blob respectively), so they&rsquo;re left unchecked &mdash;
+    even though the resulting tree may not be useful in every consumer scenario. We accept that
+    surface for the silence: a flagged-but-passing build pollutes the log without changing
+    behavior, and operators stop reading warnings that never matter.
   </p>
 </div>
 

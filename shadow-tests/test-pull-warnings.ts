@@ -1,6 +1,6 @@
 import { createTestEnv, commitOnRemote, runCiSync } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
-import { execSync, spawnSync } from "child_process";
+import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -10,16 +10,13 @@ function git(cmd: string, cwd: string): string {
 
 /**
  * Consolidated pull-warnings test. Exercises situations where sync either
- * refuses (shallow) or emits a warning (lfs, submodule, symlink, stale).
+ * refuses (shallow) or emits a warning (stale shadow branch).
  *
  * Phases:
  *   1. shallow-clone — local repo is shallow → sync FAILS with SHALLOW_CLONE
  *      (recovery: remove .git/shallow, sync succeeds)
  *   2. stale-branch — feature branch synced, then deleted on source →
  *      subsequent sync warns about stale shadow branch
- *   3. lfs-warn — .gitattributes with LFS filter → warning on stderr
- *   4. submodule-warn — submodule entry in tree → warning
- *   5. symlink-warn — symlink entry in tree → warning
  */
 export default function run() {
   const env = createTestEnv("pull-warnings");
@@ -62,42 +59,6 @@ export default function run() {
     assertIncludes(r2b.stdout, "Stale shadow branch", "[phase 2] warns about stale branch");
     assertIncludes(r2b.stdout, "feature/temp", "[phase 2] warning mentions deleted branch");
     assertIncludes(r2b.stdout, "--delete", "[phase 2] suggests cleanup command");
-
-    // ── phase 3: lfs-warn ──────────────────────────────────────────────
-    fs.writeFileSync(path.join(env.remoteWorking, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
-    git("add .gitattributes", env.remoteWorking);
-    git('commit -m "Add LFS gitattributes"', env.remoteWorking);
-    git("push origin main", env.remoteWorking);
-    const r3 = runCiSync(env);
-    assertIncludes(r3.stderr, "GIT_LFS", "[phase 3: lfs] stderr mentions GIT_LFS");
-    assertIncludes(r3.stderr, "pointer", "[phase 3] stderr mentions pointer files");
-
-    // ── phase 4: submodule-warn ────────────────────────────────────────
-    const fakeCommitHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    git(`update-index --add --cacheinfo 160000,${fakeCommitHash},vendor/lib`, env.remoteWorking);
-    fs.writeFileSync(
-      path.join(env.remoteWorking, ".gitmodules"),
-      '[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = https://example.com/lib.git\n',
-    );
-    git("add .gitmodules", env.remoteWorking);
-    git('commit -m "Add submodule"', env.remoteWorking);
-    git("push origin main", env.remoteWorking);
-    const r4 = runCiSync(env);
-    assertIncludes(r4.stderr, "SUBMODULE", "[phase 4: submodule] stderr mentions SUBMODULE");
-    assertIncludes(r4.stderr, "vendor/lib", "[phase 4] stderr mentions submodule path");
-
-    // ── phase 5: symlink-warn ──────────────────────────────────────────
-    const linkTarget = "../config/settings.json";
-    const blobResult = spawnSync("git", ["hash-object", "-w", "--stdin"], {
-      input: linkTarget, cwd: env.remoteWorking, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
-    });
-    const blobHash = blobResult.stdout.trim();
-    git(`update-index --add --cacheinfo 120000,${blobHash},config-link`, env.remoteWorking);
-    git('commit -m "Add symlink"', env.remoteWorking);
-    git("push origin main", env.remoteWorking);
-    const r5 = runCiSync(env);
-    assertIncludes(r5.stderr, "SYMLINK", "[phase 5: symlink] stderr mentions SYMLINK");
-    assertIncludes(r5.stderr, "config-link", "[phase 5] stderr mentions symlink path");
   } finally {
     env.cleanup();
   }

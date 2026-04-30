@@ -843,9 +843,9 @@ manual commands above are just for first-time testing.</p>
     Otherwise: all branches on the source remote, excluding <code>shadow/</code> branches.
   </div></li>
   <li><span class="step-num">4</span><div>
-    <strong>Preflight checks.</strong> For each branch, scan the source tip for shallow clones (error),
-    case conflicts (error), submodules (warn), symlinks (warn), and LFS pointers (warn).
-    Branches with errors are skipped; warnings are logged and replay continues.
+    <strong>Preflight checks.</strong> For each branch, scan the source tip for shallow clones and
+    (on Windows/macOS) case-insensitive filename conflicts. Both halt the branch &mdash; the engine
+    can&rsquo;t produce a faithful shadow under either condition.
   </div></li>
   <li><span class="step-num">5</span><div>
     <strong>Mirror history.</strong> <code>mirrorHistory()</code> in <code>shadow-common.ts</code> runs the replay
@@ -1258,43 +1258,35 @@ secrets/</code></pre>
 
 <h2 id="preflight">10. Preflight Checks</h2>
 
-<p>Before replaying, the engine scans each source branch for potential issues:</p>
+<p>
+  Preflight only flags conditions the engine can&rsquo;t handle. Anything it does handle &mdash;
+  submodules and symlinks (replayed as their respective tree entries), Git LFS pointers (copied
+  through as plain blobs) &mdash; is left unchecked. The remaining hazards both produce silently
+  wrong output and so abort the branch:
+</p>
 
 <table>
-  <tr><th>Check</th><th>Code</th><th>Severity</th><th>Reason</th></tr>
+  <tr><th>Check</th><th>Code</th><th>Reason</th></tr>
   <tr>
     <td>Shallow clone</td>
     <td><code>SHALLOW_CLONE</code></td>
-    <td><span class="tag tag-red">Error</span></td>
-    <td>Replay needs full history to compute diffs and map parents.</td>
+    <td>
+      <code>rev-list</code> on a truncated history silently elides commits past the shallow
+      boundary. The replayed shadow looks fine but is missing ancestry.
+    </td>
   </tr>
   <tr>
     <td>Case-insensitive filename conflict</td>
     <td><code>CASE_CONFLICT</code></td>
-    <td><span class="tag tag-red">Error</span></td>
-    <td>Files like <code>Readme.md</code> and <code>readme.md</code> break on Windows and macOS.</td>
-  </tr>
-  <tr>
-    <td>Submodules</td>
-    <td><code>SUBMODULE</code></td>
-    <td><span class="tag tag-orange">Warning</span></td>
-    <td>Submodule entries are replayed as gitlinks, which may not resolve on the other side.</td>
-  </tr>
-  <tr>
-    <td>Symlinks</td>
-    <td><code>SYMLINK</code></td>
-    <td><span class="tag tag-orange">Warning</span></td>
-    <td>Symlink targets are not adjusted during prefix remapping.</td>
-  </tr>
-  <tr>
-    <td>Git LFS pointers</td>
-    <td><code>GIT_LFS</code></td>
-    <td><span class="tag tag-orange">Warning</span></td>
-    <td>LFS objects live in a separate store; the pointer is replayed, but the blob may not transfer.</td>
+    <td>
+      With <code>core.ignorecase=true</code> (Windows/macOS default), <code>update-index --index-info</code>
+      folds paths that differ only in case &mdash; one of <code>Readme.md</code>/<code>readme.md</code>
+      is silently dropped from the replayed tree. Skipped on Linux.
+    </td>
   </tr>
 </table>
 
-<p>Errors skip the offending branch. Warnings are printed and replay continues.</p>
+<p>Branches with preflight errors are skipped; the rest of the sync continues.</p>
 
 <!-- ── 11. Programmatic API ────────────────────────────────────────────── -->
 

@@ -280,7 +280,6 @@ type PreflightWarning = { level: "error" | "warn"; code: string; message: string
 
 export function runPreflightChecks(ref: string): PreflightWarning[] {
   const warnings: PreflightWarning[] = [];
-  const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
   const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
 
   const shallow = git(["rev-parse", "--is-shallow-repository"], { safe: true });
@@ -288,33 +287,21 @@ export function runPreflightChecks(ref: string): PreflightWarning[] {
     error("SHALLOW_CLONE", "This repository is a shallow clone. Shadow sync requires full history.\n  Run: git fetch --unshallow");
   }
 
-  const tree = git(["ls-tree", "-r", "--long", ref], { safe: true });
-  if (tree.ok && tree.stdout) {
-    const paths: string[] = [];
-    for (const entry of tree.stdout.split("\n").filter(Boolean)) {
-      const m = entry.match(/^(\d+)\s+(\w+)\s+[0-9a-f]+\s+[\d-]+\t(.+)$/);
-      if (!m) continue;
-      const [, mode, , filePath] = m;
-      paths.push(filePath);
-      if (mode === "160000") warn("SUBMODULE", `Contains a submodule at '${filePath}'. Submodules cannot be synced and will be skipped.`);
-      if (mode === "120000") warn("SYMLINK", `Contains a symlink at '${filePath}'. Symlink targets are not adjusted for the subdirectory.`);
-    }
-
-    if (process.platform === "win32" || process.platform === "darwin") {
+  // core.ignorecase=true (Windows/macOS default) folds case-conflicting paths
+  // in update-index --index-info, silently dropping one of them from the
+  // replayed tree. Skip the walk on Linux where the index preserves both.
+  if (process.platform === "win32" || process.platform === "darwin") {
+    const tree = git(["ls-tree", "-r", "--name-only", ref], { safe: true });
+    if (tree.ok && tree.stdout) {
       const lower = new Map<string, string>();
-      for (const p of paths) {
-        const existing = lower.get(p.toLowerCase());
-        if (existing && existing !== p) {
-          error("CASE_CONFLICT", `Case conflict: '${existing}' and '${p}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
+      for (const filePath of tree.stdout.split("\n").filter(Boolean)) {
+        const existing = lower.get(filePath.toLowerCase());
+        if (existing && existing !== filePath) {
+          error("CASE_CONFLICT", `Case conflict: '${existing}' and '${filePath}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
         }
-        lower.set(p.toLowerCase(), p);
+        lower.set(filePath.toLowerCase(), filePath);
       }
     }
-  }
-
-  const attrs = git(["show", `${ref}:.gitattributes`], { safe: true });
-  if (attrs.ok && attrs.stdout.includes("filter=lfs")) {
-    warn("GIT_LFS", "Uses Git LFS. Shadow sync will transfer LFS pointer files, not actual content.");
   }
 
   return warnings;
