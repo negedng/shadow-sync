@@ -497,24 +497,30 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <li>
       <strong>Merge-trick:</strong> <code>git merge --no-commit -s ours x</code> +
       <code>read-tree --prefix=dir/ M^{tree}</code> + outer fix-up (<code>-s ours</code> keeps
-      <code>b'</code>&rsquo;s tree wholesale; outer needs an extra step). Same parents, same tree,
-      same SHA as composition &mdash; mechanically worse:
+      <code>b'</code>&rsquo;s tree wholesale; outer needs an extra step). Same parents, same
+      tree, same SHA as the plumbing route &mdash; mechanically worse:
     </li>
   </ul>
+  <p>
+    The end result is provably identical: both routes assemble a commit with the same parent
+    list, the same tree (m1&rsquo;s tree projected through the path remap), and therefore the
+    same SHA. Nothing in this table is about <em>output correctness</em> &mdash; the choice is
+    purely about how robustly we get there. Plumbing wins on every operational axis below, so
+    we take it.
+  </p>
 <table>
   <thead>
-    <tr><th>Aspect</th><th>Composition</th><th>Merge-trick</th></tr>
+    <tr><th>Aspect</th><th>Plumbing</th><th>Porcelain</th></tr>
   </thead>
   <tbody>
     <tr>
       <td>Resulting commit (parents, tree, SHA)</td>
-      <td>identical to merge-trick by construction</td>
-      <td>identical to composition by construction</td>
+      <td colspan="2" style="text-align: center;"><em>identical by construction &mdash; both routes produce the same commit object</em></td>
     </tr>
     <tr>
-      <td>Git layer</td>
-      <td>plumbing (<code>mktree</code>, <code>read-tree</code>, <code>commit-tree</code>)</td>
-      <td>porcelain (<code>merge</code>, <code>checkout</code>) mixed with plumbing</td>
+      <td>Tools used</td>
+      <td><code>mktree</code>, <code>read-tree</code>, <code>commit-tree</code></td>
+      <td><code>merge</code>, <code>checkout</code> mixed with plumbing</td>
     </tr>
     <tr>
       <td>Working tree</td>
@@ -559,10 +565,11 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   </tbody>
 </table>
   <p class="from">
-    Identical commit through a more fragile route. M&rsquo;s resolution was a human decision, not
-    an algorithmic function of three trees &mdash; anything that replays M has to read
-    <code>M^{tree}</code>. The only question is whether to do it as a tree composition or a
-    working-tree overwrite (merge-trick). Same information, two routes; we take the shorter one.
+    Identical commit through a more fragile route. M&rsquo;s resolution was a human decision,
+    not an algorithmic function of three trees &mdash; anything that replays M has to read
+    <code>M^{tree}</code>. The only question is whether to do it via plumbing (tree composition)
+    or porcelain (working-tree overwrite). Same information, two routes; we take the plumbing
+    one.
   </p>
   <p class="from">
     <em>Degree of freedom for the <code>target.dir/</code> source:</em> compose with the
