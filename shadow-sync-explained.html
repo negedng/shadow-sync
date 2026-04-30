@@ -848,7 +848,7 @@ manual commands above are just for first-time testing.</p>
     Branches with errors are skipped; warnings are logged and replay continues.
   </div></li>
   <li><span class="step-num">5</span><div>
-    <strong>Replay commits.</strong> <code>replayCommits()</code> in <code>shadow-common.ts</code> runs the replay
+    <strong>Mirror history.</strong> <code>mirrorHistory()</code> in <code>shadow-common.ts</code> runs the replay
     engine (see <a href="#engine">next section</a>).
   </div></li>
   <li><span class="step-num">6</span><div>
@@ -876,13 +876,13 @@ manual commands above are just for first-time testing.</p>
 <h2 id="engine">4. The Replay Engine</h2>
 
 <p>
-  <code>replayCommits()</code> in <code>shadow-common.ts</code> is the core of the tool. It composes six named
+  <code>mirrorHistory()</code> in <code>shadow-common.ts</code> is the core of the tool. It composes six named
   helpers, each responsible for one step:
 </p>
 
 <ol class="step-list">
   <li><span class="step-num">1</span><div>
-    <strong>Scan replayed-commit mapping.</strong> <code>scanReplayedMapping()</code> runs once per pair (not
+    <strong>Scan replayed-commit mapping.</strong> <code>loadReplayedMappings()</code> runs once per pair (not
     per branch). It collects every <code>{target.remote}/shadow/{pair}/{branch}</code> ref that exists and
     passes them all into a single <code>git log ... --grep=^Shadow-replayed-{remote}:</code>, then extracts
     each trailer into a <code>Map&lt;sourceHash, targetHash&gt;</code>. The map is pair-wide and shared across
@@ -900,7 +900,7 @@ manual commands above are just for first-time testing.</p>
     otherwise demote merges to linear commits on the shadow side.
   </div></li>
   <li><span class="step-num">3</span><div>
-    <strong>Filter.</strong> <code>filterNewCommits()</code> drops commits already in the mapping (skipped &mdash;
+    <strong>Filter.</strong> <code>filterNotReplayedCommits()</code> drops commits already in the mapping (skipped &mdash;
     already replayed) and echo commits that carry the <em>target's</em> remote trailer (round-trip prevention &mdash;
     see <a href="#dedup">Deduplication</a>). For each echo, the original target-side hash is read out of the
     trailer and &mdash; if that commit is still reachable in the local repo &mdash; recorded in the SHA mapping
@@ -916,7 +916,7 @@ manual commands above are just for first-time testing.</p>
     target&rsquo;s init.
   </div></li>
   <li><span class="step-num">5</span><div>
-    <strong>Replay loop.</strong> <code>runReplayLoop()</code> walks the remaining commits in topo order:
+    <strong>Replay loop.</strong> <code>replayCommits()</code> walks the remaining commits in topo order:
     load <code>.shadowignore</code> from the source tree, compute the diff (see section 5), build a remapped tree
     (section 6), resolve parents via the SHA mapping, and create a new commit preserving original author,
     committer, and timestamps. Record the new SHA in the mapping for subsequent commits to reference.
@@ -1016,7 +1016,7 @@ manual commands above are just for first-time testing.</p>
 <p>
   <strong>Cross-repo merges</strong> &mdash; source merge commits with one echo&rsquo;d
   target-side parent &mdash; are where the shadow chain&rsquo;s outer gets refreshed. The
-  composition fires inside the replay loop (<code>crossRepoMerge()</code>): outer comes from the
+  composition fires inside the replay loop (<code>composeCrossRepoMergeTree()</code>): outer comes from the
   echo&rsquo;d target-side parent&rsquo;s tree (a real commit on target/main), and
   <code>{target.dir}/</code> comes from the shadow-chain parent. The replayed commit lands as a
   proper merge between the work branch and the shadow chain, and the consumer&rsquo;s
@@ -1044,7 +1044,7 @@ manual commands above are just for first-time testing.</p>
 <h3>7a. Merge topology preservation (during replay)</h3>
 <p>
   When source history contains merge commits, the replay engine preserves them.
-  <code>resolveParents()</code> maps each source parent hash to its replayed equivalent using the SHA mapping.
+  <code>resolveTargetParents()</code> maps each source parent hash to its replayed equivalent using the SHA mapping.
   Anything that doesn&rsquo;t map (orphan merges, root commits at the start of a bootstrap, merge parents
   on branches we don&rsquo;t sync) is replaced by the closest already-mapped ancestor &mdash; usually a
   recent echo&rsquo;d commit &mdash; or by target&rsquo;s init when no echo is reachable.
@@ -1172,7 +1172,7 @@ git merge origin/shadow/backend/main</code></pre>
 <ol>
   <li>
     <strong>Skip already-replayed commits.</strong>
-    Phase 1 of the engine (<code>scanReplayedMapping()</code>) scans the target's shadow branch history
+    Phase 1 of the engine (<code>loadReplayedMappings()</code>) scans the target's shadow branch history
     <em>for this pair only</em> and builds a <code>sourceHash &rarr; targetSHA</code> map. Commits
     already in the map are skipped this run. The scan is deliberately pair-scoped: the trailer key
     doesn't encode the pair name, so a broader <code>--all</code> scan would pick up trailers from other

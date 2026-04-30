@@ -683,7 +683,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <a class="ref ref-r" href="#r4">R4</a> says no human is around to inspect. Together they rule out the &ldquo;run
     anyway and hope&rdquo; failure mode &mdash; a few specific environment conditions silently produce
     wrong results, and a CI job that returns exit 0 with corrupted output is worse than one that
-    halts. <code>preflightChecks()</code> runs against each source branch tip before replay starts:
+    halts. <code>runPreflightChecks()</code> runs against each source branch tip before replay starts:
   </p>
   <ul>
     <li>

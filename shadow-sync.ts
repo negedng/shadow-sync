@@ -14,10 +14,10 @@
 import { parseArgs } from "util";
 import {
   PAIRS, ShadowSyncError,
-  git, refExists, listBranches,
+  git, refExists, listRemoteBranches,
   shadowBranchName, ensureRemote,
-  replayCommits, preflightChecks, handlePreflightResults,
-  validateName, die,
+  mirrorHistory, runPreflightChecks, printPreflightResults,
+  validateName, fail,
 } from "./shadow-common";
 
 // ── Exported sync function (used by tests in-process) ────────────────────────
@@ -65,12 +65,12 @@ function _runSyncCore(options: SyncOptions): number {
     : PAIRS;
 
   if (pairName && pairsToSync.length === 0) {
-    die(`Pair '${pairName}' not found in config.`);
+    fail(`Pair '${pairName}' not found in config.`);
   }
 
   const fromSide = (options.from ?? "b") as "a" | "b";
   if (fromSide !== "a" && fromSide !== "b") {
-    die(`--from must be "a" or "b", got "${options.from}".`);
+    fail(`--from must be "a" or "b", got "${options.from}".`);
   }
 
   let failed = 0;
@@ -100,7 +100,7 @@ function _runSyncCore(options: SyncOptions): number {
 
     const branches = options.branch
       ? [options.branch]
-      : listBranches(source.remote);
+      : listRemoteBranches(source.remote);
 
     if (branches.length === 0) {
       console.log(`  No branches found on '${source.remote}'.`);
@@ -116,8 +116,8 @@ function _runSyncCore(options: SyncOptions): number {
         continue;
       }
       console.log(`\n── Preflight: ${ref} ──`);
-      const warnings = preflightChecks(ref);
-      if (handlePreflightResults(warnings)) {
+      const warnings = runPreflightChecks(ref);
+      if (printPreflightResults(warnings)) {
         validBranches.push(branch);
       } else {
         console.error(`  Skipping ${ref} due to preflight errors.`);
@@ -129,7 +129,7 @@ function _runSyncCore(options: SyncOptions): number {
 
     try {
       console.log(`\n── Replaying commits for ${pair.name} (${validBranches.length} branch(es)) ──`);
-      const result = replayCommits({
+      const result = mirrorHistory({
         pair,
         from: fromSide,
         branches: validBranches,

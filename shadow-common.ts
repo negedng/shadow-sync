@@ -99,16 +99,16 @@ export function applyTestOverrides(opts: {
   if (opts.shadowBranchPrefix != null) _shadowBranchPrefix = opts.shadowBranchPrefix;
 }
 
-export function die(msg: string): never {
+export function fail(msg: string): never {
   throw new ShadowSyncError(`✘ ${msg}`);
 }
 
 /** Validate that a name is safe for use in git commands and path construction. */
 export function validateName(value: string, label: string): void {
-  if (!value) die(`${label} must not be empty.`);
-  if (value.includes("..")) die(`${label} must not contain '..'.`);
-  if (value.startsWith("/") || value.startsWith("\\")) die(`${label} must not be an absolute path.`);
-  if (value.startsWith("-")) die(`${label} must not start with '-'.`);
+  if (!value) fail(`${label} must not be empty.`);
+  if (value.includes("..")) fail(`${label} must not contain '..'.`);
+  if (value.startsWith("/") || value.startsWith("\\")) fail(`${label} must not be an absolute path.`);
+  if (value.startsWith("-")) fail(`${label} must not start with '-'.`);
 }
 
 type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
@@ -146,7 +146,7 @@ export function refExists(ref: string): boolean {
 }
 
 /** Check existence of multiple remote-tracking refs in a single git call. */
-function refsExist(refs: string[]): Set<string> {
+function filterExistingRefs(refs: string[]): Set<string> {
   if (refs.length === 0) return new Set();
   const result = git(
     ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
@@ -160,7 +160,7 @@ function refsExist(refs: string[]): Set<string> {
   return existing;
 }
 
-export function listBranches(remote: string): string[] {
+export function listRemoteBranches(remote: string): string[] {
   return git(["branch", "-r"])
     .split("\n")
     .map(l => l.trim())
@@ -195,7 +195,7 @@ export function ensureRemote(endpoint: RepoEndpoint): void {
 
 // ── Pre-flight checks ─────────────────────────────────────────────────────────
 
-export function preflightChecks(ref: string): PreflightWarning[] {
+export function runPreflightChecks(ref: string): PreflightWarning[] {
   const warnings: PreflightWarning[] = [];
   const warn  = (code: string, message: string) => warnings.push({ level: "warn", code, message });
   const error = (code: string, message: string) => warnings.push({ level: "error", code, message });
@@ -247,7 +247,7 @@ export function formatPreflightResults(warnings: PreflightWarning[]): { lines: s
   return { lines, errorCount, ok: errorCount === 0 };
 }
 
-export function handlePreflightResults(warnings: PreflightWarning[]): boolean {
+export function printPreflightResults(warnings: PreflightWarning[]): boolean {
   const { lines, ok } = formatPreflightResults(warnings);
   for (const line of lines) console.error(line);
   return ok;
@@ -290,7 +290,7 @@ function getCommitMeta(hash: string): CommitMeta {
   };
 }
 
-function commitEnv(meta: CommitMeta): Record<string, string> {
+function buildCommitEnv(meta: CommitMeta): Record<string, string> {
   return {
     GIT_AUTHOR_NAME: meta.authorName,
     GIT_AUTHOR_EMAIL: meta.authorEmail,
@@ -301,7 +301,7 @@ function commitEnv(meta: CommitMeta): Record<string, string> {
   };
 }
 
-function stripTrailers(message: string): string {
+function stripReplayedTrailers(message: string): string {
   return message.split("\n")
     .filter(l => !l.startsWith(REPLAYED_TRAILER))
     .join("\n").trimEnd();
@@ -311,16 +311,16 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function sanitizeTokenPart(s: string): string {
+function sanitizeTrailerToken(s: string): string {
   return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
 function replayedTrailerKey(remote: string): string {
-  return `${REPLAYED_TRAILER}-${sanitizeTokenPart(remote)}`;
+  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(remote)}`;
 }
 
 /** Build a regex to match replay trailers: Shadow-replayed-{remote}: {hash} */
-function replayedHashRe(remote: string): RegExp {
+function replayedTrailerRegex(remote: string): RegExp {
   return new RegExp(`^${escapeRegex(replayedTrailerKey(remote))}:\\s*([0-9a-f]{7,40})`);
 }
 
@@ -328,7 +328,7 @@ function replayedHashRe(remote: string): RegExp {
  * Walk `git log` output where each commit is marked with `MARKER<hash>`
  * followed by its body. Calls `onLine(hash, line)` for every body line.
  */
-function scanLogCommits(logArgs: string[], onLine: (hash: string, line: string) => void): void {
+function scanLogLines(logArgs: string[], onLine: (hash: string, line: string) => void): void {
   const MARKER = "SCANLOG ";
   const log = git([...logArgs, `--format=${MARKER}%H%n%B`], { safe: true });
   if (!log.ok || !log.stdout) return;
@@ -374,9 +374,9 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-function buildTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
+function extractTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
   const mapping = new Map<string, string>();
-  scanLogCommits(logArgs, (hash, line) => {
+  scanLogLines(logArgs, (hash, line) => {
     const match = line.match(trailerRe);
     if (match) mapping.set(match[1], hash);
   });
@@ -401,7 +401,7 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
   return null;
 }
 
-function resolveParents(
+function resolveTargetParents(
   commit: TopoCommit,
   shaMapping: Map<string, string>,
   targetInit: string | null,
@@ -429,7 +429,7 @@ function resolveParents(
   return parents;
 }
 
-function hasTrailerLine(trailers: string, key: string): boolean {
+function hasTrailer(trailers: string, key: string): boolean {
   return new RegExp(`^${escapeRegex(key)}:`, "m").test(trailers);
 }
 
@@ -538,7 +538,7 @@ function buildRemappedTree(opts: {
  * echo'd target-side tree can't be resolved — caller falls back to the
  * standard first-parent tree.
  */
-function crossRepoMerge(opts: {
+function composeCrossRepoMergeTree(opts: {
   commit: TopoCommit;
   mappedParents: string[];
   target: RepoEndpoint;
@@ -551,7 +551,7 @@ function crossRepoMerge(opts: {
   let echoTargetSHA: string | null = null;
   for (const sourceParent of commit.parents) {
     const parentMeta = getCommitMeta(sourceParent);
-    if (hasTrailerLine(parentMeta.trailers, dc.skipTrailerKey)) {
+    if (hasTrailer(parentMeta.trailers, dc.skipTrailerKey)) {
       const mapped = shaMapping.get(sourceParent);
       if (mapped) {
         echoTargetSHA = mapped;
@@ -608,7 +608,7 @@ function compileIgnorePattern(pattern: string): RegExp {
  * parents via `git log --no-walk` to bypass any path-filter simplification
  * that would have rewritten merge parents. See `fetchTrueParents`.
  */
-function collectWithTrueParents(revListArgs: string[]): TopoCommit[] {
+function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
   const result = git(revListArgs, { safe: true });
   if (!result.ok || !result.stdout) return [];
   const hashes = result.stdout.split("\n").filter(Boolean);
@@ -621,7 +621,7 @@ function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCom
   const args = ["rev-list", "--topo-order", "--reverse",
     ...branches.map(b => `${source.remote}/${b}`)];
   if (source.dir) args.push("--", `${source.dir}/`);
-  return collectWithTrueParents(args);
+  return collectCommitsWithTrueParents(args);
 }
 
 /**
@@ -633,7 +633,7 @@ function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCom
  * that case we still want to advance the shadow branch to the most recent
  * commit that *did* touch the synced subdir.
  */
-function buildBranchMapping(
+function mapBranchesToTargetTips(
   remote: string,
   branches: string[],
   shaMapping: Map<string, string>,
@@ -672,16 +672,16 @@ interface DirectionConfig {
  * with the target's remote (they originated from the target and were
  * already replayed back).
  */
-function directionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
+function buildDirectionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
   return {
     /** Trailer key to add: "Shadow-replayed-{sourceRemote}" — value is the hash */
     addTrailerKey: replayedTrailerKey(sourceRemote),
     /** Regex to scan for already-replayed commits from this source */
-    scanRe: replayedHashRe(sourceRemote),
+    scanRe: replayedTrailerRegex(sourceRemote),
     /** Trailer key to skip: commits tagged with the target's remote came from there */
     skipTrailerKey: replayedTrailerKey(targetRemote),
     /** Regex to extract the original target-side hash from a skipped commit's trailer */
-    skipScanRe: replayedHashRe(targetRemote),
+    skipScanRe: replayedTrailerRegex(targetRemote),
   };
 }
 
@@ -693,7 +693,7 @@ function directionConfig(sourceRemote: string, targetRemote: string): DirectionC
  * so a broader scan would pick up trailers from other pairs that happen
  * to share the same source remote.
  */
-function scanReplayedMapping(opts: {
+function loadReplayedMappings(opts: {
   pair: SyncPair;
   target: RepoEndpoint;
   branches: string[];
@@ -701,13 +701,13 @@ function scanReplayedMapping(opts: {
 }): Map<string, string> {
   const { pair, target, branches, dc } = opts;
   const candidateRefs = branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`);
-  const existingRefs = refsExist(candidateRefs);
+  const existingRefs = filterExistingRefs(candidateRefs);
   const shadowRefs = candidateRefs.filter(r => existingRefs.has(r));
 
   if (shadowRefs.length === 0) {
     return new Map();
   }
-  return buildTrailerMapping(
+  return extractTrailerMapping(
     ["log", ...shadowRefs, `--grep=^${dc.addTrailerKey}`],
     dc.scanRe,
   );
@@ -721,7 +721,7 @@ function scanReplayedMapping(opts: {
  * `shaMapping` is mutated: every replayed source hash is recorded so later
  * commits in the same batch can resolve their parents.
  */
-function runReplayLoop(opts: {
+function replayCommits(opts: {
   newCommits: TopoCommit[];
   shaMapping: Map<string, string>;
   targetInit: string | null;
@@ -742,7 +742,7 @@ function runReplayLoop(opts: {
 
       // Commits that already carry our own add-trailer were forwarded by us
       // and round-tripped back to source via a merge — record but don't replay.
-      const isEcho = hasTrailerLine(meta.trailers, dc.addTrailerKey);
+      const isEcho = hasTrailer(meta.trailers, dc.addTrailerKey);
 
       if (isEcho) {
         console.log(`  Skipping ${meta.short} (echo from other direction).`);
@@ -755,14 +755,14 @@ function runReplayLoop(opts: {
         console.log(`  Replaying ${label}...`);
       }
 
-      const mappedParents = resolveParents(commit, shaMapping, targetInit);
+      const mappedParents = resolveTargetParents(commit, shaMapping, targetInit);
 
       // M9: cross-repo merges (one shadow-side parent, one echo'd target-side
       // parent) get a composed parent tree so shadow's intermediate commits'
       // outer state stays aligned with the most recent round-tripped commit
       // — checking out an old shadow commit reflects the target's outer at
       // that point rather than a frozen bootstrap snapshot.
-      const composedParentTree = crossRepoMerge({ commit, mappedParents, target, shaMapping, dc });
+      const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc });
       const parentTree: string | null = composedParentTree
         ?? (mappedParents.length > 0
           ? git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true }).stdout || lastTree
@@ -790,12 +790,12 @@ function runReplayLoop(opts: {
       }
 
       const msg = isEcho
-        ? appendTrailer(stripTrailers(meta.message), `${dc.addTrailerKey}: ${commit.hash}`)
+        ? appendTrailer(stripReplayedTrailers(meta.message), `${dc.addTrailerKey}: ${commit.hash}`)
         : appendTrailer(meta.message, `${dc.addTrailerKey}: ${commit.hash}`);
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
       const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", msg], {
-        env: commitEnv(meta),
+        env: buildCommitEnv(meta),
       });
 
       shaMapping.set(commit.hash, newSHA);
@@ -818,7 +818,7 @@ function runReplayLoop(opts: {
  * current branch tip. This keeps ancestry aligned across repos so later merges
  * find the real common ancestor.
  */
-function filterNewCommits(
+function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
@@ -826,7 +826,7 @@ function filterNewCommits(
   return allCommits.filter(c => {
     if (shaMapping.has(c.hash)) return false;
     const meta = getCommitMeta(c.hash);
-    if (!hasTrailerLine(meta.trailers, dc.skipTrailerKey)) return true;
+    if (!hasTrailer(meta.trailers, dc.skipTrailerKey)) return true;
     const match = meta.trailers.split("\n")
       .map(l => l.match(dc.skipScanRe))
       .find(m => m);
@@ -843,7 +843,7 @@ function filterNewCommits(
  * @param from - "a" or "b": which side's commits to replay
  * @param branches - branches to replay (resolved as remote-tracking refs on the source)
  */
-export function replayCommits(opts: {
+export function mirrorHistory(opts: {
   pair: SyncPair;
   from: "a" | "b";
   branches: string[];
@@ -851,19 +851,19 @@ export function replayCommits(opts: {
   const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
-  const dc = directionConfig(source.remote, target.remote);
+  const dc = buildDirectionConfig(source.remote, target.remote);
 
   console.log("Scanning history for already-replayed commits...");
-  const shaMapping = scanReplayedMapping({ pair, target, branches, dc });
+  const shaMapping = loadReplayedMappings({ pair, target, branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const allCommits = collectSourceCommits(source, branches);
-  const newCommits = filterNewCommits(allCommits, shaMapping, dc);
+  const newCommits = filterNotReplayedCommits(allCommits, shaMapping, dc);
 
   if (newCommits.length === 0) {
     return {
       mirrored: 0,
-      branchMapping: buildBranchMapping(source.remote, branches, shaMapping),
+      branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
       upToDate: true,
     };
   }
@@ -880,14 +880,14 @@ export function replayCommits(opts: {
         .stdout.split("\n")[0] || null)
     : null;
 
-  runReplayLoop({ newCommits, shaMapping, targetInit, source, target, dc });
+  replayCommits({ newCommits, shaMapping, targetInit, source, target, dc });
 
   console.log();
   console.log(`Done. ${newCommits.length} commit(s) replayed.`);
 
   return {
     mirrored: newCommits.length,
-    branchMapping: buildBranchMapping(source.remote, branches, shaMapping),
+    branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
     upToDate: false,
   };
 }
