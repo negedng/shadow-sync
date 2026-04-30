@@ -17,7 +17,6 @@ import {
   git, refExists, listBranches, getCurrentBranch,
   shadowBranchName, ensureRemote,
   replayCommits, preflightChecks, handlePreflightResults,
-  composeShadowTip,
   validateName, die,
 } from "./shadow-common";
 
@@ -176,18 +175,7 @@ function _runSyncCore(options: SyncOptions): number {
             continue;
           }
 
-          // Rewrite the replayed tip so its non-pair content tracks the
-          // target side's current branch state instead of freezing at the
-          // tree the replay chain inherited from its first commit. No-op
-          // when target.dir is empty (B-side has no non-pair content) or
-          // when the composed tree already matches.
-          const replayedSHA = composeShadowTip({
-            target,
-            branch,
-            replayedSHA: originalSHA,
-            allSourceBranches: branches,
-            sourceRemote: source.remote,
-          });
+          const replayedSHA = originalSHA;
 
           // Check if update is needed
           const currentSHA = refExists(`${target.remote}/${shadow}`)

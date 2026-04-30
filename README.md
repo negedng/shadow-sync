@@ -195,7 +195,7 @@ cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
 # Edit shadow-config.json with your pair definitions
 ```
 
-3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, parented to the target's current `main` tip — so plain `git merge origin/shadow/<pair>/<branch>` always finds a merge base. The `Shadow-replayed-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
+3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, anchored at the target's init commit (or the closest round-tripped echo when one exists) — so plain `git merge origin/shadow/<pair>/<branch>` always finds a real merge base. The `Shadow-replayed-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
 
 ```bash
 npm run sync -- -r backend --from a    # push monorepo changes to external

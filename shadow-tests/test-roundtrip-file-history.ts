@@ -21,9 +21,10 @@ function git(cmd: string, cwd: string): string {
  *   4. Fornax merges shadow into main. The merge conflicts; the human resolves
  *      it as merge commit m on B/main.
  *   5. Pull B→A. Replay walks B/main:
- *        - c → c' on Realogic shadow (parents [b via fallbackParent])
+ *        - B0 → B0' on Realogic shadow (parent [A's init via M2])
+ *        - c → c' on Realogic shadow (parent [B0'])
  *        - m → m' on Realogic shadow (parents [c', b via echo])
- *      M9's splice fires on m' because b' (m's source second parent) is echo'd.
+ *      M1's composition fires on m' because b' (m's source second parent) is echo'd.
  *   6. Realogic merges shadow into main.
  *   7. `git log -- dir/file.ts` from Realogic main must include a, b, c', m'.
  */

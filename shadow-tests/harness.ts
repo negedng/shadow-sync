@@ -390,8 +390,8 @@ export function getExternalShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): s
 /**
  * Merge the shadow branch into the local working branch.
  * Shadow commits carry the full repo tree, so a plain merge works —
- * git finds the local repo's init commit as the merge base via the
- * fallbackParent chain set up by replay.
+ * git finds either the local repo's init commit or a recent echo as the
+ * merge base via the M2 anchor chain set up by replay.
  */
 export function mergeShadow(env: TestEnv, remote?: RemoteInfo): void {
   const subdir = remote?.subdir ?? env.subdir;

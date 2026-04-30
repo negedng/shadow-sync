@@ -805,13 +805,14 @@ manual commands above are just for first-time testing.</p>
 </div>
 
 <div class="highlight-box">
-  <strong>Unmapped parents fall back to target&rsquo;s tip.</strong> Some source commits reference
-  parents the replay can&rsquo;t map &mdash; merges that pulled in branches we don&rsquo;t sync,
-  or roots of orphan branches merged into <code>main</code>. Each such parent is wired to the
-  target branch&rsquo;s current tip via <code>fallbackParent</code>, keeping merges merges and
-  <code>merge-base</code> answering correctly. Root commits also adopt
-  <code>fallbackParent</code>, which is what anchors the bootstrap to the target&rsquo;s init in
-  the first place.
+  <strong>Unmapped parents anchor at the closest echo, or target&rsquo;s init.</strong> Some
+  source commits reference parents the replay can&rsquo;t map &mdash; merges that pulled in
+  branches we don&rsquo;t sync, or roots of orphan branches merged into <code>main</code>. Each
+  such parent is replaced by the closest already-mapped ancestor in the source&rsquo;s history
+  (typically a recent echo&rsquo;d commit), or, if no echo exists, by target&rsquo;s init commit.
+  Merges stay merges, <code>merge-base</code> answers correctly, and the chain&rsquo;s outer state
+  is anchored at a real round-trip point rather than a snapshot of target/main&rsquo;s current
+  tip.
 </div>
 
 <!-- ── 3. Steps of a Sync ──────────────────────────────────────────────── -->
@@ -832,8 +833,8 @@ manual commands above are just for first-time testing.</p>
   <li><span class="step-num">2</span><div>
     <strong>Fetch both remotes.</strong> <code>git fetch {source.remote}</code> for the commits to replay,
     and <code>git fetch {target.remote}</code> so target-side objects &mdash; the
-    <code>fallbackParent</code> (<code>{target}/main</code>'s tip) and the current shadow-branch tips
-    used by the replayed-trailer scan &mdash; exist locally before the replay engine starts resolving
+    <code>targetInit</code> commit (root of <code>{target}/main</code>) and the current shadow-branch
+    tips used by the replayed-trailer scan &mdash; exist locally before the replay engine starts resolving
     them. On a fresh CI runner, neither is cached, so both fetches are mandatory up front.
   </div></li>
   <li><span class="step-num">3</span><div>
@@ -851,15 +852,6 @@ manual commands above are just for first-time testing.</p>
     engine (see <a href="#engine">next section</a>).
   </div></li>
   <li><span class="step-num">6</span><div>
-    <strong>Compose the shadow tip.</strong> For each replayed branch, fetch the target remote so local
-    tracking refs are current, then run <code>composeShadowTip()</code>. It rewrites the tip commit's tree so
-    <em>non-pair</em> content (files outside <code>target.dir</code>) tracks the target branch's current state
-    instead of freezing at whatever non-pair tree the replay chain inherited from its first commit.
-    No-op when <code>target.dir</code> is empty or when the composed tree already matches the replayed tree.
-    The result is the SHA actually destined for the target (<code>replayedSHA</code>). See
-    <a href="#tree">section 6</a> for the splice mechanics.
-  </div></li>
-  <li><span class="step-num">7</span><div>
     <strong>Reconcile and push.</strong> For each branch, compare <code>replayedSHA</code> with the target's current
     <code>shadow/{pairName}/{branch}</code> tip:
     <ul>
@@ -873,7 +865,7 @@ manual commands above are just for first-time testing.</p>
     mapping can point the source's tip at an existing target-side commit, which this comparison then
     fast-forwards to.
   </div></li>
-  <li><span class="step-num">8</span><div>
+  <li><span class="step-num">7</span><div>
     <strong>Report stale branches.</strong> If syncing all branches, warn about shadow branches whose
     source branch no longer exists. Print the <code>git push --delete</code> command for manual cleanup.
   </div></li>
@@ -916,10 +908,12 @@ manual commands above are just for first-time testing.</p>
     the original commit object directly.
   </div></li>
   <li><span class="step-num">4</span><div>
-    <strong>Set the fallback parent.</strong> <code>fallbackParent</code> is the target&rsquo;s
-    <code>main</code> tip. Any source parent that doesn&rsquo;t map (orphan-branch root, merge with an
-    out-of-scope parent, or root commit at the start of bootstrap) falls back to this &mdash; so merge
-    commits stay merges and the bootstrap chain anchors to the target&rsquo;s init.
+    <strong>Resolve target init.</strong> <code>targetInit</code> is the root commit of
+    <code>{target}/main</code>. Any source parent that doesn&rsquo;t map (orphan-branch root,
+    merge with an out-of-scope parent, or root commit at the start of bootstrap) is replaced
+    by the closest mapped ancestor in the source&rsquo;s history; if none exists,
+    <code>targetInit</code> is used. Merges stay merges and the bootstrap chain anchors to the
+    target&rsquo;s init.
   </div></li>
   <li><span class="step-num">5</span><div>
     <strong>Replay loop.</strong> <code>runReplayLoop()</code> walks the remaining commits in topo order:
@@ -1011,66 +1005,34 @@ manual commands above are just for first-time testing.</p>
                                                D backend/old-file.txt
                                         result: full RepoA tree with exactly 3 changes</div>
 
-<h3>Tip-tree refresh before push (<code>composeShadowTip</code>)</h3>
+<h3>Cross-repo merges and out-of-scope commits</h3>
 <p>
-  The replay chain above is path-scoped. Each replayed tree is built from the <em>previous</em> replayed
-  tree, which traces back to the bootstrap tree (the target&rsquo;s init at the moment of first sync).
-  Files outside <code>{pair.dir}/</code> are carried through every replayed commit unchanged, so they
-  stay frozen at whatever the target&rsquo;s tree looked like when the replay chain was first built.
-  If the target side has since modified any such file &mdash; a root README, another pair's directory,
-  CI config &mdash; a later <code>git merge origin/shadow/{pair}/{branch}</code> on the target would
-  silently revert it, because the shadow tree holds stale non-pair content where the target's current
-  branch holds up-to-date content.
+  The replay chain is path-scoped: trees inherit unchanged outside <code>{pair.dir}/</code> from
+  whatever the previous replayed commit had, which traces back through the chain to the
+  M2-anchored root. That root is target&rsquo;s init when no echo is around, or the
+  most-recent echo when one exists. Either way, outer state inside the shadow chain represents a
+  <em>past</em> point in target/main&rsquo;s history, never the current tip.
 </p>
 <p>
-  <code>composeShadowTip()</code> fixes this at push time with a single tree splice: take the target
-  branch's <em>current</em> tree as the outer shell and inject only the replayed tip's
-  <code>{pair.dir}/</code> subtree into it. The shadow tip's tree now equals the target branch's current
-  tree <em>except</em> inside the synced directory.
-</p>
-
-<p>The full mechanics:</p>
-<ol class="step-list">
-  <li><span class="step-num">1</span><div>
-    <strong>Pick a splice base.</strong> Prefer <code>{target}/{branch}^{tree}</code>. If that branch
-    doesn't exist on the target remote yet (e.g., syncing a brand-new source branch), find the
-    source branch with the most recent merge-base with <code>{branch}</code> (its parent branch)
-    and use <em>its</em> target-side tree. Last resort: <code>{target}/main^{tree}</code>.
-  </div></li>
-  <li><span class="step-num">2</span><div>
-    <strong>Splice.</strong> <code>spliceSubtree()</code> uses a temp index: <code>read-tree</code>
-    the base, <code>rm -r --cached {target.dir}</code>, <code>read-tree --prefix={target.dir}/</code>
-    of the replayed tip's <code>{target.dir}/</code> subtree, then <code>write-tree</code>.
-  </div></li>
-  <li><span class="step-num">3</span><div>
-    <strong>Re-commit with the composed tree</strong>, reusing the replayed commit's parents,
-    author, committer, timestamps, and message (including the <code>Shadow-replayed-*</code>
-    trailer). The shadow branch tip is the new commit; subsequent scans still find the trailer.
-  </div></li>
-</ol>
-<div class="highlight-box">
-  The invariant this preserves: <strong>shadow/{pair}/{branch}'s tree equals target/{branch}'s
-  tree, with only <code>{pair.dir}/</code> swapped for the replay's pair content.</strong>
-  A plain <code>git merge</code> then only diffs that subdirectory &mdash; everything outside stays
-  aligned with what the target actually has on that branch right now.
-</div>
-
-<p>
-  This is what the "out-of-scope commits" (marked <code>x</code> and <code>y</code> in the flow diagram
-  above) rely on. Those commits live outside <code>{pair.dir}/</code> &mdash; root files, another pair's
-  directory, CI config &mdash; and the replay engine never touches them: the path filter drops them at
-  commit collection, and they never produce replayed counterparts. But the shadow branch is still what the
-  target team merges into their main branch, and <code>git merge</code> compares the <em>whole</em> tree,
-  not just the pair dir. Without the splice, the shadow tip's non-pair files would be frozen at the
-  bootstrap tree, and the user-facing merge would silently revert <code>x</code> and <code>y</code>.
+  <strong>Cross-repo merges</strong> &mdash; source merge commits with one echo&rsquo;d
+  target-side parent &mdash; are where the shadow chain&rsquo;s outer gets refreshed. The
+  composition fires inside the replay loop (<code>crossRepoMerge()</code>): outer comes from the
+  echo&rsquo;d target-side parent&rsquo;s tree (a real commit on target/main), and
+  <code>{target.dir}/</code> comes from the shadow-chain parent. The replayed commit lands as a
+  proper merge between the work branch and the shadow chain, and the consumer&rsquo;s
+  <code>git merge origin/shadow/{pair}/{branch}</code> finds <code>merge-base</code> at that
+  echo &mdash; far enough back that the shadow chain&rsquo;s frozen outer matches the merge-base
+  outer, so out-of-scope changes the consumer made since (root files, sibling pairs&rsquo;
+  directories, CI config) appear as a one-sided modification on the consumer&rsquo;s side and
+  survive the merge unchanged.
 </p>
 <p>
-  <code>composeShadowTip</code> runs on every <code>--from b</code> (and symmetrically on
-  <code>--from a</code> whenever <code>target.dir</code> is non-empty), borrowing the target branch's
-  current tree for everything outside the pair. The commits <code>x</code> and <code>y</code> aren't
-  replayed anywhere &mdash; their <em>effect on the tree</em> just gets carried over, so the shadow branch
-  stays a clean, fast-forward-friendly view of the target branch's current non-pair state with fresh
-  pair content spliced in.
+  This is what the &ldquo;out-of-scope commits&rdquo; (marked <code>x</code> and <code>y</code>
+  in the flow diagram above) rely on. Those commits live outside <code>{pair.dir}/</code> and
+  the replay engine never touches them &mdash; the path filter drops them at commit collection,
+  they never produce replayed counterparts, and yet they survive the round trip because the
+  shadow chain&rsquo;s outer is anchored far enough back to make those changes look like a
+  consumer-side modification rather than a fresh shadow-side revert.
 </p>
 
 <!-- ── 7. How Merges Work ──────────────────────────────────────────────── -->
@@ -1082,8 +1044,10 @@ manual commands above are just for first-time testing.</p>
 <h3>7a. Merge topology preservation (during replay)</h3>
 <p>
   When source history contains merge commits, the replay engine preserves them.
-  <code>resolveParents()</code> maps each source parent hash to its replayed equivalent using the SHA mapping,
-  and falls back to <code>fallbackParent</code> for anything that doesn't map (orphan merges, root commits at the start of a bootstrap, or merge parents on branches we don&rsquo;t sync).
+  <code>resolveParents()</code> maps each source parent hash to its replayed equivalent using the SHA mapping.
+  Anything that doesn&rsquo;t map (orphan merges, root commits at the start of a bootstrap, merge parents
+  on branches we don&rsquo;t sync) is replaced by the closest already-mapped ancestor &mdash; usually a
+  recent echo&rsquo;d commit &mdash; or by target&rsquo;s init when no echo is reachable.
   Duplicates are removed. The replayed merge is created with all resolved parents:
 </p>
 <pre><code>git commit-tree {tree} -p {parent1} -p {parent2} ... -m {message}</code></pre>
@@ -1145,8 +1109,10 @@ manual commands above are just for first-time testing.</p>
     <strong>Force-push / history rewrite on the source branch.</strong> If someone rewrites source history
     (rebase, <code>reset --hard</code>, filter-branch), the old source SHAs are gone and the trailers on the
     existing shadow branch now point at dead commits. On the next sync, none of the new source commits are
-    in the "already replayed" mapping, so the engine replays them fresh rooted on <code>fallbackParent</code>
-    (the target main tip). The new chain has no ancestor relationship to the existing shadow tip.
+    in the "already replayed" mapping, so the engine replays them fresh rooted on
+    <code>targetInit</code> (or, if any of the rewritten commits&rsquo; ancestors still happen to be
+    mapped via an echo, on that echo). The new chain has no ancestor relationship to the existing shadow
+    tip.
     Covered by <code>test-pull-force-rewrite.ts</code> phase 1.
   </li>
   <li>
