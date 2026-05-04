@@ -366,7 +366,9 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   for (let i = 0; i < hashes.length; i += CHUNK) {
     const chunk = hashes.slice(i, i + CHUNK);
     const result = git(["log", "--no-walk", "--format=%H %P", ...chunk], { safe: true });
-    if (!result.ok || !result.stdout) continue;
+    if (!result.ok) {
+      fail(`Failed to fetch parents for ${chunk.length} commit(s): ${result.stderr}`);
+    }
     for (const line of result.stdout.split("\n").filter(Boolean)) {
       const parts = line.split(/\s+/).filter(Boolean);
       map.set(parts[0], parts.slice(1));
@@ -432,13 +434,17 @@ function buildReplayedTree(opts: {
   if (sourceParent.ok) {
     const diffArgs = ["diff-tree", "-r", sourceParent.stdout, commitHash];
     if (sourceDir) diffArgs.push("--", `${sourceDir}/`);
-    diffOutput = git(diffArgs, { safe: true }).stdout;
+    const diffRes = git(diffArgs, { safe: true });
+    if (!diffRes.ok) {
+      fail(`diff-tree failed for ${commitHash}: ${diffRes.stderr}`);
+    }
+    diffOutput = diffRes.stdout;
   } else {
+    // Source root has no parent tree to diff against — reshape ls-tree into diff-tree's "A" entries so downstream logic sees a normal diff.
     const lsArgs = ["ls-tree", "-r", commitHash];
     if (sourceDir) lsArgs.push("--", `${sourceDir}/`);
     const lsResult = git(lsArgs, { safe: true });
     if (!lsResult.ok || !lsResult.stdout) return null;
-    // Reshape ls-tree into diff-tree's "A" entries.
     diffOutput = lsResult.stdout.split("\n").filter(Boolean)
       .map(line => {
         const m = line.match(/^(\d+)\s+\w+\s+([0-9a-f]+)\t(.+)$/);
@@ -539,7 +545,7 @@ function composeCrossRepoMergeTree(opts: {
   return composeSubtree(echoTreeRes.stdout, target.dir, shadowDirRes.stdout);
 }
 
-/** Echo anchor: closest mapped ancestor of `parentHash`, or null if disjoint. */
+/** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
 function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
   const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
   if (!result.ok) return null;
@@ -640,7 +646,9 @@ function mapBranchesToTargetTips(
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
     const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) continue;
+    if (!log.ok) {
+      fail(`Failed to list commits for ${remote}/${branch}: ${log.stderr}`);
+    }
     for (const line of log.stdout.split("\n")) {
       const hash = line.trim();
       if (!hash) continue;
@@ -672,7 +680,6 @@ function replayCommits(opts: {
     `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
   );
 
-  let lastTree: string | null = null;
   try {
     for (const commit of newCommits) {
       const meta = getCommitMeta(commit.hash);
@@ -695,10 +702,21 @@ function replayCommits(opts: {
 
       // Cross-repo merge tree (see composeCrossRepoMergeTree).
       const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc });
-      const parentTree: string | null = composedParentTree
-        ?? (mappedParents.length > 0
-          ? git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true }).stdout || lastTree
-          : lastTree);
+      let parentTree: string | null;
+      if (composedParentTree) {
+        parentTree = composedParentTree;
+      } else if (mappedParents.length > 0) {
+        const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+        if (!treeRes.ok || !treeRes.stdout) {
+          fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${meta.short}.`);
+        }
+        parentTree = treeRes.stdout;
+      } else if (commit.parents.length === 0) {
+        // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
+        parentTree = null;
+      } else {
+        fail(`Non-root commit ${meta.short} has no resolvable parent tree.`);
+      }
 
       const ignorePath = source.dir ? `${source.dir}/.shadowignore` : ".shadowignore";
       const ignoreContent = git(["show", `${commit.hash}:${ignorePath}`], { safe: true });
@@ -730,7 +748,6 @@ function replayCommits(opts: {
       });
 
       shaMapping.set(commit.hash, newSHA);
-      lastTree = tree;
       console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
     }
   } finally {
@@ -767,10 +784,14 @@ export function mirrorHistory(opts: {
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
 
   // Fallback root for orphan parents (see resolveTargetParents).
-  const targetInit = refExists(`${target.remote}/main`)
-    ? (git(["rev-list", "--max-parents=0", `${target.remote}/main`], { safe: true })
-        .stdout.split("\n")[0] || null)
-    : null;
+  let targetInit: string | null = null;
+  if (refExists(`${target.remote}/main`)) {
+    const initRes = git(["rev-list", "--max-parents=0", `${target.remote}/main`], { safe: true });
+    if (!initRes.ok) {
+      fail(`Failed to find init commit on ${target.remote}/main: ${initRes.stderr}`);
+    }
+    targetInit = initRes.stdout.split("\n")[0] || null;
+  }
 
   replayCommits({ newCommits, shaMapping, targetInit, source, target, dc });
 
