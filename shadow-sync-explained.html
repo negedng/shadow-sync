@@ -850,14 +850,14 @@ manual commands above are just for first-time testing.</p>
     engine (see <a href="#engine">next section</a>).
   </div></li>
   <li><span class="step-num">6</span><div>
-    <strong>Reconcile and push.</strong> For each branch, compare <code>replayedSHA</code> with the target's current
+    <strong>Compare and push.</strong> For each branch, compare <code>replayedSHA</code> with the target's current
     <code>shadow/{pairName}/{branch}</code> tip:
     <ul>
       <li>Identical, or <code>replayedSHA</code> is an ancestor of the current tip &mdash; skip (already up to date).</li>
       <li>Current tip is an ancestor of <code>replayedSHA</code> &mdash; push fast-forward.</li>
-      <li>Divergent (neither is an ancestor) &mdash; build a reconciliation merge via
-      <code>git commit-tree</code> with two parents (current tip and <code>replayedSHA</code>) using the replayed tree,
-      then push that. See <a href="#merge">Merges</a>.</li>
+      <li>Divergent &mdash; compare trees. If the trees match, leave the target tip in place
+      (sibling-merge with same content, no update needed). Otherwise, force-update with
+      <code>--force-with-lease</code>. See <a href="#merge">Divergence handling</a>.</li>
     </ul>
     Note: even when replay produces no <em>new</em> commits, the branch may still advance &mdash; the echo
     mapping can point the source's tip at an existing target-side commit, which this comparison then
@@ -1064,10 +1064,10 @@ manual commands above are just for first-time testing.</p>
   real common ancestor and avoids duplicating work.
 </div>
 
-<h3>7b. Shadow branch reconciliation (during push)</h3>
+<h3>7b. Shadow branch divergence handling (during push)</h3>
 <p>
   After replay, the tool pushes the result to <code>shadow/{pair}/{branch}</code> on the target remote.
-  There are three cases:
+  There are four cases:
 </p>
 
 <div class="card">
@@ -1084,9 +1084,14 @@ manual commands above are just for first-time testing.</p>
     <td>Skip &mdash; nothing to push.</td>
   </tr>
   <tr>
-    <td><span class="tag tag-orange">Diverged</span></td>
-    <td>Neither is an ancestor of the other</td>
-    <td>Create a merge commit with both as parents. The replayed tree wins. Push the merge.</td>
+    <td><span class="tag tag-yellow">Diverged, same tree</span></td>
+    <td>Neither is an ancestor; both commits' trees are identical</td>
+    <td>Skip &mdash; same content already there, just different topology (sibling-merge).</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-orange">Diverged, different tree</span></td>
+    <td>Neither is an ancestor; trees differ</td>
+    <td>Force-update with <code>--force-with-lease</code>. The lease aborts the push if another runner has updated the ref since the engine fetched.</td>
   </tr>
 </table>
 </div>
@@ -1102,6 +1107,16 @@ manual commands above are just for first-time testing.</p>
     can have different committer identity or committer timestamp depending on which machine ran the tool,
     so they get different commit SHAs even though author and tree are identical. The first push wins;
     the second arrives to find its SHA is neither an ancestor nor a descendant of the shadow tip.
+    Trees are identical &rArr; <em>same-tree</em> path: skip silently.
+  </li>
+  <li>
+    <strong>Concurrent merges from each side.</strong> Both sides do <code>git merge</code> of the
+    other's contribution between syncs. <code>git merge</code> is parent-non-commutative, so the two
+    resulting merges contain identical content but parent SHAs in opposite order &mdash; sibling
+    merges. Future syncs that pivot through these via echo recognition can produce a replay tip on
+    one branch of the sibling pair while the shadow currently points at the other. Trees match
+    &rArr; <em>same-tree</em> path: skip silently. Covered by
+    <code>test-push-diverged-concurrent-merges.ts</code>.
   </li>
   <li>
     <strong>Force-push / history rewrite on the source branch.</strong> If someone rewrites source history
@@ -1110,28 +1125,30 @@ manual commands above are just for first-time testing.</p>
     in the "already replayed" mapping, so the engine replays them fresh rooted on
     <code>targetInit</code> (or, if any of the rewritten commits&rsquo; ancestors still happen to be
     mapped via an echo, on that echo). The new chain has no ancestor relationship to the existing shadow
-    tip.
-    Covered by <code>test-pull-force-rewrite.ts</code> phase 1.
+    tip and the trees genuinely differ &rArr; <em>different-tree</em> path: force-update.
+    Covered by <code>test-pull-force-rewrite.ts</code> phase 1 and <code>test-push-diverged.ts</code>.
   </li>
   <li>
     <strong>Manual intervention on the shadow branch.</strong> Against policy, but possible &mdash; a human
-    force-pushes or commits directly to <code>shadow/backend/main</code>.
+    force-pushes or commits directly to <code>shadow/backend/main</code>. Behavior depends on whether
+    the manual content matches the replay's tree.
   </li>
 </ol>
 
 <p>
-  In all three cases, the right answer is "the replayed tree is the truth, but preserve both histories."
-  Failing loudly would turn every concurrent sync into a paging incident; the reconciliation merge keeps
-  the diverged tip reachable so no work is lost, while the tree matches what the source currently says.
+  The shadow ref is engine-managed, so rewinding it via force-with-lease is acceptable: shadow commits
+  hold no unique authored content (they are mechanical replays), and downstream <code>git fetch</code>
+  updates remote-tracking refs without FF protection by default. The previous tip remains in the git
+  object database (reachable from any feature branch that may have merged it) until garbage collection.
 </p>
 
-<p>The reconciliation merge:</p>
-<pre><code>// Take the replayed tree as the truth
-syncedTree = git rev-parse {replayedSHA}^{tree}
+<p>The push:</p>
+<pre><code>// Same tree, different topology &mdash; nothing to push
+if (currentTree === replayedTree) continue;
 
-// Build a merge commit with both parents but the replayed tree
-pushSHA = git commit-tree {syncedTree} -p {currentSHA} -p {replayedSHA}
-    -m "Merge replayed commits into shadow/backend/main"</code></pre>
+// Trees differ &mdash; force-update with lease
+git push --force-with-lease={shadow}:{currentSHA} \
+    {target.remote} {replayedSHA}:refs/heads/{shadow}</code></pre>
 
 <h3>7c. User-facing merge (after sync)</h3>
 <p>
@@ -1334,7 +1351,7 @@ const result = runSync({ from: "b", pair: "backend" });
 <table>
   <tr><th>File</th><th>Purpose</th></tr>
   <tr><td><code>shadow-common.ts</code></td><td>Core library: config loading, git wrapper, replay engine, tree builder, trailer management, preflight checks</td></tr>
-  <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, merge reconciliation. Also exports <code>runSync</code> for in-process use.</td></tr>
+  <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, divergence handling (same-tree skip / force-with-lease). Also exports <code>runSync</code> for in-process use.</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
   <tr><td><code>.shadowignore</code></td><td>Per-repo file-exclusion patterns (auto-discovered from source tree)</td></tr>
   <tr><td><code>shadow-tests/</code></td><td>16 consolidated test files: pull-content, pull-paths, pull-branches, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, pull-echo-mapping, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, multi-pair-root-files, round-trip</td></tr>

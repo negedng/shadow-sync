@@ -431,9 +431,13 @@
 </div>
 
 <div class="card compact" id="c9">
-  <h3><span class="ref ref-c">C9</span> Reconcile target-side shadow divergence with a 2-parent merge at push time</h3>
-  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> <code>--force</code> push (clobbers any independently-pushed work on the shadow ref); abort and require operator action (violates <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract); fast-forward-only (same failure whenever the target has moved at all).</p>
-  <p>When the target&rsquo;s shadow-ref tip is neither equal to the engine&rsquo;s newly replayed tip nor an ancestor of it, the engine builds a 2-parent commit (<code>commit-tree replayedTree -p current -p replayed</code>) and pushes that. The replayed tree wins on content; both histories survive on topology. The next run&rsquo;s dedup scan picks up the merge as a normal shadow commit, so the resolution stays idempotent.</p>
+  <h3><span class="ref ref-c">C9</span> Resolve target-side shadow divergence by force-updating the engine&rsquo;s view</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternatives:</strong> synthetic 2-parent reconciliation merge (<code>commit-tree replayedTree -p current -p replayed</code>) &mdash; the original behavior; preserves the divergent tip in history but its tree is just <code>replayedTree</code> anyway, so it offers no working-content protection beyond force-update while polluting history with synthetic commits authored by whoever ran the orchestrator. Plain <code>--force</code> push without a lease &mdash; loses race protection against concurrent runners. Abort &amp; require operator (violates <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract).</p>
+  <p>When the target&rsquo;s shadow-ref tip is neither equal to the engine&rsquo;s newly replayed tip nor an ancestor of it, the engine compares trees and takes one of two paths:</p>
+  <ul>
+    <li><strong>Trees identical</strong> (sibling-merge case &mdash; same content, parents reordered): leave the target tip in place. No update needed; the shadow already carries the right content even if its topology differs from the engine&rsquo;s computed chain.</li>
+    <li><strong>Trees differ</strong> (real content advancement): force-update with <code>git push --force-with-lease=&lt;branch&gt;:&lt;currentSHA&gt;</code>. The lease aborts the push if another runner has updated the ref since the engine fetched, so concurrent-runner protection is preserved. The shadow ref is engine-managed; rewinding it is OK because shadow commits hold no unique authored content (they are mechanical replays), and downstream <code>git fetch</code> updates remote-tracking refs without FF protection by default.</li>
+  </ul>
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->

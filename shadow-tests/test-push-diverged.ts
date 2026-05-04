@@ -10,8 +10,8 @@ function git(cmd: string, cwd: string): string {
  * Test: diverged shadow branch reconciliation.
  *
  * When both sides make changes between syncs, the shadow branch on the target
- * diverges from the replayed result. The tool should create a merge commit
- * using the replayed tree (ours strategy) and push successfully.
+ * diverges from the replayed result. The tool should force-update the target
+ * to the replayed tip (the engine owns the shadow ref; rewinds are OK).
  */
 export default function run() {
   const env = createTestEnv("push-diverged");
@@ -41,9 +41,14 @@ export default function run() {
     const divergeCommit = git(`commit-tree ${treeHash} -p ${currentTip} -m "Diverged commit on B shadow"`, env.localRepo);
     git(`push ${env.remoteName} ${divergeCommit}:refs/heads/${shadowBranch}`, env.localRepo);
 
-    // 4. Push again — should detect divergence and create reconciliation merge
+    // 4. Push again — should detect divergence and force-update the target
     const r3 = runPush(env);
     assertEqual(r3.status, 0, "push with diverged shadow should succeed");
+    assertEqual(
+      r3.stdout.includes("force-updating engine view"),
+      true,
+      "engine should report force-update on divergence with different tree",
+    );
 
     // 5. The replayed content should win (second.ts should be there)
     assertEqual(
@@ -57,11 +62,18 @@ export default function run() {
       "first.ts should still be on shadow branch",
     );
 
-    // 6. The shadow branch tip should be a merge commit (2 parents)
+    // 6. Force-push leaves the shadow tip as the replayed commit itself —
+    //    a normal single-parent commit, not a synthetic reconciliation merge.
     git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
     const parentLine = git(`log -1 --format=%P ${env.remoteName}/${shadowBranch}`, env.localRepo);
     const parentCount = parentLine.split(/\s+/).filter(Boolean).length;
-    assertEqual(parentCount, 2, "shadow branch tip should be a merge commit with 2 parents");
+    assertEqual(parentCount, 1, "shadow tip should be the force-pushed replay (1 parent)");
+    const tipMessage = git(`log -1 --format=%B ${env.remoteName}/${shadowBranch}`, env.localRepo);
+    assertEqual(
+      tipMessage.includes("Reconcile divergent"),
+      false,
+      "shadow tip must not be a synthetic reconciliation merge",
+    );
 
   } finally {
     env.cleanup();
