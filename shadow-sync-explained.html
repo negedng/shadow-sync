@@ -252,8 +252,8 @@
   in the config sets the path prefix per side (<code>"backend"</code> vs. <code>""</code> for root).
 </p>
 <p>
-  The tool runs from a <strong>workspace</strong> &mdash; either one of the repos itself (the other is added as a remote)
-  or a standalone orchestrator repo (both are added as remotes).
+  The tool runs from a standalone <strong>orchestrator</strong> repo &mdash; neither RepoA nor RepoB.
+  Both are added as named remotes via the <code>url</code> field in the config.
 </p>
 
 <h3>Bootstrap, shadow sync, and merge at a glance</h3>
@@ -571,19 +571,21 @@ org/monorepo
   branches once the first sync runs.
 </p>
 
-<pre><code>git clone https://github.com/org/monorepo.git
-cd monorepo
-# (or just git init + push if it doesn't exist yet)</code></pre>
+<pre><code>git init org/monorepo
+# (or push an empty repo to GitHub and clone it)</code></pre>
 
-<h3>Step 2 &mdash; Install and configure</h3>
+<h3>Step 2 &mdash; Stand up an orchestrator repo</h3>
 <p>
-  Run in workspace mode: the monorepo <em>is</em> the workspace. <code>a</code> is
-  <code>origin</code> with a <code>dir</code> prefix; <code>b</code> is the external repo at root.
+  The orchestrator is a small standalone repo &mdash; nothing but config, workflows, and the
+  shadow-sync dependency. It is neither the monorepo nor any of the synced source repos; all three
+  are added as named remotes via the <code>url</code> field in the config.
 </p>
 
-<pre><code>npm install negedng/shadow-sync cross-env tsx</code></pre>
+<pre><code>git init org/shadow-orchestrator
+cd org/shadow-orchestrator
+npm install negedng/shadow-sync cross-env tsx</code></pre>
 
-<p>Add the script to the monorepo&rsquo;s <code>package.json</code>:</p>
+<p>Add the script to the orchestrator&rsquo;s <code>package.json</code>:</p>
 
 <pre><code>{
   "scripts": {
@@ -597,12 +599,12 @@ cd monorepo
   "pairs": [
     {
       "name": "frontend",
-      "a": { "remote": "origin",        "dir": "frontend" },
+      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git", "dir": "frontend" },
       "b": { "remote": "frontend-repo", "url": "https://github.com/org/frontend.git", "dir": "" }
     },
     {
       "name": "backend",
-      "a": { "remote": "origin",        "dir": "backend" },
+      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git", "dir": "backend" },
       "b": { "remote": "backend-repo",  "url": "https://github.com/org/backend.git",  "dir": "" }
     }
   ]
@@ -616,8 +618,11 @@ cd monorepo
   <code>git merge</code> works from day one.
 </p>
 
-<pre><code>npm run sync -- -r frontend --from b
+<pre><code># From the orchestrator:
+npm run sync -- -r frontend --from b
 npm run sync -- -r backend  --from b
+
+# From a monorepo clone:
 git fetch origin
 git merge origin/shadow/frontend/main
 git merge origin/shadow/backend/main
@@ -634,13 +639,14 @@ git push origin main</code></pre>
 <h3>Step 4 &mdash; Sync, both directions</h3>
 
 <p><strong>Frontend team commits to <code>org/frontend</code> (or merges a PR there):</strong></p>
-<pre><code># On the monorepo:
+<pre><code># From the orchestrator:
 npm run sync -- --from b -r frontend
+# From a monorepo clone:
 git fetch origin
 git merge origin/shadow/frontend/main       # lands on monorepo/main</code></pre>
 
 <p><strong>Monorepo contributor edits <code>frontend/src/foo.ts</code>:</strong></p>
-<pre><code># On the monorepo:
+<pre><code># From the orchestrator:
 npm run sync -- --from a -r frontend
 # On org/frontend (via normal git UI or CI):
 git merge origin/shadow/frontend/main       # lands on frontend/main</code></pre>
@@ -721,52 +727,44 @@ manual commands above are just for first-time testing.</p>
 </table>
 </div>
 
-<h3>Deployment modes</h3>
+<h3>Deployment shape</h3>
 <p>
-  Shadow-sync runs the same code either way &mdash; what differs is where the tool itself lives relative to
-  the synced repos. Two modes, one config shape, two auth pictures.
+  Shadow-sync runs from a standalone orchestrator repo &mdash; not from inside any of the synced
+  repos. The orchestrator owns nothing but the config, the workflows, and the shadow-sync
+  dependency. Every endpoint in <code>shadow-config.json</code> declares an explicit <code>url</code>;
+  the tool adds each as a named remote at runtime.
 </p>
 
 <div class="card">
 <table>
-  <tr><th>&nbsp;</th><th>Workspace mode</th><th>Orchestrator mode</th></tr>
+  <tr><th>Aspect</th><th>How it works</th></tr>
   <tr>
     <td><strong>Tool runs inside</strong></td>
-    <td>One of the synced repos (typically the monorepo A).</td>
     <td>A separate, dedicated orchestrator repo with nothing but config + workflows.</td>
   </tr>
   <tr>
     <td><strong><code>shadow-config.json</code></strong></td>
-    <td>One endpoint has <code>"remote": "origin"</code> (no <code>url</code> needed); the other lists its external <code>url</code>.</td>
     <td>Both endpoints have an explicit <code>url</code>; the tool adds each as a remote at runtime.</td>
   </tr>
   <tr>
     <td><strong>CI push destinations</strong></td>
-    <td>Pull writes back to <code>origin</code> (same repo); push writes cross-repo to the B-side.</td>
     <td>Every push is cross-repo &mdash; both the A-side and every B-side are external to the orchestrator.</td>
   </tr>
   <tr>
     <td><strong><code>GITHUB_TOKEN</code> enough?</strong></td>
-    <td>Yes for pull. No for push &mdash; <code>GITHUB_TOKEN</code> is scoped to the caller repo.</td>
-    <td>No for either direction.</td>
+    <td>No &mdash; <code>GITHUB_TOKEN</code> is scoped to the caller (orchestrator) repo, which has no synced content.</td>
   </tr>
   <tr>
     <td><strong><code>EXTERNAL_REPO_TOKEN</code> PAT</strong></td>
-    <td>Required for push only. Pull workflow falls back to <code>github.token</code> automatically if absent.</td>
     <td>Required for both directions. Must have Contents: Read+Write on every external repo the config references.</td>
-  </tr>
-  <tr>
-    <td><strong>Example in this repo</strong></td>
-    <td><code>sht2-main</code> (main-plus-two-pair-repos, monorepo runs the tool).</td>
-    <td><code>sht3-orchestrator</code> (runs against <code>sht3-main</code> + <code>sht3-backend</code> + <code>sht3-frontend</code>).</td>
   </tr>
 </table>
 </div>
 
 <div class="highlight-box">
-  <strong>Reusable GitHub Actions workflows</strong> ship in this repo under <code>.github/workflows/</code>
-  and accept both modes without modification. A consumer in either mode adds a thin caller workflow that
-  does <code>uses: negedng/shadow-sync/.github/workflows/shadow-sync.yml@main</code> (and the forward
+  <strong>Reusable GitHub Actions workflows</strong> ship in this repo under <code>.github/workflows/</code>.
+  A consumer adds a thin caller workflow in the orchestrator repo that does
+  <code>uses: negedng/shadow-sync/.github/workflows/shadow-sync.yml@main</code> (and the forward
   variant), declares <code>permissions: contents: write</code> (pull) or <code>contents: read</code> (forward) &mdash;
   a reusable workflow can't ask for more permissions than the caller grants &mdash; and passes
   <code>secrets: inherit</code> so <code>EXTERNAL_REPO_TOKEN</code> flows through. See the README "GitHub Actions"
@@ -1099,7 +1097,7 @@ manual commands above are just for first-time testing.</p>
 </p>
 <ol>
   <li>
-    <strong>Two workspaces racing to push.</strong> A dev laptop and a CI runner (or two CI runners)
+    <strong>Two orchestrator runs racing to push.</strong> A dev laptop and a CI runner (or two CI runners)
     sync at roughly the same time. Both compute a replay and both try to push. The replayed commits
     can have different committer identity or committer timestamp depending on which machine ran the tool,
     so they get different commit SHAs even though author and tree are identical. The first push wins;

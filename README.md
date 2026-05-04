@@ -134,9 +134,7 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 
 ### Secrets
 
-- **`EXTERNAL_REPO_TOKEN`** — fine-grained PAT with Contents: Read and Write on every external repo shadow-sync will push to.
-  - **Workspace mode** (tool runs inside one of the synced repos): required for push (pushes to the external B-side repos); optional for pull (pull pushes back to `origin`, which `GITHUB_TOKEN` covers — the pull workflow falls back to `github.token` automatically when the secret is absent).
-  - **Orchestrator mode** (tool runs from a standalone repo): required for both push and pull — neither endpoint is the caller's origin, so every push is cross-repo. The PAT must cover all three external repos listed in `shadow-config.json` (both A-side and B-side).
+- **`EXTERNAL_REPO_TOKEN`** — fine-grained PAT with Contents: Read and Write on every external repo listed in `shadow-config.json`. The orchestrator has no synced content of its own, so every push is cross-repo and the PAT must cover every A-side and B-side repo the config references.
 
 ## Options
 
@@ -144,7 +142,7 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 |------|-------------|---------|
 | `-r` / `--pair` | Pair name | All pairs |
 | `--from` | Direction: `a` or `b` | `b` |
-| `-b` | Branch to sync | All branches (remote) or current branch (workspace) |
+| `-b` | Branch to sync | All branches |
 
 ## Setup
 

@@ -316,8 +316,8 @@
     <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
     target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
     map. Anything already present is skipped. Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
-    honest: two pairs that both read from <code>origin</code> (a backend pair and a frontend pair
-    in workspace mode, for example) can&rsquo;t step on each other&rsquo;s trailers.
+    honest: two pairs that share a source remote can&rsquo;t step on each other&rsquo;s trailers,
+    because pair name and source remote together namespace the trailer.
   </p>
   <p>
     On round-trip echoes (a source commit that already carries a prior <code>Shadow-replayed-*</code>
