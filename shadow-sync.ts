@@ -175,10 +175,23 @@ function _runSyncCore(options: SyncOptions): number {
           if (!isFF) {
             console.log(`  ${shadow}: ${target.remote} diverged, creating merge to reconcile...`);
             const syncedTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
+            const shortCurrent = currentSHA.slice(0, 7);
+            const shortReplay = replayedSHA.slice(0, 7);
+            const msg =
+              `shadow-sync: reconcile divergent ${shadow} (replay wins)\n` +
+              `\n` +
+              `Target tip ${shortCurrent} is not an ancestor of the freshly-replayed\n` +
+              `tip ${shortReplay}. Merging both with the replayed tree as the result —\n` +
+              `the divergent target content is preserved in history (parent ${shortCurrent})\n` +
+              `but discarded from the working tree.\n` +
+              `\n` +
+              `Typical causes: (1) two orchestrator runs racing to push, (2) source-side\n` +
+              `force-push since the previous sync, (3) concurrent merges from each side\n` +
+              `producing the same content with different parent topology.\n`;
             pushSHA = git([
               "commit-tree", syncedTree,
               "-p", currentSHA, "-p", replayedSHA,
-              "-m", `Merge replayed commits into ${shadow}`,
+              "-m", msg,
             ]);
           }
         }
