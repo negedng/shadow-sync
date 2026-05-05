@@ -387,9 +387,10 @@ function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
 
 function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
   // --full-history is required when source.dir is non-empty: rev-list's default
-  // history simplification drops merges that are TREESAME to a parent at the
+  // history simplification drops consumer-merges TREESAME to a parent at the
   // path, which silently loses concurrent-merge round descendants and breaks
-  // C6's FF-only invariant. See C6.
+  // C6's FF-only invariant. See M1 (where the splice + --full-history pairing
+  // is described) and C6 (the push-time invariant it protects).
   const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
     ...branches.map(b => `${source.remote}/${b}`)];
   if (source.dir) args.push("--", `${source.dir}/`);

@@ -352,16 +352,13 @@
 </div>
 
 <div class="card" id="c6">
-  <h3><span class="ref ref-c">C6</span> Allow only FF merge by the script</h3>
-  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternative:</strong> substitute consumer&rsquo;s existing merge into the mapping; create consolidation merges</p>
+  <h3><span class="ref ref-c">C6</span> Shadow refs are FF-only by the script</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternatives:</strong> force-push (with or without lease) &mdash; rewinds engine-managed refs and breaks the auditable property that shadow refs only ever advance; synthetic 2-parent reconciliation merge &mdash; pollutes history with engine-authored merges whose tree equals the replay tree anyway.</p>
   <p>
-    We only allow only FF merge on the shadow branches by the script. Everything else should be resolved with human observation.
+    The shadow ref on the target is append-only from the engine&rsquo;s side: every push is a plain non-force push, with <code>merge-base --is-ancestor currentSHA replayedSHA</code> asserted before the push attempt. The script never authors a merge of its own &mdash; multi-parent commits the replay produces (<a class="ref ref-m" href="#m1">M1</a>) are faithful reconstructions of merges that already exist on the source, not engine-introduced reconciliation/consolidation merges. Anything that wouldn&rsquo;t be a fast-forward is left for human observation.
   </p>
   <p>
-    <strong>Identical merge concurrency</strong> If both side of a repo pair merges shadow into main at the same state, it produces mirrored merge commits in the same repo: the shadow branch's merge has the same tree state as the main branch's and share the same parents, only in the reverse order.
-  </p>
-  <p>
-    By default, <code>git rev-list</code> does not carry the identical merges, resulting in no-FF merge. <code>--full-history</code> resolves this. Alternatively, the script can produce a consolidation merge commit or we can map identical merges instead of creating siblings.
+    <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract takes a bounded hit on the genuinely unrecoverable cases (source rewrites, manual shadow edits) in exchange for the stronger invariant that shadow refs never rewind. Downstream tooling can rely on it: no surprise reflog jumps, feature branches that merged a shadow tip stay reachable, and <code>git fetch</code>&rsquo;s default behaviour on remote-tracking refs (which allows non-FF updates) doesn&rsquo;t silently corrupt anyone&rsquo;s view.
   </p>
 </div>
 
@@ -437,6 +434,49 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     Linear shadow commits (no echo&rsquo;d parent) skip the composition and inherit
     <code>parentTree</code> from the previous mapped parent&rsquo;s tree directly &mdash; outer
     state propagates forward until the next cross-repo merge updates it.
+  </p>
+
+  <p>
+    <strong>Where this fires most often: consumer shadow&rarr;main merges.</strong> When a
+    consumer on the source side runs <code>git merge shadow/&lt;pair&gt;/main</code>, the resulting
+    merge commit has parents <code>[main_prev, shadow_prev]</code> &mdash; <code>shadow_prev</code>
+    is a chain of replays from the other side and carries our trailer, so it&rsquo;s an echo from
+    the target&rsquo;s perspective. That makes the consumer-merge a textbook cross-repo merge for
+    the next sync, and M1&rsquo;s splice fires on it.
+  </p>
+  <p>
+    <strong>Identical-merge concurrency &amp; sibling creation.</strong> If both sides do this
+    concurrently &mdash; A merges A/shadow into A/main producing <code>M_a</code>, B merges
+    B/shadow into B/main producing <code>M_b</code> &mdash; the two consumer-merges have the
+    same tree but parents in mirrored order. When the next sync replays <code>M_a</code> onto B,
+    M1&rsquo;s splice produces a commit with the same tree as <code>M_b</code> but with parents
+    <code>[A&rsquo;s shadow-side parent mapped onto B/shadow, echo target = B/main_prev]</code>
+    &mdash; a sibling of <code>M_b</code>. The sibling lands on <code>B/shadow</code> as a plain
+    FF advance over the previous shadow tip; it diverges from <code>B/main</code>, not from
+    its own previous self &mdash; so <a class="ref ref-c" href="#c6">C6</a>&rsquo;s push-time
+    FF assertion still passes.
+  </p>
+  <p>
+    <strong><code>rev-list --full-history</code> on source-side commit collection.</strong>
+    Default <code>rev-list -- dir/</code> simplifies away merges that are TREESAME-at-the-path
+    to one parent. Consumer-merges qualify: the merge result&rsquo;s <code>dir/</code> equals
+    the shadow-side parent&rsquo;s <code>dir/</code> (the side that already had the synced
+    content). Without <code>--full-history</code>, those merges never enter the replay queue;
+    their descendants get reparented to echo&rsquo;d ancestors via <a class="ref ref-m" href="#m2">M2</a>;
+    the resulting shadow tip is no longer a child of the previous one, and
+    <a class="ref ref-c" href="#c6">C6</a>&rsquo;s push-time FF assertion would halt. Adding
+    <code>--full-history</code> keeps the consumer-merges in the queue so M1 can splice them &mdash;
+    the cheapest fix for the rev-list visibility problem.
+  </p>
+  <p class="from">
+    <em>Rejected alternatives at this level (distinct from the plumbing-vs-porcelain axis below):</em>
+    substitute the consumer&rsquo;s existing target/main merge into <code>shaMapping</code>
+    (was a separate mechanism &mdash; eliminates the sibling but adds a per-merge target/main
+    scan and breaks symmetry with the rest of replay); fabricate an engine-authored
+    consolidation merge to reconcile shadow with target/main (engine-authored noise with no
+    content benefit, plus violates <a class="ref ref-c" href="#c6">C6</a>&rsquo;s &ldquo;script
+    never produces merges&rdquo; framing). Splice + <code>--full-history</code> together cover
+    every concurrent-merge shape we&rsquo;ve tested without needing either alternative.
   </p>
 
   <p>
@@ -797,9 +837,9 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
 <div class="card">
   <h3><span class="tag tag-red">!</span> Squash-merging shadow into main is untested under <code>--full-history</code></h3>
-  <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-c" href="#c6">C6</a></p>
+  <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-m" href="#m1">M1</a></p>
   <p>
-    A consumer who runs <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> instead of a regular merge gets shadow&rsquo;s content as a single non-merge commit on <code>main</code>, losing the merge edge that connects <code>main</code> to the shadow chain. Subsequent regular merges of an updated shadow can produce merge commits that are <code>TREESAME</code> to their shadow-side parent at the synced path &mdash; the same shape <a class="ref ref-c" href="#c6">C6</a>&rsquo;s <code>--full-history</code> flag is supposed to cover.
+    A consumer who runs <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> instead of a regular merge gets shadow&rsquo;s content as a single non-merge commit on <code>main</code>, losing the merge edge that connects <code>main</code> to the shadow chain. Subsequent regular merges of an updated shadow can produce merge commits that are <code>TREESAME</code> to their shadow-side parent at the synced path &mdash; the same shape <a class="ref ref-m" href="#m1">M1</a>&rsquo;s <code>--full-history</code> flag is supposed to cover.
   </p>
   <p>
     In principle <code>--full-history</code> should keep these merges in the replay queue and the chain should extend cleanly. In practice the squash case was originally identified <em>before</em> we switched to <code>--full-history</code>, set aside as out-of-scope, and never re-verified afterward. The squash phase is intentionally skipped in <code>test-no-force-push-cases</code>. Until a test confirms it, we still tell consumers to use plain <code>git merge</code> on shadow refs.
