@@ -352,10 +352,13 @@
 </div>
 
 <div class="card" id="c6">
-  <h3><span class="ref ref-c">C6</span> Identical merge concurrency</h3>
+  <h3><span class="ref ref-c">C6</span> Allow only FF merge by the script</h3>
   <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternative:</strong> substitute consumer&rsquo;s existing merge into the mapping; create consolidation merges</p>
   <p>
-    If both side of a repo pair merges shadow into main at the same state, it produces mirrored merge commits in the same repo: the shadow branch's merge has the same tree state as the main branch's and share the same parents, only in the reverse order.
+    We only allow only FF merge on the shadow branches by the script. Everything else should be resolved with human observation.
+  </p>
+  <p>
+    <strong>Identical merge concurrency</strong> If both side of a repo pair merges shadow into main at the same state, it produces mirrored merge commits in the same repo: the shadow branch's merge has the same tree state as the main branch's and share the same parents, only in the reverse order.
   </p>
   <p>
     By default, <code>git rev-list</code> does not carry the identical merges, resulting in no-FF merge. <code>--full-history</code> resolves this. Alternatively, the script can produce a consolidation merge commit or we can map identical merges instead of creating siblings.
