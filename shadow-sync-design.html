@@ -281,29 +281,9 @@
     &mdash; the next question is what its tip&rsquo;s tree should look like. <a class="ref ref-r" href="#r5">R5</a>
     sets the bar: when the consumer merges, the only conflicts they should see are the ones their
     own contributors caused inside <code>dir/</code>. Everything else &mdash; missing files, modified
-    files, modify/delete pairs &mdash; is a phantom conflict the engine produced. Two valid shapes:
+    files, modify/delete pairs &mdash; is a phantom conflict the engine produced. Thus, when a commit is echo'd with the outer layout, we mirror the outer files and diff the synced files (see <a class="ref ref-m" href="#m1">M1</a>). This way a plain
+    <code>git merge origin/shadow/&hellip;</code> just works.
   </p>
-  <ul>
-    <li>
-      <strong>Mirror the outer layout</strong> (what we do): shadow tip&rsquo;s tree equals the
-      target&rsquo;s current tree, with <code>dir/</code> replaced by the replayed pair content. Plain
-      <code>git merge origin/shadow/&hellip;</code> just works &mdash; the diff outside <code>dir/</code>
-      is empty by construction. Mirror layout forces a tree composition (<a class="ref ref-m" href="#m1">M1</a>). The
-      shadow tip&rsquo;s non-pair content has to be rewritten on every push to track the target&rsquo;s
-      current <code>main</code>, otherwise a later merge silently reverts any change the target made
-      outside <code>dir/</code> between syncs (root README edits, CI config, another pair&rsquo;s
-      directory).
-    </li>
-    <li>
-      <strong>Subtree-only:</strong> shadow tip&rsquo;s tree contains only the rewritten synced
-      content. Plain <code>git merge</code> would treat the absence of files outside <code>dir/</code>
-      as deletions and wipe most of the target&rsquo;s tree, so consumers would have to run
-      <code>git subtree merge --prefix=&lt;dir&gt;</code> or a scripted equivalent instead. Subtree-only forces a special consumer command. Forgetting it &mdash; running
-      plain <code>git merge</code> instead &mdash; corrupts silently: most of the target&rsquo;s tree
-      gets wiped in one apparently successful merge. Under <a class="ref ref-r" href="#r4">R4</a>
-      there&rsquo;s no human to spot the damage before it lands.
-    </li>
-  </ul>
 </div>
 
 <div class="card" id="c3">
@@ -315,14 +295,13 @@
     under <a class="ref ref-r" href="#r4">R4</a>. Each replayed commit carries
     <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
     target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
-    map. Anything already present is skipped. Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
-    honest: two pairs that share a source remote can&rsquo;t step on each other&rsquo;s trailers,
-    because pair name and source remote together namespace the trailer.
+    map. Anything already present is skipped.<br>
+    On round-trip echoes (a source commit that already carries a trailer originating from the target), find and use the original commit.
   </p>
   <p>
-    On round-trip echoes (a source commit that already carries a prior <code>Shadow-replayed-*</code>
-    from an earlier direction), strip the prior trailer before appending the new one &mdash; otherwise
-    trailers accumulate without bound across cycles.
+    Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
+    honest: two pairs that share a source remote can&rsquo;t step on each other&rsquo;s trailers,
+    because pair name and source remote together namespace the trailer.
   </p>
 </div>
 
@@ -330,18 +309,6 @@
   <h3><span class="ref ref-c">C4</span> Tool runs from a standalone orchestrator repo</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r4">R4</a></p>
   <p class="from"><strong>Rejected alternatives:</strong> <em>workspace mode</em> &mdash; the tool runs inside one of the synced repos, with that side as <code>origin</code> (no <code>url</code> needed); or <em>support both</em> from the same codebase, letting the consumer pick.</p>
-  <p>
-    Both modes can satisfy <a class="ref ref-r" href="#r4">R4</a> &mdash; the question is what the
-    engine has to handle. Workspace mode looks attractive: one less repo to set up, one config field
-    saved (the workspace endpoint omits <code>url</code>), and the consumer can run the sync directly
-    from their checkout. The cost shows up in three places:
-  </p>
-  <p>
-    Supporting <em>both</em> from the same codebase nominally lets the consumer pick, but bakes
-    workspace-mode complexity into every code path and roughly doubles the test matrix (every test
-    has to exercise the workspace shape and the orchestrator shape). Picking one keeps the engine
-    simple; we picked orchestrator.
-  </p>
   <p>
     The choice still forces <a class="ref ref-m" href="#m5">M5</a> (CI auth, now simplified to a
     single <code>insteadOf</code> rule) and <a class="ref ref-m" href="#m6">M6</a> (reusable
@@ -351,7 +318,7 @@
 </div>
 
 <div class="card" id="c5">
-  <h3><span class="ref ref-c">C5</span> Bootstrap by replaying full source history, parented to target&rsquo;s init</h3>
+  <h3><span class="ref ref-c">C5</span> Setup: replay commits from init by parenting source init to target&rsquo;s init</h3>
   <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-c" href="#c2">C2</a> &middot; <a class="ref ref-r" href="#r5">R5</a> &middot; <a class="ref ref-r" href="#r6">R6</a></p>
   <p class="from"><strong>Rejected alternatives:</strong> <em>seed at divergence</em> &mdash; create a marker commit on each target branch anchoring the two trees at the moment sync begins, and replay only commits after the seed; <em>no anchor at all</em> &mdash; skip merge-base establishment entirely and require <code>git merge --allow-unrelated-histories</code> on the consumer side.</p>
   <p>
@@ -371,24 +338,6 @@
       history is preserved on the target; <code>git blame</code> reaches back to the original
       commits.
     </li>
-    <li>
-      <strong>Seed at divergence</strong>: create one no-op commit per pair+branch, anchoring shared
-      ancestry without replaying prior history. Faster to bootstrap, but loses pre-seed
-      archaeology and adds a separate setup phase consumers have to remember to run.
-    </li>
-    <li>
-      <strong>No anchor + <code>--allow-unrelated-histories</code></strong>: don&rsquo;t establish a
-      merge-base at all. Replay produces orphan commits on shadow branches; the consumer passes
-      <code>--allow-unrelated-histories</code> to <code>git merge</code> the first time each new shadow
-      branch is merged. The engine simplifies (no init/echo anchoring for roots, no anchor
-      scaffolding); the cost lands on the consumer. After the first merge, the merge commit relates
-      the two histories &mdash; so subsequent merges of <em>that</em> branch don&rsquo;t need the flag
-      &mdash; but every <em>new</em> shadow branch&rsquo;s first merge needs it again. Ruled out by
-      <a class="ref ref-c" href="#c1">C1</a>: <code>--allow-unrelated-histories</code> is a special
-      merge invocation, exactly the consumer-side tax C1 says the engine should absorb. For a single-
-      branch deployment it&rsquo;s a one-time hassle; in active multi-branch syncing it&rsquo;s a recurring
-      stumble.
-    </li>
   </ul>
   <p>
     Sync-from-init costs a one-time bootstrap proportional to source-side history (per-commit
@@ -399,13 +348,6 @@
     ancestor for plain <code>git merge</code> from any pair&rsquo;s shadow branch. Chronologies
     look jumpy (source commit dates predate the target&rsquo;s init) but topology is correct and
     <code>merge-base</code> always answers.
-  </p>
-  <p class="from">
-    <em>Degree of freedom within &ldquo;sync from init&rdquo;:</em> per-commit replay vs. a single
-    bulk import (e.g. <code>git filter-repo --to-subdirectory-filter</code> followed by a merge).
-    The bulk approach mangles SHAs before they can be put into trailers, breaking
-    <a class="ref ref-c" href="#c3">C3</a>&rsquo;s dedup &mdash; so per-commit replay is the only path
-    consistent with the rest of the design.
   </p>
 </div>
 
@@ -845,6 +787,60 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     it&rsquo;s exactly right &mdash; <code>git merge-base m&prime; A/main</code> returns <code>a</code>
     correctly, no information is lost. The visual just looks unusual because most graph viewers
     aren&rsquo;t used to merge edges spanning that distance.
+  </p>
+</div>
+
+<div class="card">
+  <h3><span class="tag tag-red">!</span> Force-with-lease fires in normal multi-team use, not just on policy violations</h3>
+  <p class="from">From <a class="ref ref-c" href="#c9">C9</a></p>
+  <p>
+    <a class="ref ref-c" href="#c9">C9</a> is framed around the rare cases &mdash; force-push on
+    <code>main</code>, manual shadow-ref edits &mdash; but the force-with-lease branch also fires
+    routinely in normal asymmetric sync activity. Whenever one direction syncs aggressively and the
+    other catches up later, the lagging shadow ref carries content from a past projection while the
+    engine&rsquo;s recomputed tip carries the catch-up content. <strong>Trees genuinely differ &mdash;
+    by the work that accumulated during the gap</strong> &mdash; and the same-tree skip path does
+    not apply. The engine takes the force-with-lease path to land the new content, even though
+    nobody force-pushed anything and nobody touched a shadow ref.
+  </p>
+  <p>Concrete walkthrough (from <code>test-push-diverged-concurrent-merges.ts</code>):</p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+1. mira1, bea1 committed concurrently. Sync both ways.
+2. Both sides merge concurrently &rArr; sibling merges (M2, B2 with same tree,
+   mirrored parents). &mdash;from a runs once: backend/shadow advances to
+   merge(M1&prime;, B1) on team via splice + FF push.
+
+3. Long &mdash;from b gap. Bea adds bea2..bea5 directly on backend/main; each
+   &mdash;from b updates monorepo/shadow; Mira merges each into monorepo/main.
+   Backend/shadow tip stays at merge(M1&prime;, B1) the entire time.
+
+4. &mdash;from a finally runs. Engine recomputes monorepo&rarr;backend projection.
+   Monorepo/main now reaches bea1+mira1+bea2+bea3+bea4+bea5 content.
+   New replayed tip&rsquo;s tree carries all of that.
+   Backend/shadow tip&rsquo;s tree only carries bea1+mira1.
+
+   Trees differ by 4 commits&rsquo; worth of content (bea2..bea5).
+   Old tip is NOT an ancestor of new tip (sibling chain).
+   &rArr; force-with-lease path: land the new content on backend/shadow.
+</pre>
+  <p>
+    The implication is that the force-with-lease branch of <a class="ref ref-c" href="#c9">C9</a>
+    is <em>load-bearing for steady-state operation</em>, not just a break-glass mechanism.
+    Removing it (FF-only on shadow refs) would halt the sync on every asymmetric round and require
+    operator intervention to advance the lagging shadow. The lease still protects against
+    concurrent runners, and shadow refs being engine-managed means the rewind is sound &mdash; but
+    the framing of &ldquo;force-push only on rare events&rdquo; understates how often it actually
+    runs. In a real multi-team monorepo where pull and push run on different cadences (CI pull
+    every 5 min, push manual via PR), this content-advancement-divergence shape is the dominant
+    trigger for force-with-lease, ahead of the policy-violation triggers C9 was originally
+    written for.
+  </p>
+  <p>
+    Why we live with it: the alternative invariant (FF-only on shadow refs, halt-on-divergence)
+    sounds appealing &mdash; never rewind engine-managed refs &mdash; but it costs an operator page
+    per concurrent-edit cycle in normal use, which violates <a class="ref ref-r" href="#r4">R4</a>
+    far more aggressively than the occasional rewind. The current design accepts routine
+    force-with-lease as the price of unattended operation.
   </p>
 </div>
 
