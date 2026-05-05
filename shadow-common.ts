@@ -563,7 +563,7 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
  * merge on target/main with the same parent multiset and the same expected
  * tree. If found, the engine reuses that commit as the mapping instead of
  * fabricating a sibling — this is what keeps shadow refs FF-only when both
- * sides merge the same content concurrently. See C9.
+ * sides merge the same content concurrently. See C6.
  */
 function findMatchingMergeOnTargetMain(opts: {
   target: RepoEndpoint;

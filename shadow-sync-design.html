@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C6 are the major ones, C7&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -351,29 +351,8 @@
   </p>
 </div>
 
-<h3 class="subsection">Minor choices</h3>
-<p>Four more decisions with genuine alternatives but narrower blast radius than C1&ndash;C5. Listed briefly.</p>
-
-<div class="card compact" id="c6">
-  <h3><span class="ref ref-c">C6</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r2">R2</a>. <strong>Rejected:</strong> separate push/pull scripts, or a primary/secondary model where one side is source-of-truth.</p>
-  <p>One code path, tested once, serves both directions; push and pull can&rsquo;t drift out of sync. Direction is chosen at the command line with <code>--from a</code> or <code>--from b</code>.</p>
-</div>
-
-<div class="card compact" id="c7">
-  <h3><span class="ref ref-c">C7</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
-  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter on the monorepo side is just a normal commit, not a config redeploy. The engine reads <code>.shadowignore</code> from whichever side is exporting in a given direction; in practice <a class="ref ref-r" href="#r3">R3</a> only mandates the monorepo-side filter, but the symmetric implementation costs nothing extra and keeps the code path uniform under <a class="ref ref-c" href="#c6">C6</a>.</p>
-</div>
-
-<div class="card compact" id="c8">
-  <h3><span class="ref ref-c">C8</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
-  <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
-</div>
-
-<div class="card" id="c9">
-  <h3><span class="ref ref-c">C9</span> Shadow refs are FF-only; same-tree skip and different-tree halt</h3>
+<div class="card" id="c6">
+  <h3><span class="ref ref-c">C6</span> Shadow refs are FF-only; same-tree skip and different-tree halt</h3>
   <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternatives:</strong> force-push (with or without lease) &mdash; rewinds engine-managed refs and breaks the auditable property that shadow refs only ever advance; synthetic 2-parent reconciliation merge &mdash; pollutes history with engine-authored merges whose tree equals the replay tree anyway, offering no working-content protection.</p>
   <p>The shadow ref on the target is append-only from the engine&rsquo;s side: every push is a fast-forward. Two corner cases are handled explicitly when the engine&rsquo;s newly replayed tip is neither equal to nor a descendant of the current shadow tip:</p>
   <ul>
@@ -400,12 +379,34 @@
    a force-push to land subsequent content &mdash; both rejected above.
 </pre>
   <p>
-    <a class="ref ref-m" href="#m9">M9</a> resolves this by detecting that <code>backend/main</code> already has <code>B_merge</code> with the matching parent multiset and tree, and using <code>B_merge</code> itself as the engine&rsquo;s mapping for <code>M_merge</code>. The shadow ref ends up pointing at the consumer&rsquo;s actual commit, not a fabricated sibling. Subsequent rounds extend from <code>B_merge</code> via plain FF, and the C9 invariant holds without ever needing to rewind.
+    <a class="ref ref-m" href="#m9">M9</a> resolves this by detecting that <code>backend/main</code> already has <code>B_merge</code> with the matching parent multiset and tree, and using <code>B_merge</code> itself as the engine&rsquo;s mapping for <code>M_merge</code>. The shadow ref ends up pointing at the consumer&rsquo;s actual commit, not a fabricated sibling. Subsequent rounds extend from <code>B_merge</code> via plain FF, and the C6 invariant holds without ever needing to rewind.
   </p>
   <p>
-    What&rsquo;s left for C9 to handle is the genuinely unrecoverable cases &mdash; source rewrites and manual shadow edits &mdash; where halting is the correct answer. <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract takes a bounded hit on those rare events, in exchange for the stronger invariant that shadow refs never rewind. Downstream tooling can rely on it: no surprise reflog jumps, feature branches that merged a shadow tip stay reachable, and <code>git fetch</code>&rsquo;s default behaviour on remote-tracking refs (which allows non-FF updates) doesn&rsquo;t silently corrupt anyone&rsquo;s view.
+    What&rsquo;s left for C6 to handle is the genuinely unrecoverable cases &mdash; source rewrites and manual shadow edits &mdash; where halting is the correct answer. <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract takes a bounded hit on those rare events, in exchange for the stronger invariant that shadow refs never rewind. Downstream tooling can rely on it: no surprise reflog jumps, feature branches that merged a shadow tip stay reachable, and <code>git fetch</code>&rsquo;s default behaviour on remote-tracking refs (which allows non-FF updates) doesn&rsquo;t silently corrupt anyone&rsquo;s view.
   </p>
 </div>
+
+<h3 class="subsection">Minor choices</h3>
+<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C6. Listed briefly.</p>
+
+<div class="card compact" id="c7">
+  <h3><span class="ref ref-c">C7</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r2">R2</a>. <strong>Rejected:</strong> separate push/pull scripts, or a primary/secondary model where one side is source-of-truth.</p>
+  <p>One code path, tested once, serves both directions; push and pull can&rsquo;t drift out of sync. Direction is chosen at the command line with <code>--from a</code> or <code>--from b</code>.</p>
+</div>
+
+<div class="card compact" id="c8">
+  <h3><span class="ref ref-c">C8</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
+  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter on the monorepo side is just a normal commit, not a config redeploy. The engine reads <code>.shadowignore</code> from whichever side is exporting in a given direction; in practice <a class="ref ref-r" href="#r3">R3</a> only mandates the monorepo-side filter, but the symmetric implementation costs nothing extra and keeps the code path uniform under <a class="ref ref-c" href="#c7">C7</a>.</p>
+</div>
+
+<div class="card compact" id="c9">
+  <h3><span class="ref ref-c">C9</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
+  <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
+</div>
+
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- 3. CONSEQUENCES                                                          -->
@@ -727,12 +728,12 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
 <div class="card" id="m9">
   <h3><span class="ref ref-m">M9</span> Substitute consumer&rsquo;s existing merge instead of fabricating a sibling</h3>
-  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> &times; <a class="ref ref-c" href="#c9">C9</a></p>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> &times; <a class="ref ref-c" href="#c6">C6</a></p>
   <p>
     When the engine processes a source merge and computes the parents it would use on the target side, it first checks whether <code>target/main</code> already has a merge commit with the same parent multiset and the same tree. If exactly one such candidate exists, the engine records <code>shaMapping[source_merge] = target_main_merge</code> and skips fabricating a new commit. The shadow ref ends up pointing at the consumer&rsquo;s actual merge.
   </p>
   <p>
-    This is what makes <a class="ref ref-c" href="#c9">C9</a>&rsquo;s FF-only invariant practical. Without M9, every concurrent-merge round &mdash; one of the most common multi-team patterns &mdash; would produce an engine-fabricated sibling of the consumer&rsquo;s merge. The shadow chain would orphan from <code>target/main</code> and eventually require either force-push or a synthetic reconciliation merge to land subsequent content. M9 keeps the shadow chain riding along on consumer commits, so every push stays FF.
+    This is what makes <a class="ref ref-c" href="#c6">C6</a>&rsquo;s FF-only invariant practical. Without M9, every concurrent-merge round &mdash; one of the most common multi-team patterns &mdash; would produce an engine-fabricated sibling of the consumer&rsquo;s merge. The shadow chain would orphan from <code>target/main</code> and eventually require either force-push or a synthetic reconciliation merge to land subsequent content. M9 keeps the shadow chain riding along on consumer commits, so every push stays FF.
   </p>
 <pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
 // In replayCommits, after computing mappedParents and the expected tree:
@@ -852,7 +853,7 @@ if (commit.parents.length &gt; 1 &amp;&amp; !isEcho) {
 
 <div class="card">
   <h3><span class="tag tag-red">!</span> Squash-merging shadow into main can desync the engine&rsquo;s view</h3>
-  <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-c" href="#c9">C9</a></p>
+  <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-c" href="#c6">C6</a></p>
   <p>
     A consumer who runs <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> instead of a regular merge gets shadow&rsquo;s content as a single non-merge commit on <code>main</code>. The squash commit carries the content but loses the merge edge that connects <code>main</code> to the shadow chain. Subsequent rounds where the consumer does a regular <code>git merge</code> of an updated shadow can produce a merge commit that&rsquo;s <code>TREESAME</code> to its shadow-side parent at the synced path. <code>git rev-list --topo-order &lt;ref&gt; -- &lt;dir&gt;/</code>&rsquo;s default history simplification then drops that merge from the engine&rsquo;s replay queue, the engine sees no new commits, and <code>mapBranchesToTargetTips</code> picks an echo&rsquo;d ancestor as the &ldquo;current main tip&rdquo; that disagrees with the existing shadow ref. C9&rsquo;s different-tree halt fires.
   </p>
@@ -906,7 +907,7 @@ if (commit.parents.length &gt; 1 &amp;&amp; !isEcho) {
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> One bug fix covers both directions</h3>
-  <p class="from">From <a class="ref ref-c" href="#c6">C6</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c7">C7</a></p>
   <p>
     Symmetric <code>a</code>/<code>b</code> means push and pull are the same code. A regression
     found on one direction is fixed on both at once; a test that covers pull covers almost all of
@@ -917,7 +918,7 @@ if (commit.parents.length &gt; 1 &amp;&amp; !isEcho) {
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> Retroactive <code>.shadowignore</code> changes work without ceremony</h3>
-  <p class="from">From <a class="ref ref-c" href="#c7">C7</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c8">C8</a></p>
   <p>
     Because the filter is read out of the source commit&rsquo;s tree, adding an entry to
     <code>.shadowignore</code> takes effect on the next sync without touching config, CI, or the
