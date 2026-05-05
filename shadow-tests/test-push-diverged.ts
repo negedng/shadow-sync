@@ -1,5 +1,5 @@
 import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
-import { assertEqual } from "./assert";
+import { assertEqual, assertIncludes, assertNotEqual } from "./assert";
 import { execSync } from "child_process";
 
 function git(cmd: string, cwd: string): string {
@@ -7,11 +7,14 @@ function git(cmd: string, cwd: string): string {
 }
 
 /**
- * Test: diverged shadow branch reconciliation.
+ * Test: manual intervention on shadow ref produces different-tree divergence
+ * that the engine cannot reconcile without force-push. Force-push is disabled
+ * by design, so the engine halts with an operator-actionable error and the
+ * shadow ref stays untouched until an operator intervenes.
  *
- * When both sides make changes between syncs, the shadow branch on the target
- * diverges from the replayed result. The tool should force-update the target
- * to the replayed tip (the engine owns the shadow ref; rewinds are OK).
+ * This is the case-2 scenario (human writes to shadow ref directly), the
+ * symmetric counterpart to case-1 (source rewrite) which is exercised by
+ * test-pull-force-rewrite.
  */
 export default function run() {
   const env = createTestEnv("push-diverged");
@@ -31,48 +34,33 @@ export default function run() {
     commitOnLocal(env, { "second.ts": "second\n" }, "Add second.ts");
 
     // AND simulate B's shadow branch getting a different commit directly
-    // (e.g. from a concurrent push or manual edit)
+    // (e.g. a human force-pushing or committing into the shadow ref).
     const subdir = env.subdir;
     const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
     git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
-    // Create a commit on top of the current shadow branch tip
     const currentTip = git(`rev-parse ${env.remoteName}/${shadowBranch}`, env.localRepo);
     const treeHash = git(`rev-parse "${currentTip}^{tree}"`, env.localRepo);
     const divergeCommit = git(`commit-tree ${treeHash} -p ${currentTip} -m "Diverged commit on B shadow"`, env.localRepo);
     git(`push ${env.remoteName} ${divergeCommit}:refs/heads/${shadowBranch}`, env.localRepo);
 
-    // 4. Push again — should detect divergence and force-update the target
+    // 4. Push again — engine detects divergence with different tree and halts.
     const r3 = runPush(env);
-    assertEqual(r3.status, 0, "push with diverged shadow should succeed");
-    assertEqual(
-      r3.stdout.includes("force-updating engine view"),
-      true,
-      "engine should report force-update on divergence with different tree",
-    );
+    assertNotEqual(r3.status, 0, "push with diverged different-tree shadow should fail");
+    assertIncludes(r3.stderr + r3.stdout, "diverged with different tree",
+      "engine should report divergence-with-different-tree in output");
+    assertIncludes(r3.stderr + r3.stdout, "Operator must reconcile",
+      "engine should instruct the operator on how to recover");
 
-    // 5. The replayed content should win (second.ts should be there)
+    // 5. The shadow ref must still point at the operator's diverged commit —
+    //    the engine did NOT force-update past it.
+    git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
+    const tipAfter = git(`rev-parse ${env.remoteName}/${shadowBranch}`, env.localRepo);
+    assertEqual(tipAfter, divergeCommit,
+      "shadow ref should remain at the divergent tip; engine must not force-push");
     assertEqual(
       readExternalShadowFile(env, "second.ts"),
-      "second\n",
-      "second.ts should be on shadow branch (replayed tree wins)",
-    );
-    assertEqual(
-      readExternalShadowFile(env, "first.ts"),
-      "first\n",
-      "first.ts should still be on shadow branch",
-    );
-
-    // 6. Force-push leaves the shadow tip as the replayed commit itself —
-    //    a normal single-parent commit, not a synthetic reconciliation merge.
-    git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
-    const parentLine = git(`log -1 --format=%P ${env.remoteName}/${shadowBranch}`, env.localRepo);
-    const parentCount = parentLine.split(/\s+/).filter(Boolean).length;
-    assertEqual(parentCount, 1, "shadow tip should be the force-pushed replay (1 parent)");
-    const tipMessage = git(`log -1 --format=%B ${env.remoteName}/${shadowBranch}`, env.localRepo);
-    assertEqual(
-      tipMessage.includes("Reconcile divergent"),
-      false,
-      "shadow tip must not be a synthetic reconciliation merge",
+      null,
+      "second.ts should NOT be on shadow branch (engine halted before pushing replay)",
     );
 
   } finally {
@@ -82,5 +70,5 @@ export default function run() {
 
 if (require.main === module) {
   run();
-  console.log("PASS  test-push-diverged-reconciliation");
+  console.log("PASS  test-push-diverged");
 }

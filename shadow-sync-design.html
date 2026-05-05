@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M8</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C5 are the major ones, C6&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -372,14 +372,39 @@
   <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
 </div>
 
-<div class="card compact" id="c9">
-  <h3><span class="ref ref-c">C9</span> Resolve target-side shadow divergence by force-updating the engine&rsquo;s view</h3>
-  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternatives:</strong> synthetic 2-parent reconciliation merge (<code>commit-tree replayedTree -p current -p replayed</code>) &mdash; the original behavior; preserves the divergent tip in history but its tree is just <code>replayedTree</code> anyway, so it offers no working-content protection beyond force-update while polluting history with synthetic commits authored by whoever ran the orchestrator. Plain <code>--force</code> push without a lease &mdash; loses race protection against concurrent runners. Abort &amp; require operator (violates <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract).</p>
-  <p>When the target&rsquo;s shadow-ref tip is neither equal to the engine&rsquo;s newly replayed tip nor an ancestor of it, the engine compares trees and takes one of two paths:</p>
+<div class="card" id="c9">
+  <h3><span class="ref ref-c">C9</span> Shadow refs are FF-only; same-tree skip and different-tree halt</h3>
+  <p class="from">Derives from <a class="ref ref-c" href="#c1">C1</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected alternatives:</strong> force-push (with or without lease) &mdash; rewinds engine-managed refs and breaks the auditable property that shadow refs only ever advance; synthetic 2-parent reconciliation merge &mdash; pollutes history with engine-authored merges whose tree equals the replay tree anyway, offering no working-content protection.</p>
+  <p>The shadow ref on the target is append-only from the engine&rsquo;s side: every push is a fast-forward. Two corner cases are handled explicitly when the engine&rsquo;s newly replayed tip is neither equal to nor a descendant of the current shadow tip:</p>
   <ul>
-    <li><strong>Trees identical</strong> (sibling-merge case &mdash; same content, parents reordered): leave the target tip in place. No update needed; the shadow already carries the right content even if its topology differs from the engine&rsquo;s computed chain.</li>
-    <li><strong>Trees differ</strong> (real content advancement): force-update with <code>git push --force-with-lease=&lt;branch&gt;:&lt;currentSHA&gt;</code>. The lease aborts the push if another runner has updated the ref since the engine fetched, so concurrent-runner protection is preserved. The shadow ref is engine-managed; rewinding it is OK because shadow commits hold no unique authored content (they are mechanical replays), and downstream <code>git fetch</code> updates remote-tracking refs without FF protection by default.</li>
+    <li><strong>Trees identical</strong>: leave the shadow tip in place. The same content is already there in different topology &mdash; no update is needed. This is a defensive fallback; <a class="ref ref-m" href="#m9">M9</a> catches the common cases earlier.</li>
+    <li><strong>Trees differ</strong>: halt the sync with an operator-actionable error. This only fires when policy was broken &mdash; source <code>main</code> was rewritten (force-push, reset, rebase) or the shadow ref was edited by something other than the engine. The engine cannot fast-forward and refuses to rewind. Operator action: restore the expected source history, or delete the shadow ref so the engine recreates it cleanly on the next run.</li>
   </ul>
+  <p><strong>Why this isn&rsquo;t trivial &mdash; concurrency naturally produces non-FF.</strong> Without help, the most common multi-team pattern (both sides committing and merging between sync rounds) would force every cycle into a non-FF state:</p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+1. Mira commits mira1 on monorepo. Bea commits bea1 on backend.
+   Both sync. monorepo/shadow gets bea1&prime;, backend/shadow gets mira1&prime;.
+
+2. BOTH sides merge their shadow concurrently:
+     monorepo/main: M_merge = merge(mira1, bea1&prime;)
+     backend/main:  B_merge = merge(bea1, mira1&prime;)
+
+   M_merge and B_merge have the SAME tree but MIRRORED parents.
+   Sibling merges &mdash; neither is an ancestor of the other.
+
+3. A naive engine on the next sync would replay M_merge with mapped
+   parents [mira1&prime;, bea1] (after splice from <a class="ref ref-m" href="#m1">M1</a>) and fabricate a
+   merge SIBLING of B_merge to push to backend/shadow. The shadow ref
+   would diverge from backend/main, accumulating engine-authored siblings
+   that eventually require either a synthetic reconciliation merge or
+   a force-push to land subsequent content &mdash; both rejected above.
+</pre>
+  <p>
+    <a class="ref ref-m" href="#m9">M9</a> resolves this by detecting that <code>backend/main</code> already has <code>B_merge</code> with the matching parent multiset and tree, and using <code>B_merge</code> itself as the engine&rsquo;s mapping for <code>M_merge</code>. The shadow ref ends up pointing at the consumer&rsquo;s actual commit, not a fabricated sibling. Subsequent rounds extend from <code>B_merge</code> via plain FF, and the C9 invariant holds without ever needing to rewind.
+  </p>
+  <p>
+    What&rsquo;s left for C9 to handle is the genuinely unrecoverable cases &mdash; source rewrites and manual shadow edits &mdash; where halting is the correct answer. <a class="ref ref-r" href="#r4">R4</a>&rsquo;s unattended contract takes a bounded hit on those rare events, in exchange for the stronger invariant that shadow refs never rewind. Downstream tooling can rely on it: no surprise reflog jumps, feature branches that merged a shadow tip stay reachable, and <code>git fetch</code>&rsquo;s default behaviour on remote-tracking refs (which allows non-FF updates) doesn&rsquo;t silently corrupt anyone&rsquo;s view.
+  </p>
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -387,7 +412,7 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 
 <h2 id="consequences">3. Mechanisms &mdash; what the choices force us to build</h2>
-<p>Once a choice is made, some machinery follows without a real alternative. Eight mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
+<p>Once a choice is made, some machinery follows without a real alternative. Nine mechanisms. Each is forced by a choice (or by a combination of choices and requirements). Within a mechanism there is sometimes a narrow sub-choice &mdash; noted as a <em>degree of freedom</em> where it matters.</p>
 
 <div class="card" id="m1">
   <h3><span class="ref ref-m">M1</span> Compose git tree for cross-repo merge commits</h3>
@@ -700,6 +725,41 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   </p>
 </div>
 
+<div class="card" id="m9">
+  <h3><span class="ref ref-m">M9</span> Substitute consumer&rsquo;s existing merge instead of fabricating a sibling</h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> &times; <a class="ref ref-c" href="#c9">C9</a></p>
+  <p>
+    When the engine processes a source merge and computes the parents it would use on the target side, it first checks whether <code>target/main</code> already has a merge commit with the same parent multiset and the same tree. If exactly one such candidate exists, the engine records <code>shaMapping[source_merge] = target_main_merge</code> and skips fabricating a new commit. The shadow ref ends up pointing at the consumer&rsquo;s actual merge.
+  </p>
+  <p>
+    This is what makes <a class="ref ref-c" href="#c9">C9</a>&rsquo;s FF-only invariant practical. Without M9, every concurrent-merge round &mdash; one of the most common multi-team patterns &mdash; would produce an engine-fabricated sibling of the consumer&rsquo;s merge. The shadow chain would orphan from <code>target/main</code> and eventually require either force-push or a synthetic reconciliation merge to land subsequent content. M9 keeps the shadow chain riding along on consumer commits, so every push stays FF.
+  </p>
+<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
+// In replayCommits, after computing mappedParents and the expected tree:
+if (commit.parents.length &gt; 1 &amp;&amp; !isEcho) {
+  const candidate = findMatchingMergeOnTargetMain({
+    target, mappedParents, expectedTree: tree,
+  });
+  if (candidate) {
+    shaMapping.set(commit.hash, candidate);
+    continue;  // skip commit-tree, reuse consumer&rsquo;s merge
+  }
+}
+
+// findMatchingMergeOnTargetMain walks `git log target/main --merges --format=%H %T %P`
+// and returns the first commit whose parent multiset and tree match.
+</pre>
+  <p>
+    <strong>Tree match is essential.</strong> If both consumers resolved a conflict differently, their merges have the same parent multiset but different trees. M9 falls through, the engine fabricates its own merge from the source&rsquo;s recorded resolution, and the consumer integrates it as a normal git conflict on their next <code>git merge shadow/&hellip;</code>. M9 never silently swallows a divergent resolution.
+  </p>
+  <p>
+    <strong>Re-detection each run.</strong> The substituted commit (consumer&rsquo;s merge) carries no <code>Shadow-replayed-*</code> trailer, so <a class="ref ref-c" href="#c3">C3</a>&rsquo;s trailer-based <code>loadReplayedMappings</code> can&rsquo;t recover the mapping next run. M9 re-detects the candidate each sync run by walking <code>target/main</code>&rsquo;s merges. Cost is linear in the number of merge commits on <code>target/main</code> per source merge being replayed, and the result is deterministic.
+  </p>
+  <p>
+    <em>Degree of freedom:</em> tree match is required, not just parent match. Two merges with the same parents but different trees represent different conflict resolutions &mdash; substitution must refuse to match those. The cheaper variant (parent-multiset match alone) would silently overwrite Mira&rsquo;s resolution with Bea&rsquo;s on whichever side runs sync first.
+  </p>
+</div>
+
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- 4. UNEXPECTED CONSEQUENCES                                               -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -791,56 +851,13 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 </div>
 
 <div class="card">
-  <h3><span class="tag tag-red">!</span> Force-with-lease fires in normal multi-team use, not just on policy violations</h3>
-  <p class="from">From <a class="ref ref-c" href="#c9">C9</a></p>
+  <h3><span class="tag tag-red">!</span> Squash-merging shadow into main can desync the engine&rsquo;s view</h3>
+  <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-c" href="#c9">C9</a></p>
   <p>
-    <a class="ref ref-c" href="#c9">C9</a> is framed around the rare cases &mdash; force-push on
-    <code>main</code>, manual shadow-ref edits &mdash; but the force-with-lease branch also fires
-    routinely in normal asymmetric sync activity. Whenever one direction syncs aggressively and the
-    other catches up later, the lagging shadow ref carries content from a past projection while the
-    engine&rsquo;s recomputed tip carries the catch-up content. <strong>Trees genuinely differ &mdash;
-    by the work that accumulated during the gap</strong> &mdash; and the same-tree skip path does
-    not apply. The engine takes the force-with-lease path to land the new content, even though
-    nobody force-pushed anything and nobody touched a shadow ref.
-  </p>
-  <p>Concrete walkthrough (from <code>test-push-diverged-concurrent-merges.ts</code>):</p>
-<pre style="background: var(--code-bg); padding: 0.85rem 1rem; border-radius: 6px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.82rem; line-height: 1.55; overflow-x: auto; margin: 0.6rem 0;">
-1. mira1, bea1 committed concurrently. Sync both ways.
-2. Both sides merge concurrently &rArr; sibling merges (M2, B2 with same tree,
-   mirrored parents). &mdash;from a runs once: backend/shadow advances to
-   merge(M1&prime;, B1) on team via splice + FF push.
-
-3. Long &mdash;from b gap. Bea adds bea2..bea5 directly on backend/main; each
-   &mdash;from b updates monorepo/shadow; Mira merges each into monorepo/main.
-   Backend/shadow tip stays at merge(M1&prime;, B1) the entire time.
-
-4. &mdash;from a finally runs. Engine recomputes monorepo&rarr;backend projection.
-   Monorepo/main now reaches bea1+mira1+bea2+bea3+bea4+bea5 content.
-   New replayed tip&rsquo;s tree carries all of that.
-   Backend/shadow tip&rsquo;s tree only carries bea1+mira1.
-
-   Trees differ by 4 commits&rsquo; worth of content (bea2..bea5).
-   Old tip is NOT an ancestor of new tip (sibling chain).
-   &rArr; force-with-lease path: land the new content on backend/shadow.
-</pre>
-  <p>
-    The implication is that the force-with-lease branch of <a class="ref ref-c" href="#c9">C9</a>
-    is <em>load-bearing for steady-state operation</em>, not just a break-glass mechanism.
-    Removing it (FF-only on shadow refs) would halt the sync on every asymmetric round and require
-    operator intervention to advance the lagging shadow. The lease still protects against
-    concurrent runners, and shadow refs being engine-managed means the rewind is sound &mdash; but
-    the framing of &ldquo;force-push only on rare events&rdquo; understates how often it actually
-    runs. In a real multi-team monorepo where pull and push run on different cadences (CI pull
-    every 5 min, push manual via PR), this content-advancement-divergence shape is the dominant
-    trigger for force-with-lease, ahead of the policy-violation triggers C9 was originally
-    written for.
+    A consumer who runs <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> instead of a regular merge gets shadow&rsquo;s content as a single non-merge commit on <code>main</code>. The squash commit carries the content but loses the merge edge that connects <code>main</code> to the shadow chain. Subsequent rounds where the consumer does a regular <code>git merge</code> of an updated shadow can produce a merge commit that&rsquo;s <code>TREESAME</code> to its shadow-side parent at the synced path. <code>git rev-list --topo-order &lt;ref&gt; -- &lt;dir&gt;/</code>&rsquo;s default history simplification then drops that merge from the engine&rsquo;s replay queue, the engine sees no new commits, and <code>mapBranchesToTargetTips</code> picks an echo&rsquo;d ancestor as the &ldquo;current main tip&rdquo; that disagrees with the existing shadow ref. C9&rsquo;s different-tree halt fires.
   </p>
   <p>
-    Why we live with it: the alternative invariant (FF-only on shadow refs, halt-on-divergence)
-    sounds appealing &mdash; never rewind engine-managed refs &mdash; but it costs an operator page
-    per concurrent-edit cycle in normal use, which violates <a class="ref ref-r" href="#r4">R4</a>
-    far more aggressively than the occasional rewind. The current design accepts routine
-    force-with-lease as the price of unattended operation.
+    Out of scope for the current engine. The fix is either to use <code>--full-history</code> in <code>collectSourceCommits</code> (and adjust the rest of the pipeline to handle the extra merges) or to instruct consumers not to squash. We document the limitation and tell teams to use plain <code>git merge</code> on shadow refs; the test suite&rsquo;s <code>test-no-force-push-cases</code> notes squash as intentionally untested.
   </p>
 </div>
 

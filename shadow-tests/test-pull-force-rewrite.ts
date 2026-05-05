@@ -1,5 +1,5 @@
-import { createTestEnv, commitOnRemote, runCiSync, readShadowFile, getShadowLogFull } from "./harness";
-import { assertEqual, assertNotEqual } from "./assert";
+import { createTestEnv, commitOnRemote, runCiSync, readShadowFile } from "./harness";
+import { assertEqual, assertNotEqual, assertIncludes } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
@@ -9,12 +9,19 @@ function git(cmd: string, cwd: string): string {
 }
 
 /**
- * Consolidated force-push / history-rewrite test. Two phases:
- *   1. force-push on main — source rewrites history (A,B → A,C). Sync should
- *      survive and land C on shadow without crashing.
- *   2. rebased feature branch — feature with X,Y synced, then rebased onto
- *      Z on main and force-pushed. Shadow feature should now see Z's
- *      content in addition to X,Y.
+ * History-rewrite halt test. Force-push is disabled on shadow refs by
+ * design, so when source-side history is rewritten (force-push on main
+ * or rebased feature branch) the engine cannot fast-forward the existing
+ * shadow ref and the trees differ. Engine halts with an operator message.
+ *
+ * Two phases:
+ *   1. force-push on main — source rewrites history (A,B → A,C). Sync
+ *      should fail cleanly with a divergence message; shadow stays on
+ *      the pre-rewrite chain (A,B replays). Operator heals by deleting
+ *      the shadow ref; subsequent sync re-creates it cleanly.
+ *   2. rebased feature branch — feature with X,Y synced, then rebased
+ *      onto Z and force-pushed. Sync should fail cleanly on the feature
+ *      branch; shadow feature stays on the pre-rebase chain.
  */
 export default function run() {
   const env = createTestEnv("pull-force-rewrite");
@@ -23,11 +30,12 @@ export default function run() {
     commitOnRemote(env, { "a.ts": "A\n" }, "Add A");
     commitOnRemote(env, { "b.ts": "B\n" }, "Add B");
     const r1 = runCiSync(env);
-    assertEqual(r1.status, 0, "[phase 1: force-push] initial sync should succeed");
+    assertEqual(r1.status, 0, "[phase 1] initial sync should succeed");
     assertEqual(readShadowFile(env, "a.ts"), "A\n", "[phase 1] A synced");
     assertEqual(readShadowFile(env, "b.ts"), "B\n", "[phase 1] B synced");
 
-    const shadowHeadBefore = git("rev-parse origin/shadow/frontend/main", env.localRepo);
+    const mainShadowRef = `shadow/${env.subdir}/main`;
+    const shadowHeadBefore = git(`rev-parse origin/${mainShadowRef}`, env.localRepo);
 
     // Force-push: reset main back to A, drop B, add C instead
     const aSha = git("rev-parse HEAD~1", env.remoteWorking);
@@ -36,17 +44,27 @@ export default function run() {
     commitOnRemote(env, { "c.ts": "C\n" }, "Add C");
 
     const r1b = runCiSync(env);
-    assertEqual(r1b.status, 0, "[phase 1] sync after force-push should not crash");
-    assertEqual(readShadowFile(env, "c.ts"), "C\n", "[phase 1] C visible on shadow");
-    assertEqual(readShadowFile(env, "a.ts"), "A\n", "[phase 1] A still present");
+    assertNotEqual(r1b.status, 0, "[phase 1] sync after force-push should fail (halt)");
+    assertIncludes(r1b.stderr + r1b.stdout, "diverged with different tree",
+      "[phase 1] engine should report divergence-with-different-tree");
+    assertIncludes(r1b.stderr + r1b.stdout, "Operator must reconcile",
+      "[phase 1] engine should instruct the operator");
 
-    const shadowHeadAfter = git("rev-parse origin/shadow/frontend/main", env.localRepo);
-    assertNotEqual(shadowHeadBefore, shadowHeadAfter, "[phase 1] shadow head advanced after force-push");
-    const log = getShadowLogFull(env);
-    if (!log.includes("Add C")) throw new Error("[phase 1] shadow log missing 'Add C'");
+    git("fetch origin", env.localRepo);
+    const shadowHeadAfter = git(`rev-parse origin/${mainShadowRef}`, env.localRepo);
+    assertEqual(shadowHeadBefore, shadowHeadAfter,
+      "[phase 1] shadow head must NOT advance — engine halted before push");
+    assertEqual(readShadowFile(env, "c.ts"), null, "[phase 1] C must NOT be on shadow");
+    assertEqual(readShadowFile(env, "b.ts"), "B\n", "[phase 1] B still on shadow (pre-rewrite tip)");
+
+    // Operator heals by deleting the divergent shadow ref. Subsequent sync
+    // re-creates it cleanly from the rewritten source state.
+    git(`push origin --delete refs/heads/${mainShadowRef}`, env.localRepo);
+    const rHeal = runCiSync(env);
+    assertEqual(rHeal.status, 0, "[heal] sync after operator clears shadow should succeed");
+    assertEqual(readShadowFile(env, "c.ts"), "C\n", "[heal] C now on shadow");
 
     // ── phase 2: rebased feature branch ─────────────────────────────────
-    // Create feature branch with X, Y off current main (which is A, C)
     git("checkout -b feature main", env.remoteWorking);
     fs.writeFileSync(path.join(env.remoteWorking, "x.ts"), "X\n");
     git("add x.ts", env.remoteWorking);
@@ -57,10 +75,12 @@ export default function run() {
     git("push origin feature", env.remoteWorking);
 
     const r2 = runCiSync(env);
-    assertEqual(r2.status, 0, "[phase 2: rebased-feature] initial sync should succeed");
+    assertEqual(r2.status, 0, "[phase 2] initial feature sync should succeed");
 
     git("fetch origin", env.localRepo);
-    const featShadow = `origin/shadow/${env.subdir}/feature`;
+    const featShadowRef = `shadow/${env.subdir}/feature`;
+    const featShadow = `origin/${featShadowRef}`;
+    const featShadowBefore = git(`rev-parse ${featShadow}`, env.localRepo);
     assertEqual(git(`show ${featShadow}:${env.subdir}/x.ts`, env.localRepo), "X", "[phase 2] X on feature shadow");
     assertEqual(git(`show ${featShadow}:${env.subdir}/y.ts`, env.localRepo), "Y", "[phase 2] Y on feature shadow");
 
@@ -72,13 +92,15 @@ export default function run() {
     git("push origin feature --force", env.remoteWorking);
 
     const r2b = runCiSync(env);
-    assertEqual(r2b.status, 0, "[phase 2] sync after rebase should not crash");
+    assertNotEqual(r2b.status, 0, "[phase 2] sync after rebase should fail (halt)");
+    assertIncludes(r2b.stderr + r2b.stdout, "diverged with different tree",
+      "[phase 2] engine should report divergence-with-different-tree");
 
+    // Feature shadow ref must NOT have moved.
     git("fetch origin", env.localRepo);
-    assertEqual(git(`show ${featShadow}:${env.subdir}/x.ts`, env.localRepo), "X", "[phase 2] X still on shadow feature");
-    assertEqual(git(`show ${featShadow}:${env.subdir}/y.ts`, env.localRepo), "Y", "[phase 2] Y still on shadow feature");
-    assertEqual(git(`show ${featShadow}:${env.subdir}/z.ts`, env.localRepo), "Z", "[phase 2] Z visible on shadow feature after rebase");
-    assertEqual(readShadowFile(env, "z.ts"), "Z\n", "[phase 2] Z on shadow main");
+    const featShadowAfter = git(`rev-parse ${featShadow}`, env.localRepo);
+    assertEqual(featShadowBefore, featShadowAfter,
+      "[phase 2] feature shadow head must NOT advance — engine halted");
   } finally {
     env.cleanup();
   }

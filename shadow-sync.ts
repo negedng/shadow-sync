@@ -166,11 +166,11 @@ function _runSyncCore(options: SyncOptions): number {
           }
         }
 
-        // Fast-forward when possible, otherwise force-update with the engine's
-        // computed view. The shadow ref is engine-managed; rewinding it is OK.
-        // If the divergent target tip has the same TREE as the replay, leave
-        // it in place (no content difference, would be a no-op force-push).
-        let force = false;
+        // Fast-forward only on shadow refs. If the divergent target tip
+        // has the same TREE as the replay (sibling-merge from concurrent
+        // merges that substitution didn't catch), leave it in place. If
+        // the trees differ, halt — this only happens after source rewrite
+        // or manual edits to the shadow ref, both against policy.
         if (currentSHA) {
           const isFF = git(
             ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
@@ -182,17 +182,17 @@ function _runSyncCore(options: SyncOptions): number {
               console.log(`  ${shadow}: ${target.remote} has same tree on different topology; leaving target tip in place.`);
               continue;
             }
-            console.log(`  ${shadow}: ${target.remote} diverged with different tree; force-updating engine view.`);
-            force = true;
+            fail(`${shadow}: ${target.remote} diverged with different tree. ` +
+                 `Engine cannot fast-forward and force-push is disabled. ` +
+                 `Source main may have been rewritten or the shadow ref was edited manually. ` +
+                 `Operator must reconcile by either restoring the expected source history or ` +
+                 `manually pushing ${replayedSHA} to ${target.remote}/${shadow}.`);
           }
         }
 
         console.log(`  Pushing to ${target.remote}/${shadow}...`);
-        const pushArgs = ["push"];
-        if (force) pushArgs.push(`--force-with-lease=${shadow}:${currentSHA}`);
-        pushArgs.push(target.remote, `${replayedSHA}:refs/heads/${shadow}`);
-        git(pushArgs);
-        console.log(`  ✓ Pushed${force ? " (force-with-lease)" : ""}.`);
+        git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`]);
+        console.log(`  ✓ Pushed.`);
       }
     } catch (err: any) {
       console.error(`  ✘ Failed to sync ${pair.name}: ${err.message}`);

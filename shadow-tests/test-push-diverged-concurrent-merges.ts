@@ -3,7 +3,7 @@ import {
   runCiSync, mergeShadow, runPush,
   getExternalShadowLogFull,
 } from "./harness";
-import { assertEqual, assertIncludes, assertNotIncludes } from "./assert";
+import { assertEqual, assertNotIncludes } from "./assert";
 import { execSync } from "child_process";
 
 function git(cmd: string, cwd: string): string {
@@ -11,23 +11,22 @@ function git(cmd: string, cwd: string): string {
 }
 
 /**
- * Test: divergence from concurrent merges, the sht5 b53efbd scenario.
+ * Test: concurrent merges with substitution (sht5 b53efbd scenario).
  *
- * Key topology: each side merges the OTHER side's content from shadow,
- * producing two merge commits with the same content but parents in
- * SIBLING ordering (neither is ancestor of the other). Plus a long
- * gap of --from b syncs that brings echoes into origin/main reachable
- * via Mira's merges. When --from a finally runs, mapBranchesToTargetTips
- * walks origin/main no-pathspec and the topo order can land on an echo
- * (mapping to one of Bea's main commits) before reaching the previously-
- * mapped Mira-merge commit. The echo target descends from Bea's-merge,
- * which is a SIBLING of the engine's earlier replay → divergence with
- * IDENTICAL TREES.
+ * Both sides merge the OTHER side's shadow content concurrently, producing
+ * merge commits with the same content but parents in MIRRORED order.
+ * Without substitution the engine fabricates its own merge that's a sibling
+ * of the consumer's merge, orphaning the shadow chain and forcing a force-push
+ * later. With substitution (M9), the engine detects the consumer's existing
+ * merge on target/main with matching parent multiset + tree and reuses it
+ * as the mapping — shadow ref points at the consumer's merge directly, no
+ * sibling forms, subsequent rounds are pure FF.
  *
- * Phase A: divergence detected, engine takes the same-tree skip path.
- *   No synthetic "Reconcile divergent" merge is created.
- * Phase B: one more user merge + sync round-trip drives both sides to
- *   the same tree (engine converges cleanly).
+ * Phase A: substitution catches the concurrent-merge case in round 3 (--from a).
+ *   Backend/shadow advances to Bea's actual merge commit, not a synthetic one.
+ *   Subsequent --from b rounds advance monorepo/shadow via FF.
+ *   Final --from a after the gap is FF (no force, no skip).
+ * Phase B: one more user merge + sync round-trip stays converged.
  */
 export default function run() {
   const env = createTestEnv("push-diverged-concurrent-merges");
@@ -76,15 +75,14 @@ export default function run() {
     r = runPush(env);
     assertEqual(r.status, 0, "[divergence] --from a should succeed");
 
-    // PHASE A assertions — engine should detect divergence and either:
-    //   (a) leave the target tip in place when trees match (silent skip), or
-    //   (b) force-update the target with the replayed tip.
-    // No synthetic "Reconcile divergent" merge should ever appear.
-    const sawDivergence =
-      r.stdout.includes("same tree on different topology") ||
-      r.stdout.includes("force-updating engine view");
-    assertEqual(sawDivergence, true,
-      "[divergence] engine should detect divergence and report skip-or-force in stdout");
+    // PHASE A assertions — substitution in round 3 maps Mira's merge to Bea's
+    // existing merge on backend/main, so backend/shadow rides along on
+    // backend/main rather than diverging. The post-gap --from a is then a
+    // pure FF onto bea5; no divergence, no force-push, no same-tree skip.
+    assertNotIncludes(r.stdout, "diverged with different tree",
+      "[divergence] no different-tree halt should fire");
+    assertNotIncludes(r.stdout, "same tree on different topology",
+      "[divergence] no same-tree skip should fire — substitution kept the chain FF");
     assertNotIncludes(getExternalShadowLogFull(env), "Reconcile divergent",
       "[divergence] no reconciliation merge should be on remote shadow history");
 

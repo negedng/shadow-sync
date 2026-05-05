@@ -558,6 +558,44 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
   return null;
 }
 
+/**
+ * For a cross-repo source merge whose parents map to {P1, P2}, look for a
+ * merge on target/main with the same parent multiset and the same expected
+ * tree. If found, the engine reuses that commit as the mapping instead of
+ * fabricating a sibling — this is what keeps shadow refs FF-only when both
+ * sides merge the same content concurrently. See C9.
+ */
+function findMatchingMergeOnTargetMain(opts: {
+  target: RepoEndpoint;
+  mappedParents: string[];
+  expectedTree: string;
+}): string | null {
+  const { target, mappedParents, expectedTree } = opts;
+  const targetMain = `${target.remote}/main`;
+  if (!refExists(targetMain)) return null;
+
+  const result = git(["log", targetMain, "--merges", "--format=%H %T %P"], { safe: true });
+  if (!result.ok || !result.stdout) return null;
+
+  const expected = new Set(mappedParents);
+  for (const line of result.stdout.split("\n")) {
+    if (!line) continue;
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const hash = parts[0];
+    const tree = parts[1];
+    const parents = parts.slice(2);
+    if (parents.length !== mappedParents.length) continue;
+    if (tree !== expectedTree) continue;
+    const parentSet = new Set(parents);
+    if (parentSet.size !== expected.size) continue;
+    let allMatch = true;
+    for (const p of parentSet) if (!expected.has(p)) { allMatch = false; break; }
+    if (allMatch) return hash;
+  }
+  return null;
+}
+
 function resolveTargetParents(
   commit: TopoCommit,
   shaMapping: Map<string, string>,
@@ -736,6 +774,22 @@ function replayCommits(opts: {
       if (!tree) {
         console.log(`  Skipping ${meta.short} (source content missing).`);
         continue;
+      }
+
+      // Substitution: when a source merge has an equivalent merge already
+      // on target/main (same parent multiset, same tree), reuse that commit
+      // as the mapping instead of fabricating a sibling. Keeps shadow FF-only
+      // when both sides merge the same content concurrently. Applies to all
+      // non-echo merges — non-matches just fall through to normal replay.
+      if (!isEcho && commit.parents.length > 1) {
+        const candidate = findMatchingMergeOnTargetMain({
+          target, mappedParents, expectedTree: tree,
+        });
+        if (candidate) {
+          shaMapping.set(commit.hash, candidate);
+          console.log(`  ✓ Substituted with existing target merge ${candidate.slice(0, 7)}.`);
+          continue;
+        }
       }
 
       const msg = isEcho
