@@ -73,7 +73,7 @@ export default function run() {
     git('commit -m "m: merge shadow with conflict (resolved)"', env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
-    // ── Step 5: Pull B→A. M9 fires on the merge commit. ──────────────────
+    // ── Step 5: Pull B→A. M1 fires on the merge commit. ──────────────────
     const r2 = runCiSync(env);
     assertEqual(r2.status, 0, "[step 5] pull B→A should succeed");
 

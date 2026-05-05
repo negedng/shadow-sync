@@ -60,7 +60,7 @@ export default function run() {
     git('commit -m "a: B commit after merge"', env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
-    // ── Phase 6: pull B→A — replay must trigger M9 on the merge commit ───
+    // ── Phase 6: pull B→A — replay must trigger M1 on the merge commit ───
     const r2 = runCiSync(env);
     assertEqual(r2.status, 0, "[phase 6] pull should succeed");
 

@@ -14,15 +14,15 @@ function git(cmd: string, cwd: string): string {
  * Comprehensive scan of normal-use scenarios that could potentially
  * produce non-FF divergence on shadow refs. Each scenario must complete
  * without halting (status 0) and without ever producing a "diverged with
- * different tree" message — substitution + the splice formula + same-tree
+ * different tree" message — --full-history + the splice formula + same-tree
  * skip should keep every push FF or no-op.
  *
  * Each scenario has its own env so state doesn't bleed between phases.
  *
  * Phases:
  *   A. Concurrent merges with DIFFERENT conflict resolutions —
- *      substitution falls through (tree mismatch); engine builds synthetic
- *      merge that must still FF via the splice formula.
+ *      engine builds synthetic merges with the source-side resolution;
+ *      pushes still FF via the splice formula.
  *   B. Asymmetric timing — Mira merges + commits linearly, then Bea adds
  *      linear work and does a real 3-way merge after the engine pushed.
  *   D. Cross-cutting commit (touches root files AND the synced dir).
@@ -88,7 +88,7 @@ function phaseA_differentConflictResolutions(): void {
     }
 
     // Now the merges have DIFFERENT trees (different conflict resolutions).
-    // Substitution must fall through; engine builds synthetic; pushes still FF.
+    // Engine builds synthetic merges; pushes still FF via splice.
     syncs.push(runCiSync(env));
     syncs.push(runPush(env));
 

@@ -166,11 +166,11 @@ function _runSyncCore(options: SyncOptions): number {
           }
         }
 
-        // Fast-forward only on shadow refs. If the divergent target tip
-        // has the same TREE as the replay (sibling-merge from concurrent
-        // merges that substitution didn't catch), leave it in place. If
-        // the trees differ, halt — this only happens after source rewrite
-        // or manual edits to the shadow ref, both against policy.
+        // Fast-forward only on shadow refs (C6). If the divergent target
+        // tip has the same TREE as the replay (residual sibling-merge case
+        // --full-history doesn't cover), leave it in place. If the trees
+        // differ, halt — this only happens after source rewrite or manual
+        // edits to the shadow ref, both against policy.
         if (currentSHA) {
           const isFF = git(
             ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
