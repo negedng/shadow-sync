@@ -836,13 +836,26 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 </div>
 
 <div class="card">
-  <h3><span class="tag tag-red">!</span> Squash-merging shadow into main is untested under <code>--full-history</code></h3>
+  <h3><span class="tag tag-red">!</span> <code>git merge --squash</code> can strip the shadow link and fork the chain</h3>
   <p class="from">From <a class="ref ref-m" href="#m4">M4</a> &times; <a class="ref ref-m" href="#m1">M1</a></p>
   <p>
-    A consumer who runs <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> instead of a regular merge gets shadow&rsquo;s content as a single non-merge commit on <code>main</code>, losing the merge edge that connects <code>main</code> to the shadow chain. Subsequent regular merges of an updated shadow can produce merge commits that are <code>TREESAME</code> to their shadow-side parent at the synced path &mdash; the same shape <a class="ref ref-m" href="#m1">M1</a>&rsquo;s <code>--full-history</code> flag is supposed to cover.
+    <code>git merge --squash X</code> discards <code>X</code>&rsquo;s entire parent linkage and replaces it with the destination&rsquo;s tip. So whenever the commits being collapsed include a shadow merge that the destination does not already have, the squash throws away the only edge that anchored those replayed commits to the shadow chain. On the next sync the engine has no replayed ancestor to recognize, treats the destination&rsquo;s history as fresh, and re-replays the folded shadow content from scratch under new SHAs &mdash; the shadow ref forks off its prior tip and round-trips drift further.
   </p>
   <p>
-    In principle <code>--full-history</code> should keep these merges in the replay queue and the chain should extend cleanly. In practice the squash case was originally identified <em>before</em> we switched to <code>--full-history</code>, set aside as out-of-scope, and never re-verified afterward. The squash phase is intentionally skipped in <code>test-no-force-push-cases</code>. Until a test confirms it, we still tell consumers to use plain <code>git merge</code> on shadow refs.
+    Two ways the trap shows up in practice:
+  </p>
+  <ul>
+    <li><strong>Direct:</strong> <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> on <code>main</code>, possibly alongside other native commits. Tested in <code>test-squash-merges</code> Phase C.</li>
+    <li><strong>Indirect:</strong> consumer pulls shadow into a feature branch (<code>git merge origin/shadow/...</code> on <code>feature</code>), then ships with <code>git merge --squash feature</code> into a <code>main</code> that was not already up-to-date with the same shadow tip. The shadow edge is buried inside <code>feature</code> and gets stripped by the squash. Tested in Phase D.</li>
+  </ul>
+  <p>
+    <code>--full-history</code> does not rescue either case: the issue isn&rsquo;t rev-list history simplification, it&rsquo;s a missing parent edge. A real fix would have to teach replay to recognize a squash by tree-and-content match against the shadow chain &mdash; out of scope for now.
+  </p>
+  <p>
+    Squashing <em>purely native</em> history is fine and supported &mdash; collapsing a feature branch that has only same-side commits into <code>main</code> replays cleanly in either direction (Phases A and B). The safe form of the indirect case is to pull shadow into <code>main</code> first, <em>then</em> rebase or squash <code>feature</code> on top &mdash; the shadow link sits on <code>main</code> before the squash, so the squash only adds the feature&rsquo;s native commits.
+  </p>
+  <p>
+    Tell consumers: never <code>git merge --squash</code> anything whose ancestry includes a shadow merge that <code>main</code> does not already have. The simpler &ldquo;use plain <code>git merge</code> on shadow refs&rdquo; remains the safest default.
   </p>
 </div>
 
