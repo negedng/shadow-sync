@@ -745,6 +745,68 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   </p>
 </div>
 
+<div class="card" id="m9">
+  <h3><span class="ref ref-m">M9</span> Carry outer state through indirect cross-repo merges with <code>git merge-tree</code></h3>
+  <p class="from">Forced by <a class="ref ref-c" href="#c2">C2</a> &middot; <a class="ref ref-r" href="#r5">R5</a></p>
+  <p>
+    <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice fires only when an <em>immediate</em>
+    source-side parent of the merge being replayed carries the
+    <code>Shadow-replayed-{targetRemote}</code> trailer. In multi-pair monorepo flows the
+    cross-repo merge often sits one local merge deeper: the source side does
+    <code>release-merge = merge(branchA, cross-repo-merge)</code> &mdash; <code>cross-repo-merge</code>
+    has the trailer, but <code>release-merge</code>&rsquo;s own immediate parents
+    (<code>branchA</code>, the local <code>cross-repo-merge</code>) don&rsquo;t. Without help, the
+    replay of <code>release-merge</code> takes the first parent&rsquo;s tree as base, throws away
+    the outer state that <code>cross-repo-merge</code>&rsquo;s replay had already spliced in, and
+    later consumer-side merges of the shadow ref see modify-delete conflicts on cross-pair
+    content.
+  </p>
+  <p>
+    The fix is one rule, applied whenever <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice
+    doesn&rsquo;t fire: when a replayed merge has multiple mapped parents, the parent-tree base
+    is computed by 3-way-merging those parents on the target side via
+    <code>git merge-tree --write-tree</code>. For ancestor/descendant cases (the common one,
+    because the cross-repo merge&rsquo;s replay is in the second parent&rsquo;s ancestry) the
+    merge-tree call reduces to a fast-forward and returns the descendant&rsquo;s tree directly
+    &mdash; preserving the outer state that already lives there. The source-side diff is then
+    applied on top of the merged tree as usual.
+  </p>
+  <p>
+    <strong>Why this is safe.</strong> Each pair&rsquo;s synced subtree is path-disjoint by
+    construction (<a class="ref ref-c" href="#c2">C2</a>); when two mapped parents disagree on
+    outer content, the disagreement is between an older bootstrap snapshot
+    (<a class="ref ref-m" href="#m2">M2</a>-anchored at <code>targetInit</code>) and a more
+    recent splice from <a class="ref ref-m" href="#m1">M1</a>. The newer one is always the
+    descendant in the shadow chain, so the merge result is deterministic. On rare conflicts
+    (pair subtrees colliding) the engine falls back to the first parent&rsquo;s tree silently;
+    no halt &mdash; the same case <a class="ref ref-m" href="#m7">M7</a>&rsquo;s &ldquo;don&rsquo;t
+    flag what tests already cover&rdquo; principle applies to.
+  </p>
+  <p>
+    <strong>Companion: drop cross-pair shadow commits from candidates.</strong> Once
+    <a class="ref ref-m" href="#m1">M1</a> + M9 splice each pair&rsquo;s outer through their own
+    shadow chain, sibling-pair shadow commits become reachable from this pair&rsquo;s working
+    branches via merge edges. They carry a <code>Shadow-replayed-{otherPairRemote}</code>
+    trailer &mdash; not <em>our</em> pair&rsquo;s skip-key &mdash; but their tree happens to
+    touch this pair&rsquo;s synced subdirectory (it was spliced in). If they entered the replay
+    candidate list, they&rsquo;d be replayed onto our shadow with foreign ancestry that
+    doesn&rsquo;t fast-forward the existing tip, halting at <a class="ref ref-c" href="#c6">C6</a>.
+    <code>filterNotReplayedCommits()</code> drops any commit carrying any
+    <code>Shadow-replayed-*</code> trailer that isn&rsquo;t our skip-key, without recording a
+    mapping. Their content is already accounted for via the originally-authored commit&rsquo;s
+    own echo (<a class="ref ref-c" href="#c3">C3</a>).
+  </p>
+  <p class="from">
+    <em>Degree of freedom:</em> instead of <code>git merge-tree</code>, walk the source-side
+    ancestry of each parent looking for a skip-trailer commit and pass that hash to
+    <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice (rejected: more invasive, picks a
+    semantically-wrong outer when the closest echo is far back, and doesn&rsquo;t address
+    octopus merges); or fabricate a synthetic per-pair anchor commit at sync time so chains
+    never share ancestors (rejected: large architectural change, breaks
+    <a class="ref ref-c" href="#c3">C3</a>&rsquo;s SHA-based dedup invariant).
+  </p>
+</div>
+
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- 4. UNEXPECTED CONSEQUENCES                                               -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->

@@ -1033,6 +1033,38 @@ manual commands above are just for first-time testing.</p>
   consumer-side modification rather than a fresh shadow-side revert.
 </p>
 
+<h3>Carrying outer state across local merges</h3>
+<p>
+  <code>composeCrossRepoMergeTree()</code> only fires when an <em>immediate</em> source-side
+  parent of the merge being replayed carries the skip-trailer. In multi-pair monorepo flows the
+  cross-repo merge often sits one local merge deeper &mdash; the source side does
+  <code>merge(branchA, cross-repo-merge)</code>, where <code>cross-repo-merge</code> has the
+  trailer but the outer merge&rsquo;s own immediate parents (<code>branchA</code> and the
+  local <code>cross-repo-merge</code>) don&rsquo;t. In that case the splice
+  doesn&rsquo;t fire, and the engine falls back to the descendant&rsquo;s tree via
+  <code>git merge-tree --write-tree {parent1} {parent2}</code> across the mapped parents on
+  the target side.
+</p>
+<p>
+  Because the cross-repo merge&rsquo;s replay (which already had its outer spliced in by
+  <code>composeCrossRepoMergeTree</code>) sits in the second parent&rsquo;s ancestry, the
+  3-way merge reduces to a fast-forward and returns the descendant&rsquo;s tree directly &mdash;
+  preserving the outer state that the earlier splice already established. The source-side diff is
+  then applied on top as usual. Without this, a release-style merge that pulls a sibling pair&rsquo;s
+  cross-repo work into a project branch would lose the other pair&rsquo;s outer slice on the
+  shadow side, and the next consumer-side merge of the shadow ref would see modify-delete
+  conflicts on cross-pair content.
+</p>
+<p>
+  The companion change is in <code>filterNotReplayedCommits()</code>: once the splice + fallback
+  preserve every pair&rsquo;s outer through their own shadow chains, sibling-pair shadow commits
+  become reachable from this pair&rsquo;s working branches via merge edges. They carry a
+  <code>Shadow-replayed-{otherPairRemote}</code> trailer that isn&rsquo;t our skip-key. The
+  filter drops any commit whose trailers contain a <code>Shadow-replayed-*</code> key that
+  isn&rsquo;t ours, so cross-pair shadow commits never enter the replay candidate list and
+  the existing tip stays a fast-forward target.
+</p>
+
 <!-- ── 7. How Merges Work ──────────────────────────────────────────────── -->
 
 <h2 id="merge">7. How Merges Work</h2>
