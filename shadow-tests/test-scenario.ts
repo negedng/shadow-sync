@@ -127,6 +127,107 @@ function findReplayOrFail(repo: Repo, branchRef: string, sourceRemoteName: strin
   return sha;
 }
 
+function listTreePaths(repo: Repo, ref: string): string[] {
+  return git(`ls-tree -r --name-only ${ref}`, repo.working).split("\n").filter(Boolean);
+}
+
+function assertTreeHas(repo: Repo, ref: string, expectedPath: string, msg: string) {
+  const paths = listTreePaths(repo, ref);
+  if (!paths.includes(expectedPath)) {
+    throw new Error(`${msg}\n  expected path: ${expectedPath}\n  ref ${ref} tree:\n    ${paths.join("\n    ")}`);
+  }
+}
+
+function readAtRef(repo: Repo, ref: string, path: string): string {
+  const raw = execSync(`git show ${ref}:${path}`, {
+    cwd: repo.working, encoding: "utf8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
+  });
+  return raw.replace(/\r\n/g, "\n");
+}
+
+/** Assert the full tree at `ref` matches the expected file → content map exactly (no extra paths, no missing paths). */
+function assertTreeContents(repo: Repo, ref: string, expected: Record<string, string>, label: string) {
+  const paths = listTreePaths(repo, ref);
+  const expectedKeys = Object.keys(expected).sort();
+  const actualKeys = [...paths].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    const missing = expectedKeys.filter(k => !actualKeys.includes(k));
+    const extra = actualKeys.filter(k => !expectedKeys.includes(k));
+    throw new Error(
+      `${label}: tree path mismatch\n` +
+      `  missing: ${missing.join(", ") || "(none)"}\n` +
+      `  extra:   ${extra.join(", ") || "(none)"}\n` +
+      `  expected: ${expectedKeys.join(", ")}\n` +
+      `  actual:   ${actualKeys.join(", ")}`,
+    );
+  }
+  for (const key of expectedKeys) {
+    const actual = readAtRef(repo, ref, key);
+    if (actual !== expected[key]) {
+      throw new Error(
+        `${label}: file ${key} content mismatch\n` +
+        `  expected: ${JSON.stringify(expected[key])}\n` +
+        `  actual:   ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+}
+
+/** Mono-shaped tree: outer (root files) + backend/<be> + frontend/<fe>. */
+function monoTree(outer: Record<string, string>, be: Record<string, string>, fe: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = { ...outer };
+  for (const [k, v] of Object.entries(be)) result[`backend/${k}`] = v;
+  for (const [k, v] of Object.entries(fe)) result[`frontend/${k}`] = v;
+  return result;
+}
+
+// ── Predicted file content constants ─────────────────────────────────────────
+// Backend repo trees (no prefix — bare backend layout)
+const BE_BC0 = { "src/init.txt": "init\n" };
+const BE_BC1 = { "src/init.txt": "init\n", "src/feature.txt": "v1\n" };
+const BE_BC2 = { "src/init.txt": "init\n", "src/feature.txt": "v2\n" };
+const BE_BR1 = { "src/init.txt": "init\n", "src/feature.txt": "v1\n", "src/release.txt": "1.0\n" };
+const BE_BT1 = { "src/init.txt": "init\n", "src/feature.txt": "v1\n", "src/release.txt": "1.0\n", "src/project.txt": "proj v1\n" };
+// Mc4-era be (Bc2 + shared) — what Bc3 absorbs from shadow/backend/main
+const BE_MC4 = { "src/init.txt": "init\n", "src/feature.txt": "v2\n", "src/shared.txt": "shared be\n" };
+const BE_BC3 = BE_MC4;  // merge(Bc2, Mc4'_be) → Mc4'_be tree (descendant)
+// Mc6-era be (Mc5 backend = Mc4 ∪ Bt1)
+const BE_MC6 = { "src/init.txt": "init\n", "src/feature.txt": "v2\n", "src/shared.txt": "shared be\n", "src/release.txt": "1.0\n", "src/project.txt": "proj v1\n" };
+const BE_BC4 = BE_MC6;  // merge(Bc3, Mc6'_be) → Mc6'_be tree
+// Mr1-era be (Mc6 be + release v2)
+const BE_MR1 = { "src/init.txt": "init\n", "src/feature.txt": "v2\n", "src/shared.txt": "shared be\n", "src/release.txt": "2.0\n", "src/project.txt": "proj v1\n" };
+const BE_BR2 = BE_MR1;  // merge(Bc4, Mr1'_be)
+const BE_BT2 = BE_MR1;  // merge(Bt1, Br2) → Br2's content (Bt1 subset)
+// Mf1-era be (Mr1 + bugfix)
+const BE_MF1 = { "src/init.txt": "init\n", "src/feature.txt": "v2 + bugfix\n", "src/shared.txt": "shared be\n", "src/release.txt": "2.0\n", "src/project.txt": "proj v1\n" };
+const BE_BF1 = BE_MF1;
+const BE_BT3 = BE_MF1;
+
+// Frontend repo trees
+const FE_FC0 = { "src/init.txt": "init\n" };
+const FE_FC1 = { "src/init.txt": "init\n", "src/component.txt": "v1\n" };
+const FE_FC2 = { "src/init.txt": "init\n", "src/component.txt": "v2\n" };
+const FE_FR1 = { "src/init.txt": "init\n", "src/component.txt": "v1\n", "src/release.txt": "1.0\n" };
+const FE_FT1 = { "src/init.txt": "init\n", "src/component.txt": "v1\n", "src/release.txt": "1.0\n", "src/project.txt": "proj v1\n" };
+// Mc3-era fe (Fc2 + feature-flag)
+const FE_MC3 = { "src/init.txt": "init\n", "src/component.txt": "v2\n", "src/feature-flag.txt": "flag\n" };
+// Mc4-era fe (Mc3 + shared)
+const FE_MC4 = { "src/init.txt": "init\n", "src/component.txt": "v2\n", "src/feature-flag.txt": "flag\n", "src/shared.txt": "shared fe\n" };
+const FE_FC3 = FE_MC4;  // merge(Fc2, Mc4'_fe)
+// Mc6-era fe (Mc4 fe + Ft1 = adds release+project)
+const FE_MC6 = { "src/init.txt": "init\n", "src/component.txt": "v2\n", "src/feature-flag.txt": "flag\n", "src/shared.txt": "shared fe\n", "src/release.txt": "1.0\n", "src/project.txt": "proj v1\n" };
+const FE_FC4 = FE_MC6;
+// Mr1-era fe (Mc6 fe + release v2)
+const FE_MR1 = { "src/init.txt": "init\n", "src/component.txt": "v2\n", "src/feature-flag.txt": "flag\n", "src/shared.txt": "shared fe\n", "src/release.txt": "2.0\n", "src/project.txt": "proj v1\n" };
+const FE_FR2 = FE_MR1;
+const FE_FT2 = FE_MR1;  // merge(Ft1, Fr2) → Fr2 content (Ft1 subset)
+
+// Outer (root files on monorepo)
+const OUTER_MC0 = { ".claude/settings.json": "{}\n", "README.md": "# Monorepo\n" };
+const OUTER_MC4 = { ".claude/settings.json": "{}\n", "README.md": "# Monorepo (Mc4)\n" };
+
+const EMPTY: Record<string, string> = {};
+
 // ── Main test ────────────────────────────────────────────────────────────────
 
 export default function run() {
@@ -336,6 +437,19 @@ export default function run() {
     git("checkout project", mono.working);
     const Mt2 = mergeRef(mono, "origin/shadow/backend/project",  "Mt2");
     const Mt3 = mergeRef(mono, "origin/shadow/frontend/project", "Mt3");
+
+    // The Mt3 merge regression: shadow/frontend/project on monorepo has only frontend/* (engine's
+    // composeCrossRepoMergeTree didn't preserve backend through Ft2 = merge(Ft1, Fr2) because
+    // neither parent had the skip-trailer key — Fr2 is a local frontend merge with no trailer).
+    // Merge base of Mt2 and Ft2'_mono is Mr1 (which has both pair trees), so 3-way merge sees
+    // "Mt2 deleted frontend, Ft2'_mono deleted backend" and applies BOTH deletions, leaving the
+    // project tree with only root files. This assertion will start failing once the engine bug
+    // is fixed (and the Mt3 tree retains both pair trees as it should).
+    assertTreeHas(mono, Mt3, "backend/src/init.txt",
+      "Mt3 should preserve backend/* (currently fails: Mt3 tree has only root files because shadow/frontend/project lost backend through Ft2'_mono's compose)");
+    assertTreeHas(mono, Mt3, "frontend/src/init.txt",
+      "Mt3 should preserve frontend/*");
+
     git("push origin project", mono.working);
     git("checkout -b bug/core-2.0/fix", mono.working);
     const Mf1 = commitFiles(mono, { "backend/src/feature.txt": "v2 + bugfix\n" }, "Mf1");
@@ -345,7 +459,11 @@ export default function run() {
     git("checkout main", mono.working);
     {
       const r = runSync({ from: "a" });
-      assertEqual(r.exitCode, 0, `[line 61] --from a: ${r.stderr.slice(0, 300)}`);
+      if (r.exitCode !== 0) {
+        console.error("STDOUT:\n" + r.stdout);
+        console.error("STDERR:\n" + r.stderr);
+      }
+      assertEqual(r.exitCode, 0, `[line 61] --from a`);
     }
 
     // ── Phase 16: Bf1, Bt3 (lines 62–65) ──────────────────────────────────
@@ -404,26 +522,23 @@ export default function run() {
     assertTip(backend, "project",           Bt3, "backend/project = Bt3");
     assertTip(backend, "bug/core-2.0/fix",  Bf1, "backend/bug/core-2.0/fix = Bf1");
 
-    // Backend shadow tips
-    assertTip(backend, "origin/shadow/backend/main",             Mc6_be, "shadow/backend/main → Mc6'_be<noop>");
-    assertTip(backend, "origin/shadow/backend/core-2.0",         Mr1_be, "shadow/backend/core-2.0 → Mr1'_be");
-    const Mt3_be = findReplayOrFail(backend, "origin/shadow/backend/project", "origin", Mt3, "Mt3'_be");
-    assertTip(backend, "origin/shadow/backend/project",          Mt3_be, "shadow/backend/project → Mt3'_be<noop>");
-    assertTip(backend, "origin/shadow/backend/bug/core-2.0/fix", Mf1_be, "shadow/backend/bug → Mf1'_be");
+    // Backend shadow: tips on main/core-2.0 are the engine's noop-merge replays.
+    assertTip(backend, "origin/shadow/backend/main",     Mc6_be, "shadow/backend/main → Mc6'_be<noop>");
+    assertTip(backend, "origin/shadow/backend/core-2.0", Mr1_be, "shadow/backend/core-2.0 → Mr1'_be");
     assertRefAbsent(backend, "origin/shadow/backend/core-1.0", "no shadow/backend/core-1.0 on backend (mono never had core-1.0)");
 
-    // Backend shadow: every monorepo merge that touches backend/ in at least one parent is replayed.
-    // All M-merges have at least one non-TREESAME parent under backend/, so they're all kept.
-    findReplayOrFail(backend, "origin/shadow/backend/main",                     "origin", Mc1, "Mc1'_be");
-    findReplayOrFail(backend, "origin/shadow/backend/main",                     "origin", Mc2, "Mc2'_be<noop-tree>");
-    findReplayOrFail(backend, "origin/shadow/backend/main",                     "origin", Mc5, "Mc5'_be");
-    findReplayOrFail(backend, "origin/shadow/backend/project",                  "origin", Mt1, "Mt1'_be");
-    findReplayOrFail(backend, "origin/shadow/backend/project",                  "origin", Mt2, "Mt2'_be");
-    findReplayOrFail(backend, "origin/shadow/backend/project",                  "origin", Mt3, "Mt3'_be<noop-tree>");
+    // Backend shadow: M-merges with at least one non-TREESAME parent under be/ are kept.
+    findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc1, "Mc1'_be");
+    findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc2, "Mc2'_be<noop-tree>");
+    findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc5, "Mc5'_be");
+    findReplayOrFail(backend, "origin/shadow/backend/project", "origin", Mt1, "Mt1'_be");
 
-    // Mc3 (single-parent, fe-only) is the only TREESAME drop on backend.
+    // Mc3 (single-parent, fe-only) is dropped (single-parent TREESAME on be/).
     assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mc3), null,
       "Mc3 (single-parent fe-only) must not appear on backend's shadow");
+    // Mt3 (merge, all-TREESAME on be/ thanks to merge-tree splice) is dropped.
+    assertEqual(findReplay(backend, "origin/shadow/backend/project", "origin", Mt3), null,
+      "Mt3 (merge, all-TREESAME on be/) must not appear on backend's shadow");
 
     // ── Frontend named commits ────────────────────────────────────────────
     assertParents(frontend, Fc0, [],         "Fc0 = init");
@@ -451,28 +566,25 @@ export default function run() {
     assertTip(frontend, "core-2.0", Fr2, "frontend/core-2.0 = Fr2");
     assertTip(frontend, "project",  Ft2, "frontend/project = Ft2");
 
-    // Frontend shadow tips
+    // Frontend shadow tips on main/core-2.0
     assertTip(frontend, "origin/shadow/frontend/main",     Mc6_fe, "shadow/frontend/main → Mc6'_fe");
     assertTip(frontend, "origin/shadow/frontend/core-2.0", Mr1_fe, "shadow/frontend/core-2.0 → Mr1'_fe");
-    const Mt3_fe = findReplayOrFail(frontend, "origin/shadow/frontend/project", "origin", Mt3, "Mt3'_fe");
-    assertTip(frontend, "origin/shadow/frontend/project",  Mt3_fe, "shadow/frontend/project → Mt3'_fe");
-    assertTip(frontend, "origin/shadow/frontend/bug/core-2.0/fix", Mt3_fe,
-      "shadow/frontend/bug → Mt3'_fe (Mf1 single-parent TREESAME-dropped on frontend)");
     assertRefAbsent(frontend, "origin/shadow/frontend/core-1.0", "no shadow/frontend/core-1.0 on frontend");
 
     // Frontend shadow: M-merges with at least one non-TREESAME parent under frontend/ are kept.
     // The new Mc3 (fe-only single-parent) IS replayed here — that's the test the user asked for.
-    findReplayOrFail(frontend, "origin/shadow/frontend/main",     "origin", Mc2, "Mc2'_fe");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main",     "origin", Mc3, "Mc3'_fe (frontend-only Mc3 IS replayed)");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main",     "origin", Mc5, "Mc5'_fe<noop-tree>");
+    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc2, "Mc2'_fe");
+    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3, "Mc3'_fe (frontend-only Mc3 IS replayed)");
+    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc5, "Mc5'_fe<noop-tree>");
 
-    // TREESAME-to-all-parents drops: Mc1, Mt1, Mt2 have empty frontend tree at all parents → dropped even with --full-history.
+    // TREESAME-to-all-parents drops on fe: Mc1, Mt1.
     assertEqual(findReplay(frontend, "origin/shadow/frontend/main",    "origin", Mc1), null,
       "Mc1 (merge, all parents empty under fe/) must not appear on frontend's shadow");
     assertEqual(findReplay(frontend, "origin/shadow/frontend/project", "origin", Mt1), null,
       "Mt1 (merge, all parents empty under fe/) must not appear on frontend's shadow");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/project", "origin", Mt2), null,
-      "Mt2 (merge, all parents empty under fe/) must not appear on frontend's shadow");
+    // Mt3 is all-TREESAME on fe (with engine fix, Mt2/Mt3/Ft2'_mono trees are identical).
+    assertEqual(findReplay(frontend, "origin/shadow/frontend/project", "origin", Mt3), null,
+      "Mt3 (merge, all parents identical under fe/ thanks to merge-tree splice) must not appear on frontend's shadow");
 
     // Mf1 (single-parent be-only) is the single-parent TREESAME drop.
     assertEqual(findReplay(frontend, "origin/shadow/frontend/bug/core-2.0/fix", "origin", Mf1), null,
@@ -531,6 +643,140 @@ export default function run() {
     // No frontend bug branch on mono (frontend never had a bug branch)
     assertRefAbsent(mono, "origin/shadow/frontend/bug/core-2.0/fix",
       "no shadow/frontend/bug on mono (frontend pair has no source bug branch)");
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Comprehensive tree-content assertions: every named commit + every
+    // shadow replay has a deterministic predicted tree. Authored content
+    // originates only from the obvious authoring side; content that flows
+    // across pairs via shadow merges is sourced from a monorepo commit
+    // (via composeCrossRepoMergeTree splicing or mergeMappedParentTrees).
+    // ──────────────────────────────────────────────────────────────────────
+
+    // ── Backend named commits ──────────────────────────────────────────────
+    assertTreeContents(backend, Bc0, BE_BC0, "Bc0 tree");
+    assertTreeContents(backend, Bc1, BE_BC1, "Bc1 tree");
+    assertTreeContents(backend, Br1, BE_BR1, "Br1 tree");
+    assertTreeContents(backend, Bc2, BE_BC2, "Bc2 tree");
+    assertTreeContents(backend, Bt1, BE_BT1, "Bt1 tree");
+    assertTreeContents(backend, Bc3, BE_BC3, "Bc3 tree (Bc2 + Mc4 shared via shadow merge)");
+    assertTreeContents(backend, Bc4, BE_BC4, "Bc4 tree (Mc6-era be: Bc3 + release + project)");
+    assertTreeContents(backend, Br2, BE_BR2, "Br2 tree (Mr1-era be: Bc4 + release v2)");
+    assertTreeContents(backend, Bt2, BE_BT2, "Bt2 tree (= Br2 content)");
+    assertTreeContents(backend, Bf1, BE_BF1, "Bf1 tree (Bt2 + bugfix)");
+    assertTreeContents(backend, Bt3, BE_BT3, "Bt3 tree (= Bf1 content)");
+
+    // ── Frontend named commits ─────────────────────────────────────────────
+    assertTreeContents(frontend, Fc0, FE_FC0, "Fc0 tree");
+    assertTreeContents(frontend, Fc1, FE_FC1, "Fc1 tree");
+    assertTreeContents(frontend, Fr1, FE_FR1, "Fr1 tree");
+    assertTreeContents(frontend, Fc2, FE_FC2, "Fc2 tree");
+    assertTreeContents(frontend, Ft1, FE_FT1, "Ft1 tree");
+    assertTreeContents(frontend, Fc3, FE_FC3, "Fc3 tree (Fc2 + Mc4 fe slice)");
+    assertTreeContents(frontend, Fc4, FE_FC4, "Fc4 tree (Mc6-era fe: Fc3 + release + project)");
+    assertTreeContents(frontend, Fr2, FE_FR2, "Fr2 tree (Mr1-era fe: Fc4 + release v2)");
+    assertTreeContents(frontend, Ft2, FE_FT2, "Ft2 tree (= Fr2 content)");
+
+    // ── Monorepo named commits (full tree: outer + be + fe) ───────────────
+    assertTreeContents(mono, Mc0, monoTree(OUTER_MC0, EMPTY,  EMPTY),  "Mc0 tree (init: outer only)");
+    assertTreeContents(mono, Mc1, monoTree(OUTER_MC0, BE_BC2, EMPTY),  "Mc1 tree (be from Bc2)");
+    assertTreeContents(mono, Mc2, monoTree(OUTER_MC0, BE_BC2, FE_FC2), "Mc2 tree (be Bc2, fe Fc2)");
+    assertTreeContents(mono, Mc3, monoTree(OUTER_MC0, BE_BC2, FE_MC3), "Mc3 tree (fe-only +feature-flag)");
+    assertTreeContents(mono, Mc4, monoTree(OUTER_MC4, BE_MC4, FE_MC4), "Mc4 tree (cross-cutting + README updated)");
+    assertTreeContents(mono, Mt1, monoTree(OUTER_MC0, BE_BT1, EMPTY),  "Mt1 tree (project bringing Bt1)");
+    assertTreeContents(mono, Mc5, monoTree(OUTER_MC4, BE_MC6, FE_MC4), "Mc5 tree (be Mc4∪Bt1, fe Mc4)");
+    assertTreeContents(mono, Mc6, monoTree(OUTER_MC4, BE_MC6, FE_MC6), "Mc6 tree (fe brought from Ft1)");
+    assertTreeContents(mono, Mr1, monoTree(OUTER_MC4, BE_MR1, FE_MR1), "Mr1 tree (release v2 both)");
+    assertTreeContents(mono, Mt2, monoTree(OUTER_MC4, BE_BT2, FE_MR1), "Mt2 tree (be Bt2, fe inherited from Bt2'_mono outer = Mr1)");
+    assertTreeContents(mono, Mt3, monoTree(OUTER_MC4, BE_BT2, FE_FT2), "Mt3 tree (be Bt2, fe Ft2 — both pair trees preserved)");
+    assertTreeContents(mono, Mf1, monoTree(OUTER_MC4, BE_MF1, FE_FT2), "Mf1 tree (be Mr1+bugfix, fe Ft2)");
+
+    // ── Shadow replays on monorepo ────────────────────────────────────────
+    // Bootstrap chain (line 26 first --from b): no compose; bare adds.
+    const Bc0_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc0, "Bc0'_mono");
+    const Bc1_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc1, "Bc1'_mono");
+    assertTreeContents(mono, Bc0_mono, monoTree(OUTER_MC0, BE_BC0, EMPTY), "Bc0'_mono tree (bootstrap, outer Mc0)");
+    assertTreeContents(mono, Bc1_mono, monoTree(OUTER_MC0, BE_BC1, EMPTY), "Bc1'_mono tree");
+    assertTreeContents(mono, Bc2_mono, monoTree(OUTER_MC0, BE_BC2, EMPTY), "Bc2'_mono tree");
+    assertTreeContents(mono, Br1_mono, monoTree(OUTER_MC0, BE_BR1, EMPTY), "Br1'_mono tree");
+    assertTreeContents(mono, Bt1_mono, monoTree(OUTER_MC0, BE_BT1, EMPTY), "Bt1'_mono tree");
+
+    const Fc0_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc0, "Fc0'_mono");
+    const Fc1_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc1, "Fc1'_mono");
+    assertTreeContents(mono, Fc0_mono, monoTree(OUTER_MC0, EMPTY, FE_FC0), "Fc0'_mono tree");
+    assertTreeContents(mono, Fc1_mono, monoTree(OUTER_MC0, EMPTY, FE_FC1), "Fc1'_mono tree");
+    assertTreeContents(mono, Fc2_mono, monoTree(OUTER_MC0, EMPTY, FE_FC2), "Fc2'_mono tree");
+    assertTreeContents(mono, Fr1_mono, monoTree(OUTER_MC0, EMPTY, FE_FR1), "Fr1'_mono tree");
+    assertTreeContents(mono, Ft1_mono, monoTree(OUTER_MC0, EMPTY, FE_FT1), "Ft1'_mono tree");
+
+    // Cross-repo merges replayed onto monorepo with composeCrossRepoMergeTree firing.
+    const Bc3_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc3, "Bc3'_mono");
+    assertTreeContents(mono, Bc3_mono, monoTree(OUTER_MC4, BE_BC3, FE_MC4),
+      "Bc3'_mono (composeCrossRepoMergeTree splice: Mc4 outer + Bc3 be + Mc4 fe)");
+    assertTreeContents(mono, Bc4_mono, monoTree(OUTER_MC4, BE_BC4, FE_MC6),
+      "Bc4'_mono (Mc6 outer + Bc4 be + Mc6 fe via Mc6'_be echo)");
+    assertTreeContents(mono, Br2_mono, monoTree(OUTER_MC4, BE_BR2, FE_MR1),
+      "Br2'_mono (Mr1 outer + Br2 be + Mr1 fe via Mr1'_be echo)");
+    assertTreeContents(mono, Bf1_mono, monoTree(OUTER_MC4, BE_BF1, FE_FT2),
+      "Bf1'_mono (Mf1 outer + Bf1 be + Ft2 fe via Mf1'_be echo)");
+
+    // Bt2'_mono / Bt3'_mono have no direct echo parent — mergeMappedParentTrees does the FF.
+    assertTreeContents(mono, Bt2_mono, monoTree(OUTER_MC4, BE_BT2, FE_MR1),
+      "Bt2'_mono (mergeMappedParentTrees FF to Br2'_mono → preserves outer + fe slice)");
+    assertTreeContents(mono, Bt3_mono, monoTree(OUTER_MC4, BE_BT3, FE_FT2),
+      "Bt3'_mono (FF to Bf1'_mono)");
+
+    // Symmetric for frontend pair shadow replays on mono.
+    const Fc3_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc3, "Fc3'_mono");
+    assertTreeContents(mono, Fc3_mono, monoTree(OUTER_MC4, BE_MC4, FE_FC3), "Fc3'_mono");
+    assertTreeContents(mono, Fc4_mono, monoTree(OUTER_MC4, BE_MC6, FE_FC4), "Fc4'_mono");
+    assertTreeContents(mono, Fr2_mono, monoTree(OUTER_MC4, BE_MR1, FE_FR2), "Fr2'_mono");
+    assertTreeContents(mono, Ft2_mono, monoTree(OUTER_MC4, BE_MR1, FE_FT2), "Ft2'_mono");
+
+    // ── Shadow replays on backend (b-side; trees are be content only) ─────
+    const Mc1_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc1, "Mc1'_be");
+    const Mc2_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc2, "Mc2'_be");
+    const Mc5_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc5, "Mc5'_be");
+    const Mt1_be = findReplayOrFail(backend, "origin/shadow/backend/project", "origin", Mt1, "Mt1'_be");
+    assertTreeContents(backend, Mc1_be, BE_BC2,  "Mc1'_be tree (= Bc2 content via merge-tree FF)");
+    assertTreeContents(backend, Mc2_be, BE_BC2,  "Mc2'_be tree (no-op, same as Mc1'_be)");
+    assertTreeContents(backend, Mc4_be, BE_MC4,  "Mc4'_be tree (Bc2 + shared)");
+    assertTreeContents(backend, Mc5_be, BE_MC6,  "Mc5'_be tree (Mc4 + Bt1 = Mc6 era)");
+    assertTreeContents(backend, Mc6_be, BE_MC6,  "Mc6'_be tree (no-op, = Mc5'_be)");
+    assertTreeContents(backend, Mr1_be, BE_MR1,  "Mr1'_be tree (Mc6 + release v2)");
+    assertTreeContents(backend, Mt1_be, BE_BT1,  "Mt1'_be tree (Bt1 content)");
+    assertTreeContents(backend, Mf1_be, BE_MF1,  "Mf1'_be tree (Mr1 + bugfix)");
+
+    // ── Shadow replays on frontend ────────────────────────────────────────
+    const Mc2_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc2, "Mc2'_fe");
+    const Mc3_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3, "Mc3'_fe");
+    const Mc5_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc5, "Mc5'_fe");
+    assertTreeContents(frontend, Mc2_fe, FE_FC2,  "Mc2'_fe tree (Fc2 content)");
+    assertTreeContents(frontend, Mc3_fe, FE_MC3,  "Mc3'_fe tree (Fc2 + feature-flag)");
+    assertTreeContents(frontend, Mc4_fe, FE_MC4,  "Mc4'_fe tree (Mc3 + shared)");
+    assertTreeContents(frontend, Mc5_fe, FE_MC4,  "Mc5'_fe tree (no-op fe, = Mc4'_fe)");
+    assertTreeContents(frontend, Mc6_fe, FE_MC6,  "Mc6'_fe tree (Mc4 + Ft1)");
+    assertTreeContents(frontend, Mr1_fe, FE_MR1,  "Mr1'_fe tree (Mc6 + release v2)");
+
+    // ── Shadow ref TIPS — strict tree-content assertions ──────────────────
+    assertTreeContents(backend, "origin/shadow/backend/main",             BE_MC6,  "shadow/backend/main tip tree = BE_MC6");
+    assertTreeContents(backend, "origin/shadow/backend/core-2.0",         BE_MR1,  "shadow/backend/core-2.0 tip tree = BE_MR1");
+    assertTreeContents(backend, "origin/shadow/backend/project",          BE_MR1,  "shadow/backend/project tip tree = BE_MR1 (Mt3 dropped)");
+    assertTreeContents(backend, "origin/shadow/backend/bug/core-2.0/fix", BE_MF1,  "shadow/backend/bug tip tree = BE_MF1");
+
+    assertTreeContents(frontend, "origin/shadow/frontend/main",             FE_MC6, "shadow/frontend/main tip tree = FE_MC6");
+    assertTreeContents(frontend, "origin/shadow/frontend/core-2.0",         FE_MR1, "shadow/frontend/core-2.0 tip tree = FE_MR1");
+    assertTreeContents(frontend, "origin/shadow/frontend/project",          FE_MR1, "shadow/frontend/project tip tree = FE_MR1 (= FE_FT2)");
+    assertTreeContents(frontend, "origin/shadow/frontend/bug/core-2.0/fix", FE_MR1, "shadow/frontend/bug tip tree = FE_MR1 (Mf1 dropped on fe)");
+
+    assertTreeContents(mono, "origin/shadow/backend/main",     monoTree(OUTER_MC4, BE_BC4, FE_MC6), "mono shadow/backend/main tip");
+    assertTreeContents(mono, "origin/shadow/backend/core-1.0", monoTree(OUTER_MC0, BE_BR1, EMPTY),  "mono shadow/backend/core-1.0 tip");
+    assertTreeContents(mono, "origin/shadow/backend/core-2.0", monoTree(OUTER_MC4, BE_BR2, FE_MR1), "mono shadow/backend/core-2.0 tip");
+    assertTreeContents(mono, "origin/shadow/backend/project",  monoTree(OUTER_MC4, BE_BT3, FE_FT2), "mono shadow/backend/project tip");
+    assertTreeContents(mono, "origin/shadow/backend/bug/core-2.0/fix", monoTree(OUTER_MC4, BE_BF1, FE_FT2), "mono shadow/backend/bug tip");
+    assertTreeContents(mono, "origin/shadow/frontend/main",     monoTree(OUTER_MC4, BE_MC6, FE_FC4), "mono shadow/frontend/main tip");
+    assertTreeContents(mono, "origin/shadow/frontend/core-1.0", monoTree(OUTER_MC0, EMPTY,  FE_FR1), "mono shadow/frontend/core-1.0 tip");
+    assertTreeContents(mono, "origin/shadow/frontend/core-2.0", monoTree(OUTER_MC4, BE_MR1, FE_FR2), "mono shadow/frontend/core-2.0 tip");
+    assertTreeContents(mono, "origin/shadow/frontend/project",  monoTree(OUTER_MC4, BE_MR1, FE_FT2), "mono shadow/frontend/project tip");
 
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
