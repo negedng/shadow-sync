@@ -505,8 +505,11 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
   const idxEnv = { GIT_INDEX_FILE: tmpIndex };
   try {
     git(["read-tree", baseTree], { env: idxEnv });
-    // Clear any existing entries under subdir so --prefix read-tree can succeed.
-    git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
+    // -f bypasses git rm --cached's safety check against the working tree.
+    // Without it, if baseTree's content differs from mono.working's checkout,
+    // rm refuses ("staged content different from both...") and read-tree --prefix
+    // fails on the not-removed entries.
+    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
     git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
     return git(["write-tree"], { env: idxEnv });
   } finally {
