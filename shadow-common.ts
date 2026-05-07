@@ -553,6 +553,34 @@ function composeCrossRepoMergeTree(opts: {
   return composeSubtree(echoTreeRes.stdout, target.dir, shadowDirRes.stdout);
 }
 
+/**
+ * Compute the parent-tree base for a replayed commit by 3-way-merging all
+ * mapped parents on the target side. For ancestor/descendant cases (e.g.
+ * Bt1'_mono being an ancestor of Br2'_mono via a previous shadow-sync round)
+ * `git merge-tree` reduces to a fast-forward — we get the descendant's tree,
+ * which preserves outer state (frontend slice from a sibling pair's spliced
+ * shadow merge) that the simple first-parent fallback would have dropped.
+ *
+ * Falls back to mappedParents[0]'s tree on conflict or for octopus merges
+ * (3+ parents); both cases are rare in practice.
+ */
+function mergeMappedParentTrees(mappedParents: string[], shortLabel: string): string {
+  if (mappedParents.length === 1) {
+    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${shortLabel}.`);
+    return treeRes.stdout;
+  }
+  if (mappedParents.length === 2) {
+    const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
+    if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) {
+      return mergeRes.stdout;
+    }
+  }
+  const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+  if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${shortLabel}.`);
+  return treeRes.stdout;
+}
+
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
 function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
   const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
@@ -627,17 +655,31 @@ function filterNotReplayedCommits(
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
 ): TopoCommit[] {
+  // Cross-pair shadow commits (e.g. shadow/frontend/<branch> on monorepo, when
+  // we're syncing the BACKEND pair) carry a Shadow-replayed-<other-pair-remote>
+  // trailer. They become reachable from this pair's working branches via the
+  // mergeMappedParentTrees splice — once a sibling pair's outer state lands in
+  // a shared shadow merge, those cross-pair commits show up in path-filtered
+  // rev-list and would otherwise be replayed onto OUR pair's shadow as foreign
+  // ancestry that doesn't fast-forward the existing tip. Drop them. The
+  // content they carry is already accounted for via the original-source
+  // commit's echo mapping (e.g. Mr1'_be's outer comes from Mr1 on monorepo,
+  // not from any frontend echo).
+  const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
   return allCommits.filter(c => {
     if (shaMapping.has(c.hash)) return false;
     const meta = getCommitMeta(c.hash);
-    if (!hasTrailer(meta.trailers, dc.skipTrailerKey)) return true;
-    const match = meta.trailers.split("\n")
-      .map(l => l.match(dc.skipScanRe))
-      .find(m => m);
-    if (match && refExists(match[1])) {
-      shaMapping.set(c.hash, match[1]);
+    if (hasTrailer(meta.trailers, dc.skipTrailerKey)) {
+      const match = meta.trailers.split("\n")
+        .map(l => l.match(dc.skipScanRe))
+        .find(m => m);
+      if (match && refExists(match[1])) {
+        shaMapping.set(c.hash, match[1]);
+      }
+      return false;
     }
-    return false;
+    if (crossPairTrailerRe.test(meta.trailers)) return false;
+    return true;
   });
 }
 
@@ -714,11 +756,7 @@ function replayCommits(opts: {
       if (composedParentTree) {
         parentTree = composedParentTree;
       } else if (mappedParents.length > 0) {
-        const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-        if (!treeRes.ok || !treeRes.stdout) {
-          fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${meta.short}.`);
-        }
-        parentTree = treeRes.stdout;
+        parentTree = mergeMappedParentTrees(mappedParents, meta.short);
       } else if (commit.parents.length === 0) {
         // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
         parentTree = null;
