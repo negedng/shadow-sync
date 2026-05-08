@@ -914,6 +914,25 @@ manual commands above are just for first-time testing.</p>
     target&rsquo;s init.
   </div></li>
   <li><span class="step-num">5</span><div>
+    <strong>Filter to actually-needed candidates.</strong> <code>collectNeededCandidates()</code>
+    intersects the surviving candidates with two reach sets so the engine doesn&rsquo;t emit
+    replays that would never anchor a shadow ref. <em>Set A</em> is the per-branch linear
+    topo-walk newest-first, stopping at the first commit already in the SHA mapping &mdash; same
+    walk <code>mapBranchesToTargetTips()</code> uses post-replay, so any candidate visited here
+    is a branch-tip resolution. <em>Set B</em> closes over the parent chain: for each candidate
+    in A, walk its source-side parents and add candidate parents recursively, so an anchoring
+    replay&rsquo;s <code>resolveTargetParents()</code> wires the matching replays rather than
+    falling back to <code>findEchoAnchor</code>. Candidates outside A&nbsp;&cup;&nbsp;B are
+    dropped &mdash; without this pass they&rsquo;d be replayed but orphaned the moment
+    <code>mapBranchesToTargetTips()</code> picks an earlier-in-topo-order skip-trailer ancestor
+    instead, and <code>loadReplayedMappings()</code> on the next sync would re-replay them
+    indefinitely (orphans aren&rsquo;t reachable from any pushed shadow ref, so their trailers
+    are invisible). M9&rsquo;s splice surfaces this: cross-repo merges like <code>Mt2</code>
+    that were dropped pre-M9 (all-TREESAME) survive the rev-list filter post-M9 (one mapped
+    parent now carries spliced content), enter the candidate list, and would orphan without
+    this filter.
+  </div></li>
+  <li><span class="step-num">6</span><div>
     <strong>Replay loop.</strong> <code>replayCommits()</code> walks the remaining commits in topo order:
     load <code>.shadowignore</code> from the source tree, compute the diff (see section 5), build a remapped tree
     (section 6), resolve parents via the SHA mapping, and create a new commit preserving original author,

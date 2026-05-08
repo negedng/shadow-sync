@@ -684,6 +684,59 @@ function filterNotReplayedCommits(
 }
 
 /**
+ * Candidates whose replay would actually anchor a branch tip (Step 1) or be
+ * needed to keep the parent chain of an anchoring replay intact (Step 2).
+ *
+ * Step 1 mirrors mapBranchesToTargetTips: linear topo-order walk newest-first
+ * per branch, stopping at the first commit already in shaMapping. Any
+ * candidate encountered before the stop is needed. Candidates skipped here
+ * (e.g. `Mt2` in scenario.md, behind `Ft2'_mono`'s skip-trailer in topo-order)
+ * are exactly the ones that would otherwise replay-then-orphan.
+ *
+ * Step 2: replays use mapped parents in resolveTargetParents — if an
+ * anchoring candidate's source parent is also a candidate but NOT in step 1's
+ * set, the replay would fall back to findEchoAnchor (different topology).
+ * Walk parents of each needed candidate; if a parent is itself a candidate
+ * and not yet mapped, include it. Stop at mapped or non-candidate parents.
+ */
+function collectNeededCandidates(
+  remote: string,
+  branches: string[],
+  shaMapping: Map<string, string>,
+  newCommits: TopoCommit[],
+): Set<string> {
+  const newSet = new Set(newCommits.map(c => c.hash));
+  const needed = new Set<string>();
+
+  for (const branch of branches) {
+    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
+    if (!log.ok) continue;
+    for (const line of log.stdout.split("\n")) {
+      const hash = line.trim();
+      if (!hash) continue;
+      if (shaMapping.has(hash)) break;
+      if (newSet.has(hash)) needed.add(hash);
+    }
+  }
+
+  const stack = Array.from(needed);
+  while (stack.length) {
+    const hash = stack.pop()!;
+    const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
+    if (!parentsRes.ok || !parentsRes.stdout) continue;
+    for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
+      if (shaMapping.has(p)) continue;
+      if (newSet.has(p) && !needed.has(p)) {
+        needed.add(p);
+        stack.push(p);
+      }
+    }
+  }
+
+  return needed;
+}
+
+/**
  * Newest-first walk to each branch's most recent mapped ancestor. The branch
  * HEAD may be outer-only (didn't touch source.dir/), so we still advance the
  * shadow tip to the most recent commit inside the synced subdir.
@@ -819,7 +872,16 @@ export function mirrorHistory(opts: {
   const allCommits = collectSourceCommits(source, branches);
   const newCommits = filterNotReplayedCommits(allCommits, shaMapping, dc);
 
-  if (newCommits.length === 0) {
+  // Drop candidates that no branch's tip-walk would resolve to (and aren't
+  // chain-needed by one that would). mapBranchesToTargetTips walks each branch
+  // newest-first and stops at the first mapped ancestor, so a candidate
+  // strictly older than every branch's anchor — and not on the parent chain
+  // of an anchoring candidate — would replay-then-orphan (e.g. Mt2'_fe in the
+  // scenario, where Ft2'_mono's skip-trailer halts the walk before Mt2).
+  const needed = collectNeededCandidates(source.remote, branches, shaMapping, newCommits);
+  const usefulNewCommits = newCommits.filter(c => needed.has(c.hash));
+
+  if (usefulNewCommits.length === 0) {
     return {
       mirrored: 0,
       branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
@@ -827,7 +889,7 @@ export function mirrorHistory(opts: {
     };
   }
 
-  console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
+  console.log(`Found ${usefulNewCommits.length} new commit(s) to replay.\n`);
 
   // Fallback root for orphan parents (see resolveTargetParents).
   let targetInit: string | null = null;
@@ -839,13 +901,13 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  replayCommits({ newCommits, shaMapping, targetInit, source, target, dc });
+  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc });
 
   console.log();
-  console.log(`Done. ${newCommits.length} commit(s) replayed.`);
+  console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);
 
   return {
-    mirrored: newCommits.length,
+    mirrored: usefulNewCommits.length,
     branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
     upToDate: false,
   };

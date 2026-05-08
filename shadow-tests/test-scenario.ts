@@ -778,6 +778,25 @@ export default function run() {
     assertTreeContents(mono, "origin/shadow/frontend/core-2.0", monoTree(OUTER_MC4, BE_MR1, FE_FR2), "mono shadow/frontend/core-2.0 tip");
     assertTreeContents(mono, "origin/shadow/frontend/project",  monoTree(OUTER_MC4, BE_MR1, FE_FT2), "mono shadow/frontend/project tip");
 
+    // ── Idempotence: a clean end-state must produce no replays on re-sync ──
+    // Mt2 (post-M9, frontend pair) is non-TREESAME under fe/ vs Mt1 because
+    // Bt2'_mono now carries spliced fe content. The engine replays Mt2'_fe
+    // every time, but mapBranchesToTargetTips finds Ft2'_mono first in topo
+    // order (it has a Shadow-replayed-frontend-repo skip-trailer mapping it
+    // to Ft2 itself) and stops the walk before reaching Mt2. Mt2'_fe is left
+    // dangling; the next sync's loadReplayedMappings doesn't see it (only
+    // scans target's pushed shadow refs) and re-replays it indefinitely.
+    for (const from of ["a", "b"] as const) {
+      const r = runSync({ from });
+      assertEqual(r.exitCode, 0, `[idempotence] --from ${from}: ${r.stderr.slice(0, 300)}`);
+      const replayLines = r.stdout.split("\n").filter(l => /^\s*Replaying /.test(l));
+      if (replayLines.length > 0) {
+        throw new Error(
+          `[idempotence] --from ${from} re-replayed commits on a clean end-state:\n  ${replayLines.join("\n  ")}`,
+        );
+      }
+    }
+
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

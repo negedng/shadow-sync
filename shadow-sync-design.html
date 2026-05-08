@@ -796,6 +796,28 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     mapping. Their content is already accounted for via the originally-authored commit&rsquo;s
     own echo (<a class="ref ref-c" href="#c3">C3</a>).
   </p>
+  <p>
+    <strong>Companion: skip replays that no branch tip would resolve to.</strong> M9&rsquo;s
+    splice changes TREESAME semantics on the source side. A merge that pre-M9 was all-TREESAME
+    under the synced path (and thus dropped at <code>rev-list --full-history -- &lt;dir&gt;</code>)
+    can become non-TREESAME because one mapped parent now carries spliced sibling-pair content.
+    Example: <code>Mt2 = merge(Mt1, Bt2'_mono)</code> where pre-M9 both parents had empty
+    <code>frontend/</code>, post-M9 <code>Bt2'_mono</code> carries the splice &mdash; so
+    <code>Mt2</code> survives the rev-list filter and enters the candidate list on the frontend
+    pair. <code>replayCommits()</code> would emit <code>Mt2'_fe</code>, but
+    <code>mapBranchesToTargetTips()</code>&rsquo;s linear topo-walk hits
+    <code>Ft2'_mono</code>&rsquo;s skip-trailer first and resolves the project branch to
+    <code>Ft2</code> directly &mdash; <code>Mt2'_fe</code> is never referenced by any pushed ref,
+    becomes a dangling commit in the orchestrator&rsquo;s object DB, and re-replays every
+    subsequent sync (the next <code>loadReplayedMappings()</code> only scans pushed shadow refs,
+    so the orphan&rsquo;s trailer is invisible). <code>collectNeededCandidates()</code> runs after
+    <code>filterNotReplayedCommits()</code> and intersects the candidate list with two reach sets:
+    (a) candidates the per-branch linear walk visits before its first mapped commit (would-be
+    branch tips), and (b) candidate ancestors needed to keep the parent chain of an anchoring
+    candidate intact (so that <code>resolveTargetParents</code> wires the right replay rather than
+    falling back to <code>findEchoAnchor</code>). Anything outside both sets is dropped before
+    <code>replayCommits()</code> runs.
+  </p>
   <p class="from">
     <em>Degree of freedom:</em> instead of <code>git merge-tree</code>, walk the source-side
     ancestry of each parent looking for a skip-trailer commit and pass that hash to
