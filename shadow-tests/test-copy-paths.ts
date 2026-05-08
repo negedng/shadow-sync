@@ -2,6 +2,10 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execSync, spawnSync } from "child_process";
+import {
+  createTestEnv, addRemote, commitOnRemote,
+  runPush, runCiSync, readExternalShadowFile,
+} from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes } from "./assert";
 
 const SCRIPT = path.resolve(__dirname, "..", "copy-paths.ts");
@@ -537,6 +541,173 @@ function phaseW_rebuildOverwritesUnstageEdit(): void {
 
 // ── Driver ───────────────────────────────────────────────────────────────────
 
+// ── Integration phases (formerly test-copy-paths-integration.ts) ─────────────
+// Cross-cutting copy-paths edits + shadow-sync push/pull interaction.
+
+function writeShadowConfig(repoRoot: string, copyPaths: { paths: string[] }[]): void {
+  fs.writeFileSync(
+    path.join(repoRoot, "shadow-config.json"),
+    JSON.stringify({ copyPaths }, null, 2),
+  );
+}
+
+function setupTwoPairsWithCopyPaths(name: string): {
+  env: ReturnType<typeof createTestEnv>;
+  backend: ReturnType<typeof addRemote>;
+} {
+  const env = createTestEnv(name, "frontend");
+  const backend = addRemote(env, "backend-repo", "backend");
+
+  fs.mkdirSync(path.join(env.localRepo, "frontend/common"), { recursive: true });
+  fs.mkdirSync(path.join(env.localRepo, "backend/common"), { recursive: true });
+  fs.writeFileSync(path.join(env.localRepo, "frontend/common/foo.ts"), "v1\n");
+  fs.writeFileSync(path.join(env.localRepo, "backend/common/foo.ts"), "v1\n");
+  writeShadowConfig(env.localRepo, [{ paths: ["frontend/common", "backend/common"] }]);
+  git("add -A", env.localRepo);
+  git('commit -m "Initial: common populated + copy-paths config"', env.localRepo);
+
+  return { env, backend };
+}
+
+function externalMergeShadow(
+  env: ReturnType<typeof createTestEnv>,
+  monorepoSubdir: string,
+  remote?: ReturnType<typeof addRemote>,
+): void {
+  const workDir = remote?.remoteWorking ?? env.remoteWorking;
+  const shadowBranch = `${env.branchPrefix}/${monorepoSubdir}/main`;
+  git(`fetch origin ${shadowBranch}`, workDir);
+  git(`merge --no-ff origin/${shadowBranch} -m "External: pull common from monorepo"`, workDir);
+  git("push origin main", workDir);
+}
+
+function phaseX_forwardCrossCuttingPropagation(): void {
+  const { env, backend } = setupTwoPairsWithCopyPaths("cp-int-X-forward");
+  try {
+    const r0a = runPush(env);
+    assertEqual(r0a.status, 0, "[X] initial frontend push should succeed");
+    const r0b = runPush(env, undefined, [], backend);
+    assertEqual(r0b.status, 0, "[X] initial backend push should succeed");
+
+    assertEqual(readExternalShadowFile(env, "common/foo.ts"), "v1\n", "[X] frontend external initial");
+    assertEqual(readExternalShadowFile(env, "common/foo.ts", backend), "v1\n", "[X] backend external initial");
+
+    fs.writeFileSync(path.join(env.localRepo, "backend/common/foo.ts"), "v2 from backend\n");
+
+    const cp = runScript(env.localRepo, "rebuild");
+    assertEqual(cp.status, 0, "[X] copy-paths rebuild should succeed");
+    assertIncludes(cp.stdout, "frontend/common", "[X] rebuild reports propagation");
+
+    git('commit -m "Update common to v2"', env.localRepo);
+
+    const rPa = runPush(env);
+    assertEqual(rPa.status, 0, "[X] frontend push after rebuild should succeed");
+    const rPb = runPush(env, undefined, [], backend);
+    assertEqual(rPb.status, 0, "[X] backend push after rebuild should succeed");
+
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts"), "v2 from backend\n",
+      "[X] frontend external got new common via cross-cutting commit",
+    );
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts", backend), "v2 from backend\n",
+      "[X] backend external got new common via cross-cutting commit",
+    );
+  } finally {
+    env.cleanup();
+  }
+}
+
+function phaseY_reverseDivergentCiSyncRefusedAndResolved(): void {
+  const { env, backend } = setupTwoPairsWithCopyPaths("cp-int-Y-reverse");
+  try {
+    runPush(env);
+    runPush(env, undefined, [], backend);
+
+    externalMergeShadow(env, "frontend");
+    externalMergeShadow(env, "backend", backend);
+
+    commitOnRemote(env, { "common/foo.ts": "from frontend\n" }, "Frontend dev: edit common");
+    commitOnRemote(env, { "common/foo.ts": "from backend\n" },  "Backend dev: edit common",  backend);
+
+    const ci = runCiSync(env);
+    assertEqual(ci.status, 0, "[Y] ci-sync of divergent edits should succeed");
+
+    const frontendShadow = `${env.branchPrefix}/${env.subdir}/main`;
+    const backendShadow = `${env.branchPrefix}/${backend.subdir}/main`;
+    git(`fetch origin ${frontendShadow}`, env.localRepo);
+    git(`merge --no-ff origin/${frontendShadow} -m "Pull frontend shadow"`, env.localRepo);
+    git(`fetch origin ${backendShadow}`, env.localRepo);
+    git(`merge --no-ff origin/${backendShadow} -m "Pull backend shadow"`, env.localRepo);
+
+    const fc = fs.readFileSync(path.join(env.localRepo, "frontend/common/foo.ts"), "utf8").replace(/\r\n/g, "\n");
+    const bc = fs.readFileSync(path.join(env.localRepo, "backend/common/foo.ts"), "utf8").replace(/\r\n/g, "\n");
+    assertEqual(fc, "from frontend\n", "[Y] monorepo frontend mirror got frontend dev's edit");
+    assertEqual(bc, "from backend\n",  "[Y] monorepo backend mirror got backend dev's edit");
+
+    const c = runScript(env.localRepo, "check");
+    assertEqual(c.status, 1, "[Y] copy-paths check fails on cross-pair divergence");
+
+    const r1 = runScript(env.localRepo, "rebuild");
+    assertEqual(r1.status, 2, "[Y] copy-paths rebuild refuses without a working-tree resolution");
+    assertIncludes(r1.stderr, "match HEAD individually", "[Y] error explains HEAD divergence");
+
+    fs.writeFileSync(path.join(env.localRepo, "frontend/common/foo.ts"), "from backend\n");
+
+    const r2 = runScript(env.localRepo, "rebuild");
+    assertEqual(r2.status, 0, "[Y] rebuild succeeds after the manual edit settles the dispute");
+
+    git('commit -m "Resolve common divergence: pick backend"', env.localRepo);
+
+    const rPa = runPush(env);
+    assertEqual(rPa.status, 0, "[Y] frontend push after resolution should succeed");
+    const rPb = runPush(env, undefined, [], backend);
+    assertEqual(rPb.status, 0, "[Y] backend push after resolution should succeed");
+
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts"), "from backend\n",
+      "[Y] frontend external shadow has resolution",
+    );
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts", backend), "from backend\n",
+      "[Y] backend external shadow has resolution",
+    );
+  } finally {
+    env.cleanup();
+  }
+}
+
+function phaseZ_disciplineFailureLeavesExternalsDiverged(): void {
+  const { env, backend } = setupTwoPairsWithCopyPaths("cp-int-Z-discipline");
+  try {
+    runPush(env);
+    runPush(env, undefined, [], backend);
+
+    fs.writeFileSync(path.join(env.localRepo, "backend/common/foo.ts"), "v2 backend only\n");
+    git("add backend/common/foo.ts", env.localRepo);
+    git('commit -m "Naive edit to backend mirror"', env.localRepo);
+
+    const rPa = runPush(env);
+    assertEqual(rPa.status, 0, "[Z] frontend push succeeds");
+    const rPb = runPush(env, undefined, [], backend);
+    assertEqual(rPb.status, 0, "[Z] backend push succeeds");
+
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts", backend), "v2 backend only\n",
+      "[Z] backend external got the naive edit",
+    );
+    assertEqual(
+      readExternalShadowFile(env, "common/foo.ts"), "v1\n",
+      "[Z] frontend external still v1 — engine doesn't auto-correct",
+    );
+
+    const c = runScript(env.localRepo, "check");
+    assertEqual(c.status, 1, "[Z] copy-paths check would have caught it");
+  } finally {
+    env.cleanup();
+  }
+}
+
 const phases: Array<[string, () => void]> = [
   ["A: edit one propagates to other",                    phaseA_editOnePropagatesToOther],
   ["B: identical edits is no-op",                        phaseB_editBothIdenticallyIsNoOp],
@@ -562,6 +733,9 @@ const phases: Array<[string, () => void]> = [
   ["U: multiple groups are independent",                 phaseU_multipleGroupsIndependent],
   ["V: exec bit propagates (Unix)",                      phaseV_executableBitPropagates],
   ["W: rebuild removes stale target files",              phaseW_rebuildOverwritesUnstageEdit],
+  ["X: forward — cross-cutting commit fans out to both externals",  phaseX_forwardCrossCuttingPropagation],
+  ["Y: reverse — divergent ci-sync refused, resolved, fanned out",  phaseY_reverseDivergentCiSyncRefusedAndResolved],
+  ["Z: discipline failure leaves externals diverged",               phaseZ_disciplineFailureLeavesExternalsDiverged],
 ];
 
 export default function run() {

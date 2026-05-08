@@ -859,7 +859,7 @@ export function mirrorHistory(opts: {
   pair: SyncPair;
   from: "a" | "b";
   branches: string[];
-}): { mirrored: number; branchMapping: Map<string, string>; upToDate: boolean } {
+}): { mirrored: number; branchMapping: Map<string, string>; shaMapping: Map<string, string>; upToDate: boolean } {
   const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
@@ -885,6 +885,7 @@ export function mirrorHistory(opts: {
     return {
       mirrored: 0,
       branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
+      shaMapping,
       upToDate: true,
     };
   }
@@ -909,6 +910,99 @@ export function mirrorHistory(opts: {
   return {
     mirrored: usefulNewCommits.length,
     branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
+    shaMapping,
     upToDate: false,
   };
+}
+
+/**
+ * Tag sync: source repo's tags are recreated on target, repointed at the
+ * replayed commit. Annotated tags get a fresh tag object (same name, tagger,
+ * message; new `object` line). Lightweight tags become `refs/tags/<name>`
+ * pointing directly at the replay. Tags whose source commit was dropped
+ * (no entry in shaMapping) are skipped — there's no target SHA to point at.
+ */
+export function syncTags(opts: {
+  source: RepoEndpoint;
+  target: RepoEndpoint;
+  shaMapping: Map<string, string>;
+}): { pushed: number; skipped: number } {
+  const { source, target, shaMapping } = opts;
+
+  // Make sure source-side tags are in our local object DB. Limit to source
+  // remote so we don't pick up tags from the target side too.
+  git(["fetch", source.remote, "--tags"], { safe: true });
+
+  // List source-side tag refs. for-each-ref over refs/tags/* gives every tag
+  // currently in the local repo; that's our source-of-truth after the fetch
+  // above. We re-resolve each one against source.remote to make sure it's
+  // actually a source-side tag (not a stray target-side one).
+  const listRes = git(
+    ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)"],
+    { safe: true },
+  );
+  if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0 };
+  const tagLines = listRes.stdout.split("\n").filter(Boolean);
+  if (tagLines.length === 0) return { pushed: 0, skipped: 0 };
+
+  console.log(`\n── Syncing tags (${tagLines.length} candidate(s)) ──`);
+
+  let pushed = 0;
+  let skipped = 0;
+  for (const line of tagLines) {
+    const sep1 = line.indexOf("|");
+    const sep2 = line.indexOf("|", sep1 + 1);
+    const name = line.slice(0, sep1);
+    const objectType = line.slice(sep1 + 1, sep2);
+    // const objectName = line.slice(sep2 + 1);
+
+    // Peel to commit (works for both lightweight and annotated).
+    const peeled = git(["rev-parse", `refs/tags/${name}^{commit}`], { safe: true });
+    if (!peeled.ok) { skipped++; continue; }
+    const sourceCommit = peeled.stdout;
+
+    const targetCommit = shaMapping.get(sourceCommit);
+    if (!targetCommit) {
+      console.log(`  ${name}: source commit ${sourceCommit.slice(0, 8)} not replayed (skipping)`);
+      skipped++;
+      continue;
+    }
+
+    let pushSHA: string;
+    if (objectType === "tag") {
+      // Annotated: rebuild tag object with new commit-target.
+      const tagBodyRes = git(["cat-file", "tag", `refs/tags/${name}`], { safe: true });
+      if (!tagBodyRes.ok || !tagBodyRes.stdout) { skipped++; continue; }
+      // cat-file gives us the body without a trailing newline; mktag is OK
+      // with that, but be explicit. Replace the `object <sha>` header to
+      // point at the replayed commit, then pipe through mktag.
+      const newBody = tagBodyRes.stdout.replace(/^object [0-9a-f]+/m, `object ${targetCommit}`);
+      const mktagRes = git(["mktag"], { input: newBody, safe: true });
+      if (!mktagRes.ok || !mktagRes.stdout) {
+        console.log(`  ${name}: mktag failed (${mktagRes.stderr.slice(0, 120)}), skipping`);
+        skipped++;
+        continue;
+      }
+      pushSHA = mktagRes.stdout;
+    } else {
+      pushSHA = targetCommit;
+    }
+
+    // Force-push: source is the source of truth for tags, so target may need
+    // to overwrite a previous propagation if the source moved the tag.
+    const pushRes = git(
+      ["push", target.remote, `+${pushSHA}:refs/tags/${name}`],
+      { safe: true },
+    );
+    if (!pushRes.ok) {
+      console.log(`  ${name}: push failed (${pushRes.stderr.trim().slice(0, 120)}), skipping`);
+      skipped++;
+      continue;
+    }
+    console.log(`  ${name}${objectType === "tag" ? " (annotated)" : ""}: ${sourceCommit.slice(0, 8)} → ${targetCommit.slice(0, 8)} ✓`);
+    pushed++;
+  }
+
+  console.log(`Tags: ${pushed} pushed, ${skipped} skipped.`);
+  return { pushed, skipped };
 }

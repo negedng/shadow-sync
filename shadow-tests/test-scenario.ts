@@ -482,6 +482,59 @@ export default function run() {
       assertEqual(r.exitCode, 0, `[line 66] --from b: ${r.stderr.slice(0, 300)}`);
     }
 
+    // ── Phase 18: Multi-project — projectB parallel to project (scenario.md) ──
+    git("checkout core-1.0", backend.working);
+    git("checkout -b projectB", backend.working);
+    const BtB1 = commitFiles(backend, { "src/projectB.txt": "projB v1\n" }, "BtB1");
+    git("push origin projectB", backend.working);
+    git("checkout main", backend.working);
+
+    git("checkout core-1.0", frontend.working);
+    git("checkout -b projectB", frontend.working);
+    const FtB1 = commitFiles(frontend, { "src/projectB.txt": "projB v1\n" }, "FtB1");
+    git("push origin projectB", frontend.working);
+    git("checkout main", frontend.working);
+
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 18 --from b after projectB creation]: ${r.stderr.slice(0, 300)}`);
+    }
+
+    git("fetch origin", mono.working);
+    git("checkout -b projectB origin/shadow/backend/projectB", mono.working);
+    // Reset projectB tip to Mc0 (we want it to fork from Mc0, not from BtB1'_mono).
+    git(`reset --hard ${Mc0}`, mono.working);
+    const MtB1 = mergeRef(mono, "origin/shadow/backend/projectB",  "MtB1");
+    const MtB2 = mergeRef(mono, "origin/shadow/frontend/projectB", "MtB2");
+    git("push origin projectB", mono.working);
+    git("checkout main", mono.working);
+
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 18 --from a after MtB1/MtB2]: ${r.stderr.slice(0, 300)}`);
+    }
+
+    // ── Phase 19: Fanout — feature/fanout merged into main, project, projectB ──
+    git("checkout main", backend.working);
+    git("checkout -b feature/fanout", backend.working);
+    const BfX1 = commitFiles(backend, { "src/fanout.txt": "fanout v1\n" }, "BfX1");
+    git("push origin feature/fanout", backend.working);
+
+    git("checkout main", backend.working);
+    const Bc5 = mergeRef(backend, "feature/fanout", "Bc5");
+    git("push origin main", backend.working);
+    git("checkout project", backend.working);
+    const Bt4 = mergeRef(backend, "feature/fanout", "Bt4");
+    git("push origin project", backend.working);
+    git("checkout projectB", backend.working);
+    const BtB2 = mergeRef(backend, "feature/fanout", "BtB2");
+    git("push origin projectB", backend.working);
+
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 19 --from b after fanout]: ${r.stderr.slice(0, 300)}`);
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // Final assertions: parents of every named commit + branch tips
     // ──────────────────────────────────────────────────────────────────────
@@ -515,12 +568,11 @@ export default function run() {
 
     assertParents(backend, Bt3, [Bt2, Bf1], "Bt3 = merge(Bt2, Bf1)");
 
-    // Backend working branches at end
-    assertTip(backend, "main",              Bc4, "backend/main = Bc4");
+    // Backend working branches at end (tips advance through Phase 18/19; see Phase 19 assertions for projectB/Bt4/Bc5)
     assertTip(backend, "core-1.0",          Br1, "backend/core-1.0 = Br1");
     assertTip(backend, "core-2.0",          Br2, "backend/core-2.0 = Br2");
-    assertTip(backend, "project",           Bt3, "backend/project = Bt3");
     assertTip(backend, "bug/core-2.0/fix",  Bf1, "backend/bug/core-2.0/fix = Bf1");
+    // Phase 19 advances main → Bc5, project → Bt4, projectB → BtB2 — asserted below.
 
     // Backend shadow: tips on main/core-2.0 are the engine's noop-merge replays.
     assertTip(backend, "origin/shadow/backend/main",     Mc6_be, "shadow/backend/main → Mc6'_be<noop>");
@@ -630,10 +682,10 @@ export default function run() {
     const Fr2_mono = findReplayOrFail(mono, "origin/shadow/frontend/core-2.0", "frontend", Fr2, "Fr2'_mono");
     const Fr1_mono = findReplayOrFail(mono, "origin/shadow/frontend/core-1.0", "frontend", Fr1, "Fr1'");
 
-    assertTip(mono, "origin/shadow/backend/main",             Bc4_mono, "mono shadow/backend/main → Bc4'_mono");
+    // Phase 19 advances mono's shadow/backend/{main,project,projectB} past Bc4_mono/Bt3_mono;
+    // those new tips (Bc5_mono / Bt4_mono / BtB2_mono) are asserted in the Phase 19 block below.
     assertTip(mono, "origin/shadow/backend/core-1.0",         Br1_mono, "mono shadow/backend/core-1.0 → Br1'");
     assertTip(mono, "origin/shadow/backend/core-2.0",         Br2_mono, "mono shadow/backend/core-2.0 → Br2'_mono");
-    assertTip(mono, "origin/shadow/backend/project",          Bt3_mono, "mono shadow/backend/project → Bt3'_mono");
     assertTip(mono, "origin/shadow/backend/bug/core-2.0/fix", Bf1_mono, "mono shadow/backend/bug → Bf1'_mono");
     assertTip(mono, "origin/shadow/frontend/main",            Fc4_mono, "mono shadow/frontend/main → Fc4'_mono");
     assertTip(mono, "origin/shadow/frontend/core-1.0",        Fr1_mono, "mono shadow/frontend/core-1.0 → Fr1'");
@@ -768,15 +820,116 @@ export default function run() {
     assertTreeContents(frontend, "origin/shadow/frontend/project",          FE_MR1, "shadow/frontend/project tip tree = FE_MR1 (= FE_FT2)");
     assertTreeContents(frontend, "origin/shadow/frontend/bug/core-2.0/fix", FE_MR1, "shadow/frontend/bug tip tree = FE_MR1 (Mf1 dropped on fe)");
 
-    assertTreeContents(mono, "origin/shadow/backend/main",     monoTree(OUTER_MC4, BE_BC4, FE_MC6), "mono shadow/backend/main tip");
+    // shadow/backend/{main,project} tip trees are asserted after Phase 19 (they advance through fanout merges).
     assertTreeContents(mono, "origin/shadow/backend/core-1.0", monoTree(OUTER_MC0, BE_BR1, EMPTY),  "mono shadow/backend/core-1.0 tip");
     assertTreeContents(mono, "origin/shadow/backend/core-2.0", monoTree(OUTER_MC4, BE_BR2, FE_MR1), "mono shadow/backend/core-2.0 tip");
-    assertTreeContents(mono, "origin/shadow/backend/project",  monoTree(OUTER_MC4, BE_BT3, FE_FT2), "mono shadow/backend/project tip");
     assertTreeContents(mono, "origin/shadow/backend/bug/core-2.0/fix", monoTree(OUTER_MC4, BE_BF1, FE_FT2), "mono shadow/backend/bug tip");
     assertTreeContents(mono, "origin/shadow/frontend/main",     monoTree(OUTER_MC4, BE_MC6, FE_FC4), "mono shadow/frontend/main tip");
     assertTreeContents(mono, "origin/shadow/frontend/core-1.0", monoTree(OUTER_MC0, EMPTY,  FE_FR1), "mono shadow/frontend/core-1.0 tip");
     assertTreeContents(mono, "origin/shadow/frontend/core-2.0", monoTree(OUTER_MC4, BE_MR1, FE_FR2), "mono shadow/frontend/core-2.0 tip");
     assertTreeContents(mono, "origin/shadow/frontend/project",  monoTree(OUTER_MC4, BE_MR1, FE_FT2), "mono shadow/frontend/project tip");
+
+    // ── Phase 18 assertions: Multi-project (projectB parallel to project) ──
+    const BE_BTB1 = { "src/init.txt": "init\n", "src/feature.txt": "v1\n", "src/release.txt": "1.0\n", "src/projectB.txt": "projB v1\n" };
+    const FE_FTB1 = { "src/init.txt": "init\n", "src/component.txt": "v1\n", "src/release.txt": "1.0\n", "src/projectB.txt": "projB v1\n" };
+
+    // Backend leaf — BtB1 is the first projectB commit off Br1; tip advances to BtB2 in Phase 19.
+    assertParents(backend, BtB1, [Br1], "BtB1 parents = (Br1)");
+    assertTreeContents(backend, BtB1, BE_BTB1, "BtB1 tree");
+
+    // Frontend leaf — projectB is single-commit (no fanout merged into frontend's projectB).
+    assertParents(frontend, FtB1, [Fr1], "FtB1 parents = (Fr1)");
+    assertTip(frontend, "projectB", FtB1, "frontend/projectB = FtB1");
+    assertTreeContents(frontend, FtB1, FE_FTB1, "FtB1 tree");
+
+    // Monorepo projectB: MtB1 = merge(Mc0, BtB1'_mono); MtB2 = merge(MtB1, FtB1'_mono).
+    const BtB1_mono = findReplayOrFail(mono, "origin/shadow/backend/projectB",  "backend",  BtB1, "BtB1'_mono");
+    const FtB1_mono = findReplayOrFail(mono, "origin/shadow/frontend/projectB", "frontend", FtB1, "FtB1'_mono");
+    assertParents(mono, MtB1, [Mc0, BtB1_mono], "MtB1 = merge(Mc0, BtB1'_mono)");
+    assertParents(mono, MtB2, [MtB1, FtB1_mono], "MtB2 = merge(MtB1, FtB1'_mono)");
+    assertTreeContents(mono, MtB1, monoTree(OUTER_MC0, BE_BTB1, EMPTY),
+      "MtB1 tree (root + backend/projectB; no frontend/)");
+    assertTreeContents(mono, MtB2, monoTree(OUTER_MC0, BE_BTB1, FE_FTB1),
+      "MtB2 tree (root + backend/projectB + frontend/projectB)");
+    assertTip(mono, "origin/projectB", MtB2, "mono/projectB = MtB2");
+
+    // Monorepo's shadow/frontend/projectB stays at FtB1'_mono (frontend's projectB has no
+    // further commits). shadow/backend/projectB advances to BtB2'_mono after Phase 19 — see
+    // BtB2_mono assertion in the fanout block.
+    assertTip(mono, "origin/shadow/frontend/projectB", FtB1_mono, "mono shadow/frontend/projectB = FtB1'_mono");
+
+    // After --from a, leaf shadow refs for projectB.
+    // Backend pair: MtB1 kept (full content, brings BtB1's backend tree); MtB2 kept as <noop-tree>.
+    const MtB1_be = findReplayOrFail(backend, "origin/shadow/backend/projectB", "origin", MtB1, "MtB1'_be");
+    const MtB2_be = findReplayOrFail(backend, "origin/shadow/backend/projectB", "origin", MtB2, "MtB2'_be<noop-tree>");
+    assertTip(backend, "origin/shadow/backend/projectB", MtB2_be, "backend shadow/backend/projectB = MtB2'_be<noop-tree>");
+    assertTreeContents(backend, MtB2_be, BE_BTB1, "MtB2'_be<noop-tree> tree = BtB1's tree");
+
+    // Frontend pair: MtB1 dropped (all-TREESAME on fe — both Mc0 and BtB1'_mono have empty fe);
+    // MtB2 kept (brings FtB1's fe content).
+    assertEqual(findReplay(frontend, "origin/shadow/frontend/projectB", "origin", MtB1), null,
+      "MtB1 (merge, all parents empty under fe/) must not appear on frontend's shadow");
+    const MtB2_fe = findReplayOrFail(frontend, "origin/shadow/frontend/projectB", "origin", MtB2, "MtB2'_fe");
+    assertTip(frontend, "origin/shadow/frontend/projectB", MtB2_fe, "frontend shadow/frontend/projectB = MtB2'_fe");
+    assertTreeContents(frontend, MtB2_fe, FE_FTB1, "MtB2'_fe tree = FtB1's tree");
+
+    // Independence: project's backend shadow chain must NOT contain projectB.txt;
+    // projectB's backend shadow chain must NOT contain project.txt.
+    assertEqual(
+      git("ls-tree -r --name-only origin/shadow/backend/project", backend.working).split("\n").includes("src/projectB.txt"),
+      false, "shadow/backend/project tip must not have src/projectB.txt",
+    );
+    assertEqual(
+      git("ls-tree -r --name-only origin/shadow/backend/projectB", backend.working).split("\n").includes("src/project.txt"),
+      false, "shadow/backend/projectB tip must not have src/project.txt",
+    );
+
+    // ── Phase 19 assertions: Fanout (BfX1 dedup across 3 merge replays) ──
+    const BE_BFX1 = { ...BE_BC4, "src/fanout.txt": "fanout v1\n" };
+    const BE_BC5  = BE_BFX1;                                            // merge(Bc4, BfX1) = BfX1's tree (Bc4 ⊂ BfX1)
+    const BE_BT4  = { ...BE_BT3, "src/fanout.txt": "fanout v1\n" };     // Bt3 carries bugfix; merge adds fanout.txt
+    const BE_BTB2 = { ...BE_BTB1, "src/feature.txt": "v2\n", "src/shared.txt": "shared be\n", "src/project.txt": "proj v1\n", "src/fanout.txt": "fanout v1\n" };
+
+    // Backend leaf parents and trees + branch tips after the fanout phase.
+    assertParents(backend, BfX1, [Bc4], "BfX1 parents = (Bc4)");
+    assertParents(backend, Bc5,  [Bc4, BfX1], "Bc5  = merge(Bc4, BfX1)");
+    assertParents(backend, Bt4,  [Bt3, BfX1], "Bt4  = merge(Bt3, BfX1)");
+    assertParents(backend, BtB2, [BtB1, BfX1], "BtB2 = merge(BtB1, BfX1)");
+    assertTreeContents(backend, BfX1, BE_BFX1, "BfX1 tree");
+    assertTreeContents(backend, Bc5,  BE_BC5,  "Bc5 tree");
+    assertTreeContents(backend, Bt4,  BE_BT4,  "Bt4 tree");
+    assertTreeContents(backend, BtB2, BE_BTB2, "BtB2 tree");
+    assertTip(backend, "main",     Bc5,  "backend/main = Bc5 (post-fanout)");
+    assertTip(backend, "project",  Bt4,  "backend/project = Bt4 (post-fanout)");
+    assertTip(backend, "projectB", BtB2, "backend/projectB = BtB2 (post-fanout)");
+
+    // Fanout dedup: BfX1 has exactly ONE replay across all monorepo backend shadow refs.
+    // Search the union of branches that reference BfX1 (main, project, projectB, feature/fanout).
+    const fanoutShadowRefs = [
+      "origin/shadow/backend/main",
+      "origin/shadow/backend/project",
+      "origin/shadow/backend/projectB",
+      "origin/shadow/backend/feature/fanout",
+    ];
+    const replays = new Set<string>();
+    for (const ref of fanoutShadowRefs) {
+      const sha = findReplay(mono, ref, "backend", BfX1);
+      if (sha) replays.add(sha);
+    }
+    assertEqual(replays.size, 1,
+      `BfX1 must have exactly one replay SHA across monorepo's backend shadow refs (got ${replays.size}: ${[...replays].join(", ")})`);
+    const BfX1_mono = [...replays][0];
+
+    // The three merge replays' second parent must all equal BfX1'_mono.
+    const Bc5_mono  = findReplayOrFail(mono, "origin/shadow/backend/main",     "backend", Bc5,  "Bc5'_mono");
+    const Bt4_mono  = findReplayOrFail(mono, "origin/shadow/backend/project",  "backend", Bt4,  "Bt4'_mono");
+    const BtB2_mono = findReplayOrFail(mono, "origin/shadow/backend/projectB", "backend", BtB2, "BtB2'_mono");
+    assertEqual(getParents(mono, Bc5_mono)[1],  BfX1_mono, "Bc5'_mono.parents[1]  = BfX1'_mono");
+    assertEqual(getParents(mono, Bt4_mono)[1],  BfX1_mono, "Bt4'_mono.parents[1]  = BfX1'_mono");
+    assertEqual(getParents(mono, BtB2_mono)[1], BfX1_mono, "BtB2'_mono.parents[1] = BfX1'_mono");
+
+    // BfX1 itself appears as the tip of shadow/backend/feature/fanout (the engine syncs every branch).
+    assertTip(mono, "origin/shadow/backend/feature/fanout", BfX1_mono, "shadow/backend/feature/fanout tip = BfX1'_mono");
 
     // ── Idempotence: a clean end-state must produce no replays on re-sync ──
     // Mt2 (post-M9, frontend pair) is non-TREESAME under fe/ vs Mt1 because

@@ -16,7 +16,7 @@ import {
   PAIRS, ShadowSyncError,
   git, refExists, listRemoteBranches,
   shadowBranchName, ensureRemote,
-  mirrorHistory, runPreflightChecks, printPreflightResults,
+  mirrorHistory, syncTags, runPreflightChecks, printPreflightResults,
   validateName, fail,
 } from "./shadow-common";
 
@@ -194,6 +194,13 @@ function _runSyncCore(options: SyncOptions): number {
         git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`]);
         console.log(`  ✓ Pushed.`);
       }
+
+      // Tag sync runs in both directions: tags on the source side get
+      // recreated on the target pointing at the replayed commit. Annotated
+      // tags get a fresh tag object (same name/tagger/message); lightweight
+      // tags become refs/tags/<name> pointing at the replay. Tags whose
+      // source commit was dropped (no shaMapping entry) are skipped.
+      syncTags({ source, target, shaMapping: result.shaMapping });
     } catch (err: any) {
       console.error(`  ✘ Failed to sync ${pair.name}: ${err.message}`);
       failed++;
