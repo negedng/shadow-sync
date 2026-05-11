@@ -5,3 +5,4 @@ node_modules/
 !shadow-tests/
 *.local
 .env
+scenario.md
