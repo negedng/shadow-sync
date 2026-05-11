@@ -379,7 +379,8 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
 
 function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
   const result = git(revListArgs, { safe: true });
-  if (!result.ok || !result.stdout) return [];
+  if (!result.ok) fail(`rev-list failed (${revListArgs.join(" ")}): ${result.stderr}`);
+  if (!result.stdout) return [];
   const hashes = result.stdout.split("\n").filter(Boolean);
   const parentsMap = fetchTrueParents(hashes);
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
@@ -496,25 +497,38 @@ function buildReplayedTree(opts: {
   return git(["write-tree"], { env: idxEnv });
 }
 
-/** Splice `subtreeContent` into `baseTree` at `subdir/`, replacing what was there. */
-function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
+/** Allocate a private git index, run `fn` against it, then delete it. */
+function withTmpIndex<T>(label: string, fn: (idxEnv: { GIT_INDEX_FILE: string }) => T): T {
   const tmpIndex = path.join(
     os.tmpdir(),
-    `shadow-compose-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
+    `shadow-${label}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
   );
-  const idxEnv = { GIT_INDEX_FILE: tmpIndex };
   try {
-    git(["read-tree", baseTree], { env: idxEnv });
-    // -f bypasses git rm --cached's safety check against the working tree.
-    // Without it, if baseTree's content differs from mono.working's checkout,
-    // rm refuses ("staged content different from both...") and read-tree --prefix
-    // fails on the not-removed entries.
-    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
-    git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
-    return git(["write-tree"], { env: idxEnv });
+    return fn({ GIT_INDEX_FILE: tmpIndex });
   } finally {
     fs.rmSync(tmpIndex, { force: true });
   }
+}
+
+/** Build a tree from `refOrTree` with `subdir/` stripped out — the "outer" slice. */
+function outerOnlyTree(refOrTree: string, subdir: string): string {
+  return withTmpIndex("outer", idxEnv => {
+    git(["read-tree", refOrTree], { env: idxEnv });
+    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
+    return git(["write-tree"], { env: idxEnv });
+  });
+}
+
+/** Splice `subtreeContent` into `baseTree` at `subdir/`, replacing what was there. */
+function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
+  return withTmpIndex("compose", idxEnv => {
+    git(["read-tree", baseTree], { env: idxEnv });
+    // --ignore-unmatch: baseTree may not have subdir/ — that's fine, the
+    // subsequent read-tree --prefix populates it from scratch.
+    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
+    git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
+    return git(["write-tree"], { env: idxEnv });
+  });
 }
 
 /**
@@ -561,13 +575,26 @@ function composeCrossRepoMergeTree(opts: {
  * which preserves outer state (frontend slice from a sibling pair's spliced
  * shadow merge) that the simple first-parent fallback would have dropped.
  *
- * Falls back to mappedParents[0]'s tree on conflict or for octopus merges
- * (3+ parents); both cases are rare in practice.
+ * For 3+ parents (no merge-tree) and for 2-parent conflicts, we check whether
+ * the mapped parents agree on their **outer** slice (everything outside
+ * `targetDir/`). The source commit can only have resolved content inside its
+ * own repo — i.e. content that lands in `targetDir/` after replay — so if the
+ * outer slices all match, splicing mappedParents[0]'s `targetDir/` over that
+ * agreed outer is lossless: buildReplayedTree then applies the source diff on
+ * top, carrying the user's in-repo merge resolution. If outer slices differ,
+ * no auto-resolution is possible — fail loudly with a recipe the operator can
+ * follow to manually reconcile (see formatUnresolvableMergeError).
  */
-function mergeMappedParentTrees(mappedParents: string[], shortLabel: string): string {
+function mergeMappedParentTrees(opts: {
+  mappedParents: string[];
+  commitShort: string;
+  targetDir: string;
+}): string | null {
+  const { mappedParents, commitShort, targetDir } = opts;
+
   if (mappedParents.length === 1) {
     const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${shortLabel}.`);
+    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
     return treeRes.stdout;
   }
   if (mappedParents.length === 2) {
@@ -576,9 +603,111 @@ function mergeMappedParentTrees(mappedParents: string[], shortLabel: string): st
       return mergeRes.stdout;
     }
   }
-  const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-  if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${shortLabel}.`);
-  return treeRes.stdout;
+
+  // Without a targetDir there's no outer/inner split — the source side has the
+  // same file layout as target, so the source merge commit's diff already
+  // carries the user's conflict resolution. Returning mappedParents[0]'s tree
+  // lets buildReplayedTree apply that resolution on top.
+  if (!targetDir) {
+    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
+    return treeRes.stdout;
+  }
+
+  // Outer-agreement check: if every mapped parent has the same tree outside
+  // targetDir/, splice mappedParents[0]'s targetDir/ over that shared outer.
+  // The source merge's diff (applied later by buildReplayedTree) carries the
+  // user's resolution for content inside targetDir/, so picking one parent's
+  // inner here is fine — only the outer needs to be globally consistent.
+  const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDir));
+  if (outerTrees.every(t => t === outerTrees[0])) {
+    const subdirRes = git(["rev-parse", `${mappedParents[0]}:${targetDir}`], { safe: true });
+    return subdirRes.ok
+      ? composeSubtree(outerTrees[0], targetDir, subdirRes.stdout)
+      : outerTrees[0];
+  }
+
+  return null;
+}
+
+/**
+ * Return the bare branch name on `sourceRemote` containing `commitHash` if
+ * unambiguous, else null. Used to point error messages at the right shadow ref.
+ */
+function inferSourceBranch(commitHash: string, sourceRemote: string): string | null {
+  const res = git(
+    ["for-each-ref", "--format=%(refname:short)", "--contains", commitHash, `refs/remotes/${sourceRemote}/`],
+    { safe: true },
+  );
+  if (!res.ok || !res.stdout) return null;
+  const matches = res.stdout.split("\n")
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(r => r.startsWith(`${sourceRemote}/`) ? r.slice(sourceRemote.length + 1) : r)
+    .filter(b => b && b !== "HEAD");
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Build the actionable error printed when mergeMappedParentTrees gives up.
+ * The operator's escape: hand-write a target-side commit whose parents are the
+ * divergent mapped parents and whose message carries the source→target trailer.
+ * `loadReplayedMappings` will pick that up on the next run and treat the source
+ * merge as already replayed, so the sync proceeds without re-attempting this.
+ */
+function formatUnresolvableMergeError(opts: {
+  commit: TopoCommit;
+  meta: CommitMeta;
+  mappedParents: string[];
+  source: RepoEndpoint;
+  target: RepoEndpoint;
+  pair: SyncPair;
+}): string {
+  const { commit, meta, mappedParents, source, target, pair } = opts;
+  const branchHint = inferSourceBranch(commit.hash, source.remote);
+  const reason = mappedParents.length === 2
+    ? `merge-tree conflict between mapped parents on ${target.remote}`
+    : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`;
+  const outerNote =
+    `Mapped parents disagree on outer state (files outside ${target.dir}/). ` +
+    `The source commit cannot have resolved this — outer files don't exist on ${source.remote}.`;
+  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
+  const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
+  const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
+  const trailer = `${replayedTrailerKey(source.remote)}: ${commit.hash}`;
+
+  const shortHash = commit.hash.slice(0, 7);
+  return [
+    `${meta.short}: cannot auto-resolve replay parent tree.`,
+    ``,
+    `  Source merge:   ${commit.hash}  (${meta.short})`,
+    `  Failure:        ${reason}`,
+    `  Mapped parents on ${target.remote}:`,
+    ppLines,
+    ``,
+    `  ${outerNote}`,
+    ``,
+    `To reconcile manually, create a commit on ${shadowRef} that`,
+    `  - has the divergent mapped parents above as its git parents`,
+    `  - has a tree you choose (the resolved outer state + the merged inner state)`,
+    `  - includes this trailer in its message body (exact text):`,
+    ``,
+    `      ${trailer}`,
+    ``,
+    `On the next sync run, ${meta.short} will be picked up via that trailer and skipped.`,
+    ``,
+    `  Suggested commands (run in this repo, with ${target.remote} fetched):`,
+    `    git checkout -b manual-resolve-${shortHash} ${mappedParents[0]}`,
+    `    git merge --no-ff ${mappedParents.slice(1).join(" ")}`,
+    `    # resolve conflicts, stage the result, then:`,
+    `    tree=$(git write-tree)`,
+    `    new=$(git commit-tree $tree ${parentArgs} \\`,
+    `        -m "Manual resolution of ${shortHash}" \\`,
+    `        -m "${trailer}")`,
+    `    git update-ref ${shadowRef} $new`,
+    `    git push ${target.remote} ${shadowRef.replace(/^refs\/heads\//, "")}`,
+    `  Then re-run shadow-sync.`,
+  ].join("\n");
 }
 
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
@@ -710,7 +839,7 @@ function collectNeededCandidates(
 
   for (const branch of branches) {
     const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) continue;
+    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while collecting needed candidates: ${log.stderr}`);
     for (const line of log.stdout.split("\n")) {
       const hash = line.trim();
       if (!hash) continue;
@@ -723,7 +852,8 @@ function collectNeededCandidates(
   while (stack.length) {
     const hash = stack.pop()!;
     const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
-    if (!parentsRes.ok || !parentsRes.stdout) continue;
+    if (!parentsRes.ok) fail(`log -1 --format=%P ${hash} failed: ${parentsRes.stderr}`);
+    if (!parentsRes.stdout) continue; // root commit — no parents to chase
     for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
       if (shaMapping.has(p)) continue;
       if (newSet.has(p) && !needed.has(p)) {
@@ -776,8 +906,9 @@ function replayCommits(opts: {
   source: RepoEndpoint;
   target: RepoEndpoint;
   dc: DirectionConfig;
+  pair: SyncPair;
 }): void {
-  const { newCommits, shaMapping, targetInit, source, target, dc } = opts;
+  const { newCommits, shaMapping, targetInit, source, target, dc, pair } = opts;
   const tmpIndex = path.join(
     os.tmpdir(),
     `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
@@ -809,7 +940,11 @@ function replayCommits(opts: {
       if (composedParentTree) {
         parentTree = composedParentTree;
       } else if (mappedParents.length > 0) {
-        parentTree = mergeMappedParentTrees(mappedParents, meta.short);
+        const merged = mergeMappedParentTrees({ mappedParents, commitShort: meta.short, targetDir: target.dir });
+        if (merged === null) {
+          fail(formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }));
+        }
+        parentTree = merged;
       } else if (commit.parents.length === 0) {
         // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
         parentTree = null;
@@ -902,7 +1037,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc });
+  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair });
 
   console.log();
   console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);
@@ -915,12 +1050,14 @@ export function mirrorHistory(opts: {
   };
 }
 
+// ── Tag sync ──────────────────────────────────────────────────────────────────
+
 /**
- * Tag sync: source repo's tags are recreated on target, repointed at the
- * replayed commit. Annotated tags get a fresh tag object (same name, tagger,
- * message; new `object` line). Lightweight tags become `refs/tags/<name>`
- * pointing directly at the replay. Tags whose source commit was dropped
- * (no entry in shaMapping) are skipped — there's no target SHA to point at.
+ * Source repo's tags are recreated on target, repointed at the replayed
+ * commit. Annotated tags get a fresh tag object (same name, tagger, message;
+ * new `object` line). Lightweight tags become `refs/tags/<name>` pointing
+ * directly at the replay. Tags whose source commit was dropped (no entry in
+ * shaMapping) are skipped — there's no target SHA to point at.
  */
 export function syncTags(opts: {
   source: RepoEndpoint;
@@ -954,7 +1091,6 @@ export function syncTags(opts: {
     const sep2 = line.indexOf("|", sep1 + 1);
     const name = line.slice(0, sep1);
     const objectType = line.slice(sep1 + 1, sep2);
-    // const objectName = line.slice(sep2 + 1);
 
     // Peel to commit (works for both lightweight and annotated).
     const peeled = git(["rev-parse", `refs/tags/${name}^{commit}`], { safe: true });

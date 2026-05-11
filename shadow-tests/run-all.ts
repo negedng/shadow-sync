@@ -4,6 +4,16 @@ import * as path from "path";
 
 interface Result { file: string; ok: boolean; output: string; ms: number }
 
+// Route test temp dirs to a Defender-excluded path on Windows. Each git spawn
+// pays a realtime-scan tax in the system temp dir; pointing TMP/TEMP at an
+// excluded folder removes that tax for child processes that read os.tmpdir().
+if (process.platform === "win32") {
+  const scratch = "C:\\tmp\\shadow-tests";
+  fs.mkdirSync(scratch, { recursive: true });
+  process.env.TMP = scratch;
+  process.env.TEMP = scratch;
+}
+
 const dir = __dirname;
 
 const testFiles = fs.readdirSync(dir)

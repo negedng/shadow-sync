@@ -1,5 +1,5 @@
 /**
- * Consolidated merge-handling test. Five sub-tests:
+ * Consolidated merge-handling test. Six sub-tests:
  *
  *   A. merge-topology — shared SHAs across branches, evil merges, octopus
  *      (formerly test-pull-merge-topology.ts)
@@ -11,6 +11,8 @@
  *      (formerly test-push-merge-skipped-parents.ts)
  *   E. squash-merges — local + cross-repo squashes
  *      (formerly test-squash-merges.ts)
+ *   F. manual-merge-recovery — outer-divergence hard fail + operator-driven
+ *      reconciliation via Shadow-replayed-* trailer
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -23,8 +25,14 @@ import {
 } from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes } from "./assert";
 
-function git(cmd: string, cwd: string): string {
-  return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+function git(cmd: string, cwd: string, opts?: { env?: NodeJS.ProcessEnv; input?: string }): string {
+  return execSync(`git ${cmd}`, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+    env: opts?.env,
+    input: opts?.input,
+  }).trim();
 }
 
 function extractLocalSHA(log: string, messagePrefix: string): string {
@@ -554,6 +562,122 @@ function runSquashFeatureAbsorbsShadow(): void {
   }
 }
 
+// ── F. manual-merge-recovery: outer divergence forces hard fail + operator fix ─
+function runManualMergeRecovery(): void {
+  const env = createTestEnv("manual-merge-recovery");
+  const local = env.localRepo;
+  const team = env.remoteWorking;
+
+  try {
+    // ── Source layout: base on main; branch-a adds feat-a; branch-b adds feat-b.
+    fs.writeFileSync(path.join(team, "base.ts"), "base\n");
+    git("add base.ts", team);
+    git('commit -m "Base"', team);
+    git("push origin main", team);
+
+    git("checkout -b branch-a", team);
+    fs.writeFileSync(path.join(team, "feat-a.ts"), "a\n");
+    git("add feat-a.ts", team);
+    git('commit -m "feat A"', team);
+    git("push origin branch-a", team);
+
+    git("checkout main", team);
+    git("checkout -b branch-b", team);
+    fs.writeFileSync(path.join(team, "feat-b.ts"), "b\n");
+    git("add feat-b.ts", team);
+    git('commit -m "feat B"', team);
+    git("push origin branch-b", team);
+
+    // First sync fans out main + branch-a + branch-b into shadow refs on origin.
+    assertEqual(runCiSync(env).status, 0, "[recovery] initial sync");
+
+    // Rewrite shadow branch-a/branch-b tips to add a differing outer file,
+    // preserving each commit's frontend/ subtree and Shadow-replayed-team
+    // trailer. This simulates outer state arriving via a sibling pair's
+    // splice — the case where mergeMappedParentTrees has nothing to fall back
+    // to.
+    git("fetch origin", local);
+    const shaA = git("rev-parse origin/shadow/frontend/branch-a", local);
+    const shaB = git("rev-parse origin/shadow/frontend/branch-b", local);
+
+    function injectOuter(shadowSha: string, body: string): string {
+      const blob = git("hash-object -w --stdin", local, { input: body });
+      const baseTree = git(`rev-parse "${shadowSha}^{tree}"`, local);
+      const idx = path.join(env.tmpDir, `idx-${shadowSha.slice(0, 7)}`);
+      const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
+      git(`read-tree ${baseTree}`, local, { env: idxEnv });
+      git(`update-index --add --cacheinfo 100644,${blob},outer.txt`, local, { env: idxEnv });
+      const newTree = git("write-tree", local, { env: idxEnv });
+      fs.rmSync(idx, { force: true });
+
+      const parents = git(`log -1 --format=%P ${shadowSha}`, local).split(/\s+/).filter(Boolean);
+      const msgFile = path.join(env.tmpDir, `msg-${shadowSha.slice(0, 7)}`);
+      fs.writeFileSync(msgFile, git(`log -1 --format=%B ${shadowSha}`, local) + "\n");
+      const pArgs = parents.map(p => `-p ${p}`).join(" ");
+      const newSha = git(`commit-tree ${newTree} ${pArgs} -F "${msgFile}"`, local);
+      fs.rmSync(msgFile, { force: true });
+      return newSha;
+    }
+
+    const newA = injectOuter(shaA, "from-A\n");
+    const newB = injectOuter(shaB, "from-B\n");
+    git(`push origin ${newA}:refs/heads/shadow/frontend/branch-a --force`, local);
+    git(`push origin ${newB}:refs/heads/shadow/frontend/branch-b --force`, local);
+
+    // Source-side octopus merge of branch-a + branch-b into main.
+    git("checkout main", team);
+    git('merge --no-ff branch-a branch-b -m "Octopus merge"', team);
+    git("push origin main", team);
+    const srcMerge = git("rev-parse HEAD", team);
+
+    // Sync must fail, naming the source SHA, mapped parents, and required trailer.
+    const r2 = runCiSync(env);
+    assertEqual(r2.status, 1, "[recovery] sync fails on outer divergence");
+    assertIncludes(r2.stderr, "cannot auto-resolve replay parent tree", "[recovery] error names the failure");
+    assertIncludes(r2.stderr, srcMerge, "[recovery] error includes full source merge SHA");
+    assertIncludes(r2.stderr, newA, "[recovery] error includes mapped parent A");
+    assertIncludes(r2.stderr, newB, "[recovery] error includes mapped parent B");
+    assertIncludes(r2.stderr, `Shadow-replayed-${env.remoteName}: ${srcMerge}`, "[recovery] error includes required trailer");
+
+    // ── Manual reconciliation (operator follows the recipe in the error) ──
+    // Build a resolved tree: newA's tree (has frontend/base.ts, feat-a.ts,
+    // outer.txt) + newB's feat-b.ts + an operator-chosen outer.txt.
+    const baseShadow = git("rev-parse origin/shadow/frontend/main", local);
+    const idx = path.join(env.tmpDir, "idx-resolve");
+    const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
+    git(`read-tree "${newA}^{tree}"`, local, { env: idxEnv });
+    const featB = git(`rev-parse ${newB}:frontend/feat-b.ts`, local);
+    git(`update-index --add --cacheinfo 100644,${featB},frontend/feat-b.ts`, local, { env: idxEnv });
+    const outerBlob = git("hash-object -w --stdin", local, { input: "from-A+B\n" });
+    git(`update-index --add --cacheinfo 100644,${outerBlob},outer.txt`, local, { env: idxEnv });
+    const resolvedTree = git("write-tree", local, { env: idxEnv });
+    fs.rmSync(idx, { force: true });
+
+    const msgFile = path.join(env.tmpDir, "resolve-msg");
+    fs.writeFileSync(msgFile, `Manual resolution of ${srcMerge.slice(0, 7)}\n\nShadow-replayed-${env.remoteName}: ${srcMerge}\n`);
+    const resolveCommit = git(`commit-tree ${resolvedTree} -p ${baseShadow} -p ${newA} -p ${newB} -F "${msgFile}"`, local);
+    fs.rmSync(msgFile, { force: true });
+    git(`push origin ${resolveCommit}:refs/heads/shadow/frontend/main --force`, local);
+
+    // Next sync sees the trailer and treats the source merge as already replayed.
+    assertEqual(runCiSync(env).status, 0, "[recovery] sync succeeds after manual resolution");
+    git("fetch origin", local);
+    assertEqual(
+      git("rev-parse origin/shadow/frontend/main", local),
+      resolveCommit,
+      "[recovery] shadow main tip stays at the manual resolution",
+    );
+
+    // Content checks: operator's resolved outer survived, frontend has all features.
+    assertEqual(git(`show ${resolveCommit}:outer.txt`, local), "from-A+B", "[recovery] outer is operator's choice");
+    assertEqual(git(`show ${resolveCommit}:frontend/feat-a.ts`, local), "a", "[recovery] feat-a present in frontend");
+    assertEqual(git(`show ${resolveCommit}:frontend/feat-b.ts`, local), "b", "[recovery] feat-b present in frontend");
+    assertEqual(git(`show ${resolveCommit}:frontend/base.ts`, local), "base", "[recovery] base present in frontend");
+  } finally {
+    env.cleanup();
+  }
+}
+
 export default function run(): void {
   runMergeTopology();
   runEchoMapping();
@@ -563,6 +687,7 @@ export default function run(): void {
   runSquashRemoteBeforeSync();
   runSquashCrossRepoBroken();
   runSquashFeatureAbsorbsShadow();
+  runManualMergeRecovery();
 }
 
 if (require.main === module) {
