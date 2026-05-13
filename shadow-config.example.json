@@ -19,9 +19,5 @@
   },
 
   "maxBuffer": 52428800,
-  "shadowBranchPrefix": "shadow",
-
-  "copyPaths": [
-    { "paths": ["frontend/common", "backend/common"] }
-  ]
+  "shadowBranchPrefix": "shadow"
 }

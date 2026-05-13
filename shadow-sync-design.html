@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R6</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C9</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C6 are the major ones, C7&ndash;C9 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M8</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R7</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C10</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C7 are the major ones, C8&ndash;C10 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -251,6 +251,24 @@
   </p>
 </div>
 
+<div class="card" id="r7">
+  <h3><span class="ref ref-r">R7</span> A folder can be shared by more than one pair</h3>
+  <p>
+    Some content belongs to multiple leaves at once: a <code>common/</code> folder that the backend
+    and frontend both consume, code generated for both platforms, shared schemas. The monorepo
+    holds it at a single canonical path; each leaf carries a copy at its own canonical location
+    (which may be nested, e.g. <code>backend/src/evntcore/common/</code> on the backend leaf,
+    <code>frontend/src/app/common/</code> on the frontend leaf). Editing it on the monorepo must
+    reach both leaves; the monorepo must not end up with two copies (one per leaf) of the same
+    content.
+  </p>
+  <p>
+    Variant copies in leaf-specific paths (e.g. <code>edu-src/app/common/</code> overlays that
+    only the education build consumes) are <em>not</em> the shared content and must keep flowing
+    with the rest of the leaf as ordinary pair content.
+  </p>
+</div>
+
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- 2. DESIGN CHOICES                                                        -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -287,21 +305,27 @@
 </div>
 
 <div class="card" id="c3">
-  <h3><span class="ref ref-c">C3</span> Deduplicate replayed commits via git trailers, scoped by source remote</h3>
-  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r4">R4</a></p>
-  <p class="from"><strong>Rejected alternative:</strong> <code>git notes</code> (separate ref, easy to drop on a fresh clone); a sidecar mapping file outside git; or content-based dedup on tree SHAs (silently drops legitimate no-op commits).</p>
+  <h3><span class="ref ref-c">C3</span> Deduplicate replayed commits via git trailers, scoped by pair name and source remote</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r7">R7</a></p>
+  <p class="from"><strong>Rejected alternative:</strong> <code>git notes</code> (separate ref, easy to drop on a fresh clone); a sidecar mapping file outside git; or content-based dedup on tree SHAs (silently drops legitimate no-op commits); or trailer scoped only by source remote, with pair name left implicit (breaks <a class="ref ref-r" href="#r7">R7</a> &mdash; see below).</p>
   <p>
     Syncs have to converge to the same result
     under <a class="ref ref-r" href="#r4">R4</a>. Each replayed commit carries
-    <code>Shadow-replayed-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
+    <code>Shadow-replayed-&lt;pair&gt;-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
     target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
     map. Anything already present is skipped.<br>
     On round-trip echoes (a source commit that already carries a trailer originating from the target), find and use the original commit.
   </p>
   <p>
-    Scoping the trailer by source remote keeps <a class="ref ref-r" href="#r1">R1</a>
-    honest: two pairs that share a source remote can&rsquo;t step on each other&rsquo;s trailers,
-    because pair name and source remote together namespace the trailer.
+    Scoping the trailer by pair name <em>and</em> source remote keeps <a class="ref ref-r" href="#r1">R1</a>
+    and <a class="ref ref-r" href="#r7">R7</a> honest. Without the pair name, two pairs that share a source
+    remote (e.g. parent <code>backend</code> and dedicated <code>common-backend</code> from
+    <a class="ref ref-c" href="#c7">C7</a>, both with the same leaf URL) would emit identical trailer
+    keys. The trailer scan walks the shadow ref&rsquo;s full git history, which includes the sibling
+    pair&rsquo;s replays once a monorepo merge pulls them into shared lineage &mdash; those wrong-shape
+    commits would land in <code>shaMapping</code> and the engine would try to push a parent-pair-shape
+    commit onto a common-pair shadow ref, failing the FF check (<a class="ref ref-c" href="#c6">C6</a>).
+    Pair name in the trailer key isolates each pair&rsquo;s mapping cleanly.
   </p>
 </div>
 
@@ -362,23 +386,57 @@
   </p>
 </div>
 
-<h3 class="subsection">Minor choices</h3>
-<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C6. Listed briefly.</p>
+<div class="card" id="c7">
+  <h3><span class="ref ref-c">C7</span> Shared folders are dedicated sync pairs, not in-repo copies</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r7">R7</a></p>
+  <p class="from"><strong>Rejected alternatives:</strong> in-repo copy script that keeps <code>backend/common/</code> and <code>frontend/common/</code> in lockstep <em>inside</em> the monorepo (duplicates content on the monorepo &mdash; the very thing <a class="ref ref-r" href="#r7">R7</a> forbids &mdash; and forks the canonical merge-base into one per copy); symlinks (Git and Windows portability is unreliable &mdash; checkouts vary by platform, and CI runners on different OSes see different trees); a new top-level concept in the engine like &ldquo;shared paths&rdquo; that several pairs reference (adds a second mechanism on top of the pair abstraction, with its own merge semantics and bootstrap rules).</p>
+  <p>
+    A folder that needs to appear once on the monorepo and once on each leaf at the leaf&rsquo;s
+    canonical path is itself a synchronized directory pair &mdash; just one whose monorepo
+    <code>dir</code> coincides for several pairs. We add a dedicated pair per leaf, e.g.
+    <code>common-backend</code> mapping <code>main-repo:common/</code> &harr;
+    <code>backend-repo:src/evntcore/common/</code>, and <code>common-frontend</code> mapping
+    <code>main-repo:common/</code> &harr; <code>frontend-repo:src/app/common/</code>. The leaf side of
+    each common pair carries only the canonical content; everything else on the leaf flows through
+    the parent pair (<code>backend</code>, <code>frontend</code>) as before. To keep the parent
+    pair from also carrying the canonical content (which would put a copy under
+    <code>backend/src/evntcore/common/</code> on the monorepo &mdash; the R7 violation), the
+    parent pair&rsquo;s <code>.shadowignore</code> (<a class="ref ref-r" href="#r3">R3</a> &middot;
+    <a class="ref ref-c" href="#c9">C9</a>) excludes the canonical leaf path. Variant directories at non-canonical paths (e.g.
+    <code>backend-repo:eventus/edu-src/app/common/</code>) are <em>not</em> excluded and flow
+    through the parent pair like any other content, satisfying <a class="ref ref-r" href="#r7">R7</a>&rsquo;s
+    second half.
+  </p>
+  <p>
+    The choice reuses the existing pair abstraction with no new engine concept &mdash; nested
+    <code>dir</code> values (<code>src/evntcore/common</code>) were already supported as git
+    pathspecs in <code>rev-list</code> and as prefixes in <code>read-tree</code>, just never
+    exercised. The one place it forced engine change is trailer scoping
+    (<a class="ref ref-c" href="#c3">C3</a>): two pairs sharing a source remote (e.g.
+    <code>backend</code> and <code>common-backend</code>, both with leaf
+    URL = <code>backend-repo</code>) need the pair name in the trailer key, otherwise the
+    parent pair&rsquo;s replays appear in the common pair&rsquo;s shadow-ref history (via the
+    monorepo merge that combines them) and pollute the dedup map.
+  </p>
+</div>
 
-<div class="card compact" id="c7">
-  <h3><span class="ref ref-c">C7</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
+<h3 class="subsection">Minor choices</h3>
+<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C7. Listed briefly.</p>
+
+<div class="card compact" id="c8">
+  <h3><span class="ref ref-c">C8</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r2">R2</a>. <strong>Rejected:</strong> separate push/pull scripts, or a primary/secondary model where one side is source-of-truth.</p>
   <p>One code path, tested once, serves both directions; push and pull can&rsquo;t drift out of sync. Direction is chosen at the command line with <code>--from a</code> or <code>--from b</code>.</p>
 </div>
 
-<div class="card compact" id="c8">
-  <h3><span class="ref ref-c">C8</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
+<div class="card compact" id="c9">
+  <h3><span class="ref ref-c">C9</span> <code>.shadowignore</code> is read from the source commit&rsquo;s tree, not the current checkout</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r3">R3</a> &middot; <a class="ref ref-r" href="#r4">R4</a>. <strong>Rejected:</strong> read from the current checkout at sync time; or from a single pinned ref (e.g. always <code>main</code>).</p>
-  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter on the monorepo side is just a normal commit, not a config redeploy. The engine reads <code>.shadowignore</code> from whichever side is exporting in a given direction; in practice <a class="ref ref-r" href="#r3">R3</a> only mandates the monorepo-side filter, but the symmetric implementation costs nothing extra and keeps the code path uniform under <a class="ref ref-c" href="#c7">C7</a>.</p>
+  <p>Every replay reads the ignore rules exactly as they were at that commit &mdash; deterministic under retry. Updating the filter on the monorepo side is just a normal commit, not a config redeploy. The engine reads <code>.shadowignore</code> from whichever side is exporting in a given direction; in practice <a class="ref ref-r" href="#r3">R3</a> only mandates the monorepo-side filter, but the symmetric implementation costs nothing extra and keeps the code path uniform under <a class="ref ref-c" href="#c8">C8</a>.</p>
 </div>
 
-<div class="card compact" id="c9">
-  <h3><span class="ref ref-c">C9</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
+<div class="card compact" id="c10">
+  <h3><span class="ref ref-c">C10</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
   <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
 </div>
@@ -988,7 +1046,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> One bug fix covers both directions</h3>
-  <p class="from">From <a class="ref ref-c" href="#c7">C7</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c8">C8</a></p>
   <p>
     Symmetric <code>a</code>/<code>b</code> means push and pull are the same code. A regression
     found on one direction is fixed on both at once; a test that covers pull covers almost all of
@@ -999,7 +1057,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
 <div class="card">
   <h3><span class="tag tag-green">+</span> Retroactive <code>.shadowignore</code> changes work without ceremony</h3>
-  <p class="from">From <a class="ref ref-c" href="#c8">C8</a></p>
+  <p class="from">From <a class="ref ref-c" href="#c9">C9</a></p>
   <p>
     Because the filter is read out of the source commit&rsquo;s tree, adding an entry to
     <code>.shadowignore</code> takes effect on the next sync without touching config, CI, or the
