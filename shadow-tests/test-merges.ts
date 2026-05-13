@@ -349,7 +349,7 @@ function runPushMergeSkippedParents(): void {
 
     assertEqual(shadowTipParents.length, 2, `[skipped-parents shadow] M6' has 2 parents (got ${shadowTipParents.length})`);
 
-    const trailerKey = `Shadow-replayed-origin`;
+    const trailerKey = `Shadow-replayed-${env.subdir}-origin`;
     const shadowLogFull = getExternalShadowLogFull(env, 50);
     const mapping = new Map<string, string>();
     {
@@ -637,7 +637,7 @@ function runManualMergeRecovery(): void {
     assertIncludes(r2.stderr, srcMerge, "[recovery] error includes full source merge SHA");
     assertIncludes(r2.stderr, newA, "[recovery] error includes mapped parent A");
     assertIncludes(r2.stderr, newB, "[recovery] error includes mapped parent B");
-    assertIncludes(r2.stderr, `Shadow-replayed-${env.remoteName}: ${srcMerge}`, "[recovery] error includes required trailer");
+    assertIncludes(r2.stderr, `Shadow-replayed-${env.subdir}-${env.remoteName}: ${srcMerge}`, "[recovery] error includes required trailer");
 
     // ── Manual reconciliation (operator follows the recipe in the error) ──
     // Build a resolved tree: newA's tree (has frontend/base.ts, feat-a.ts,
@@ -654,7 +654,7 @@ function runManualMergeRecovery(): void {
     fs.rmSync(idx, { force: true });
 
     const msgFile = path.join(env.tmpDir, "resolve-msg");
-    fs.writeFileSync(msgFile, `Manual resolution of ${srcMerge.slice(0, 7)}\n\nShadow-replayed-${env.remoteName}: ${srcMerge}\n`);
+    fs.writeFileSync(msgFile, `Manual resolution of ${srcMerge.slice(0, 7)}\n\nShadow-replayed-${env.subdir}-${env.remoteName}: ${srcMerge}\n`);
     const resolveCommit = git(`commit-tree ${resolvedTree} -p ${baseShadow} -p ${newA} -p ${newB} -F "${msgFile}"`, local);
     fs.rmSync(msgFile, { force: true });
     git(`push origin ${resolveCommit}:refs/heads/shadow/frontend/main --force`, local);

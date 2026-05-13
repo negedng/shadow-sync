@@ -225,7 +225,7 @@ function runPushContent(env1: ReturnType<typeof createTestEnv>): void {
     commitOnLocal(
       env1,
       { "lit-trailer.ts": "export const lit = 1;\n" },
-      `Refactor referencing Shadow-replayed-${env1.remoteName}: abc1234`,
+      `Refactor referencing Shadow-replayed-${env1.subdir}-${env1.remoteName}: abc1234`,
     );
     const r5 = runPush(env1);
     assertEqual(r5.status, 0, "[push-content 5: literal-trailer] push should succeed");

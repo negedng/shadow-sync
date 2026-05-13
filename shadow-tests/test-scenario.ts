@@ -99,9 +99,11 @@ function assertRefAbsent(repo: Repo, ref: string, msg: string) {
   if (refExists(repo, ref)) throw new Error(`${msg}: ref ${ref} should NOT exist`);
 }
 
-/** Find a shadow replay by its trailer. Returns the replay SHA or null. */
+/** Find a shadow replay by its trailer. Returns the replay SHA or null.
+ *  Pair name is parsed from branchRef ("<remote>/shadow/<pair>/<branch>"). */
 function findReplay(repo: Repo, branchRef: string, sourceRemoteName: string, sourceSha: string): string | null {
-  const trailer = `Shadow-replayed-${sourceRemoteName}: ${sourceSha}`;
+  const pairName = branchRef.split("/")[2];
+  const trailer = `Shadow-replayed-${pairName}-${sourceRemoteName}: ${sourceSha}`;
   let log: string;
   try {
     log = execSync(`git log ${branchRef} --format=%H%n%B%n---END---`, {

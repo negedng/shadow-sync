@@ -96,8 +96,8 @@ function runMultiRepo(): void {
     assertEqual(r4a.status, 0, "[multi-repo 4] sync from b should succeed");
 
     const pullLog = getShadowLogFull(env2);
-    assertIncludes(pullLog, `Shadow-replayed-${env2.remoteName}:`, "[multi-repo 4] pull has b's remote trailer");
-    assertNotIncludes(pullLog, "Shadow-replayed-origin:", "[multi-repo 4] pull must NOT have a's trailer (would cascade)");
+    assertIncludes(pullLog, `Shadow-replayed-${env2.subdir}-${env2.remoteName}:`, "[multi-repo 4] pull has b's remote trailer");
+    assertNotIncludes(pullLog, `Shadow-replayed-${env2.subdir}-origin:`, "[multi-repo 4] pull must NOT have a's trailer (would cascade)");
 
     mergeShadow(env2);
     commitOnLocal(env2, { "local.ts": "from a\n" }, "Add local from A");
@@ -105,8 +105,8 @@ function runMultiRepo(): void {
     assertEqual(r4b.status, 0, "[multi-repo 4] sync from a should succeed");
 
     const pushLog = getExternalShadowLogFull(env2);
-    assertIncludes(pushLog, "Shadow-replayed-origin:", "[multi-repo 4] push has a's remote trailer");
-    assertNotIncludes(pushLog, `Shadow-replayed-${env2.remoteName}:`, "[multi-repo 4] push must NOT have b's trailer (would cascade)");
+    assertIncludes(pushLog, `Shadow-replayed-${env2.subdir}-origin:`, "[multi-repo 4] push has a's remote trailer");
+    assertNotIncludes(pushLog, `Shadow-replayed-${env2.subdir}-${env2.remoteName}:`, "[multi-repo 4] push must NOT have b's trailer (would cascade)");
   } finally {
     env2.cleanup();
   }

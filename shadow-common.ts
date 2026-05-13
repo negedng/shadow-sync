@@ -184,13 +184,18 @@ function sanitizeTrailerToken(s: string): string {
   return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
-function replayedTrailerKey(remote: string): string {
-  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(remote)}`;
+// Pair name is included so two pairs sharing a source remote (e.g. parent pair
+// `backend` and dedicated common pair `common-backend`, both with b.remote =
+// "backend-repo") get distinct trailers. Without it, scanning a shadow ref's
+// history would match the sibling pair's replays brought in via cross-pair
+// merges on the monorepo, polluting shaMapping with the wrong-shape replay.
+function replayedTrailerKey(pairName: string, remote: string): string {
+  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(`${pairName}-${remote}`)}`;
 }
 
-/** Build a regex to match replay trailers: Shadow-replayed-{remote}: {hash} */
-function replayedTrailerRegex(remote: string): RegExp {
-  return new RegExp(`^${escapeRegex(replayedTrailerKey(remote))}:\\s*([0-9a-f]{7,40})`);
+/** Build a regex to match replay trailers: Shadow-replayed-{pair}-{remote}: {hash} */
+function replayedTrailerRegex(pairName: string, remote: string): RegExp {
+  return new RegExp(`^${escapeRegex(replayedTrailerKey(pairName, remote))}:\\s*([0-9a-f]{7,40})`);
 }
 
 export function appendTrailer(message: string, trailer: string): string {
@@ -248,12 +253,12 @@ interface DirectionConfig {
   skipScanRe: RegExp;
 }
 
-function buildDirectionConfig(sourceRemote: string, targetRemote: string): DirectionConfig {
+function buildDirectionConfig(pairName: string, sourceRemote: string, targetRemote: string): DirectionConfig {
   return {
-    addTrailerKey: replayedTrailerKey(sourceRemote),
-    scanRe: replayedTrailerRegex(sourceRemote),
-    skipTrailerKey: replayedTrailerKey(targetRemote),
-    skipScanRe: replayedTrailerRegex(targetRemote),
+    addTrailerKey: replayedTrailerKey(pairName, sourceRemote),
+    scanRe: replayedTrailerRegex(pairName, sourceRemote),
+    skipTrailerKey: replayedTrailerKey(pairName, targetRemote),
+    skipScanRe: replayedTrailerRegex(pairName, targetRemote),
   };
 }
 
@@ -674,7 +679,7 @@ function formatUnresolvableMergeError(opts: {
   const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
   const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
-  const trailer = `${replayedTrailerKey(source.remote)}: ${commit.hash}`;
+  const trailer = `${replayedTrailerKey(pair.name, source.remote)}: ${commit.hash}`;
 
   const shortHash = commit.hash.slice(0, 7);
   return [
@@ -999,7 +1004,7 @@ export function mirrorHistory(opts: {
   const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
-  const dc = buildDirectionConfig(source.remote, target.remote);
+  const dc = buildDirectionConfig(pair.name, source.remote, target.remote);
 
   console.log("Scanning history for already-replayed commits...");
   const shaMapping = loadReplayedMappings({ pair, target, branches, dc });
