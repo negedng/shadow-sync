@@ -790,10 +790,11 @@ function filterNotReplayedCommits(
   // mergeMappedParentTrees splice — once a sibling pair's outer state lands in
   // a shared shadow merge, those cross-pair commits show up in path-filtered
   // rev-list and would otherwise be replayed onto OUR pair's shadow as foreign
-  // ancestry that doesn't fast-forward the existing tip. Drop them. The
-  // content they carry is already accounted for via the original-source
-  // commit's echo mapping (e.g. Mr1'_be's outer comes from Mr1 on monorepo,
-  // not from any frontend echo).
+  // ancestry that doesn't fast-forward the existing tip. Drop them — the
+  // underlying source-side commit (e.g. Mr1 for Mr1'_be) is itself in our
+  // rev-list and will be replayed normally on our pair's shadow, with
+  // mergeMappedParentTrees re-doing whatever sibling-echo outer splicing the
+  // cross-pair shadow merge captured.
   const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
   return allCommits.filter(c => {
     if (shaMapping.has(c.hash)) return false;
