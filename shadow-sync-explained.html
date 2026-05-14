@@ -1239,6 +1239,27 @@ Out: null  (no inner/outer split — caller uses plain merge logic)</code></pre>
 </div>
 
 <div class="card fn-card">
+<h4><code>composeSquashedMergeTree({ mm, bm, targetDir }): string</code></h4>
+<p>B&prime; conflict-squash composition. Splice <code>Bm</code>&rsquo;s tree at <code>targetDir/</code> over <code>Mm</code>&rsquo;s outer files &mdash; outer (everything outside <code>targetDir/</code>) comes from the operator&rsquo;s in-repo merge resolution; inner (under <code>targetDir/</code>) comes verbatim from the failing source merge. When <code>targetDir</code> is empty, source and target share file layout, so <code>Mm</code>&rsquo;s tree alone is the resolution. Called only from the replay-loop fast path when <code>findResolutionCandidate</code> returns a candidate.</p>
+<pre><code>The Bm case from local_tests/conflict_squash — backend repo merges
+project into core-dev (Bm) with outer state that diverges from the
+monorepo-side mapped parents. Operator does `git merge project` on
+M.core-dev to resolve the outer; Mm carries that resolution.
+
+In:  mm = Mm (M-side merge of project into core-dev)
+     bm = Bm (source merge that the engine couldn't auto-replay)
+     targetDir = "backend"
+Out: tree-SHA with Mm's outer (frontend.txt, etc.)
+                 ⊕ Bm's content spliced in at backend/
+     This becomes sq's tree verbatim — buildReplayedTree is NOT
+     called on top (that would re-apply Bm's diff and reintroduce
+     the outer conflict the engine just gave up on).
+
+In:  targetDir = "" (source and target share layout, e.g. monorepo→backend)
+Out: Mm.tree (no outer/inner split; B-basic semantics)</code></pre>
+</div>
+
+<div class="card fn-card">
 <h4><code>mergeMappedParentTrees({ mappedParents, commitShort, targetDir }): string | null</code></h4>
 <p>Pick a parent-tree base when no cross-repo splice fires. 1 parent → that tree; 2 parents → <code>git merge-tree</code>; ≥3 parents or merge-tree conflict → outer-agreement check (if every parent has identical content outside <code>targetDir/</code>, splice <code>[0]</code>&rsquo;s inner over the shared outer). Returns null if outers diverge &mdash; caller fails with the unresolvable-merge recipe.</p>
 <pre><code>In:  mappedParents = [Bc3']
@@ -1272,7 +1293,7 @@ Out: null</code></pre>
 
 <div class="card fn-card">
 <h4><code>formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }): string</code></h4>
-<p>Build the operator recipe printed when <code>mergeMappedParentTrees</code> returns null. Names the divergent parents, the required trailer, and copy-pasteable shell commands.</p>
+<p>Build the operator recipe printed when <code>mergeMappedParentTrees</code> returns null and no B&prime; candidate is available. Names the divergent parents, the required trailer, and copy-pasteable shell commands for Approach A (hand-build a resolution commit on the shadow ref).</p>
 <pre><code>In:  octopus merge with 3 mapped parents on monorepo,
      source = team repo, target = monorepo (target.dir="backend"),
      pair.name = "backend"
@@ -1284,6 +1305,32 @@ Out: multi-line string starting "abc1234: cannot auto-resolve replay parent tree
 In:  2-parent merge-tree conflict, source branch is ambiguous (in &gt;1 branch)
 Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
      instead of an inferred name</code></pre>
+</div>
+
+<div class="card fn-card">
+<h4><code>findResolutionCandidate({ commit, mappedParents, source, target, pair, using }): { mm, ambiguous, candidates, intoBranch }</code></h4>
+<p>B&prime; auto-detect. When <code>mergeMappedParentTrees</code> returns null and the <code>SHADOW_ALLOW_COMPOSED_SQUASH=1</code> flag is set, scan <code>target.remote/&lt;into-branch&gt;</code> for a 2-parent merge whose tree resolves the conflict. Bm&rsquo;s &ldquo;into&rdquo; branch is the one containing Bm itself; the &ldquo;from&rdquo; branch is the one containing <code>parents[1]</code> but not Bm. Candidate Mm must be a 2-parent merge on the target mirror of the into branch, not on this pair&rsquo;s shadow ref (so engine-replayed commits are excluded), with <code>Mm.parents[1]</code> reachable from the target mirror of the from branch. <code>using</code> filters by operator-supplied SHA prefixes for the ambiguous case.</p>
+<pre><code>In:  commit = Bm (BE merged project→core-dev with outer-divergent state)
+     mappedParents = [Bcm', Bpm'] on M
+     source = backend-repo, target = monorepo, pair.name = "backend"
+     using = []
+     Operator has run `git merge project` on M.core-dev, creating Mm
+     (only new 2-parent merge on origin/core-dev since last sync)
+Out: { mm: &lt;Mm sha&gt;, ambiguous: false,
+       candidates: [&lt;Mm sha&gt;], intoBranch: "core-dev" }
+
+In:  Operator made two unrelated 2-parent merges on M.core-dev that both
+     satisfy the shape check (parents[1] reachable from origin/project)
+Out: { mm: null, ambiguous: true,
+       candidates: [&lt;mm1&gt;, &lt;mm2&gt;], intoBranch: "core-dev" }
+     Caller fails with disambiguation prompt naming both SHAs.
+
+In:  No operator merge yet (target tip equals shadow tip)
+Out: { mm: null, ambiguous: false, candidates: [], intoBranch: "core-dev" }
+     Caller falls through to formatUnresolvableMergeError.
+
+In:  using = ["abc1234"], two candidates exist; one starts with "abc1234"
+Out: { mm: &lt;full sha starting abc1234&gt;, ambiguous: false, ... }</code></pre>
 </div>
 
 <h3 class="fn-group">Parent resolution</h3>
@@ -1388,8 +1435,8 @@ Out: Map { "project" → "Bt3'", "core-dev" → "Bc4'" }</code></pre>
 <h3 class="fn-group">Orchestration</h3>
 
 <div class="card fn-card">
-<h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair }): void</code></h4>
-<p>The replay loop. For each commit: resolve parents → build/merge parent tree → run <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Throws via <code>formatUnresolvableMergeError</code> when mapped parents have divergent outer state.</p>
+<h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, using }): void</code></h4>
+<p>The replay loop. For each commit: resolve parents → build/merge parent tree → run <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. When <code>mergeMappedParentTrees</code> returns null and <code>SHADOW_ALLOW_COMPOSED_SQUASH=1</code> is set, attempts the B&prime; fast path (<code>findResolutionCandidate</code> → <code>composeSquashedMergeTree</code> → emit sq directly, bypassing <code>buildReplayedTree</code>) before falling through to <code>formatUnresolvableMergeError</code>. <code>using</code> carries operator-supplied Mm SHAs for ambiguity disambiguation.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
      targetInit = monorepo's init; source.dir = ""; target.dir = "backend"
 Out: void; shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
@@ -1405,7 +1452,7 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
 </div>
 
 <div class="card fn-card">
-<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches }): { mirrored, branchMapping, shaMapping, upToDate }</code></h4>
+<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches, using? }): { mirrored, branchMapping, shaMapping, upToDate }</code></h4>
 <p>The replay engine&rsquo;s public entry point. Composes <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>collectNeededCandidates</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction.</p>
 <pre><code>In:  Fresh bootstrap of the backend pair, --from b
      (backend repo has commits Bc0..Bc4, Br1..Br2, Bt1..Bt3, Bf1;

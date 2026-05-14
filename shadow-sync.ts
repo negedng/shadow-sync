@@ -26,6 +26,8 @@ export interface SyncOptions {
   pair?: string;
   from?: "a" | "b";
   branch?: string;
+  /** Operator-supplied Mm SHA(s) for B' disambiguation (see findResolutionCandidate). */
+  using?: string[];
 }
 
 export interface SyncResult {
@@ -133,6 +135,7 @@ function _runSyncCore(options: SyncOptions): number {
         pair,
         from: fromSide,
         branches: validBranches,
+        using: options.using ?? [],
       });
 
       // Update shadow branches on target's remote
@@ -241,6 +244,7 @@ if (require.main === module) {
       remote: { type: "string", short: "r" },  // alias for --pair
       from:   { type: "string", short: "f" },
       branch: { type: "string", short: "b" },
+      using:  { type: "string", multiple: true },
     },
     strict: true,
   });
@@ -249,6 +253,7 @@ if (require.main === module) {
     pair: values.pair ?? values.remote,
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch,
+    using: values.using,
   });
 
   if (result.stdout) process.stdout.write(result.stdout + "\n");
