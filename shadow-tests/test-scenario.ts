@@ -1,3 +1,11 @@
+/**
+ * test-scenario.ts — full scenario.md walkthrough (sht5 + sht6 + sht7).
+ *
+ * Each scenario is a self-contained function; default export runs all three sequentially.
+ *   sht5 (runSht5) — main multi-pair scenario with multi-branch fan-in/out.
+ *   sht6 (runSht6) — dedicated common-pair mechanism + B′ recovery on project branches.
+ *   sht7 (runSht7) — B′ composed-squash on a single backend pair (5 sub-tests).
+ */
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
@@ -5,13 +13,7 @@ import * as path from "path";
 import { runSync } from "../shadow-sync";
 import { applyTestOverrides } from "../shadow-common";
 import { assertEqual } from "./assert";
-
-/**
- * Walks the full scenario in scenario.md. The branch named "main" here stands
- * in for "core-dev" — the engine's targetInit lookup is hard-coded to
- * `${target.remote}/main`, so we use that name instead of core-dev. Topology
- * matches scenario.md.
- */
+import { createTestEnv, runCiSync, runPush, TestEnv } from "./harness";
 
 // ── Setup helpers ────────────────────────────────────────────────────────────
 
@@ -183,6 +185,29 @@ function monoTree(outer: Record<string, string>, be: Record<string, string>, fe:
   return result;
 }
 
+function pathExists(repo: Repo, ref: string, p: string): boolean {
+  return listTreePaths(repo, ref).includes(p);
+}
+
+function assertPathPresent(repo: Repo, ref: string, p: string, label: string) {
+  if (!pathExists(repo, ref, p)) {
+    throw new Error(`${label}: expected path ${p} to be present at ${ref}; tree:\n  ${listTreePaths(repo, ref).join("\n  ")}`);
+  }
+}
+
+function assertPathAbsent(repo: Repo, ref: string, p: string, label: string) {
+  if (pathExists(repo, ref, p)) {
+    throw new Error(`${label}: expected path ${p} to be ABSENT at ${ref}; tree includes it`);
+  }
+}
+
+function assertContent(repo: Repo, ref: string, p: string, expected: string, label: string) {
+  const actual = readAtRef(repo, ref, p);
+  if (actual !== expected) {
+    throw new Error(`${label}: ${p} content mismatch\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+  }
+}
+
 // ── Predicted file content constants ─────────────────────────────────────────
 // Backend repo trees (no prefix — bare backend layout)
 const BE_BC0 = { "src/init.txt": "init\n" };
@@ -230,9 +255,8 @@ const OUTER_MC4 = { ".claude/settings.json": "{}\n", "README.md": "# Monorepo (M
 
 const EMPTY: Record<string, string> = {};
 
-// ── Main test ────────────────────────────────────────────────────────────────
-
-export default function run() {
+// ── sht5: full multi-pair scenario ──────────────────────────────────────────
+function runSht5() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-test-scenario-"));
 
   try {
@@ -957,7 +981,741 @@ export default function run() {
   }
 }
 
+// ── sht6: common pairs + B′ on project branches ─────────────────────────────
+function runSht6() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-test-common-"));
+
+  try {
+    const backend  = createRepo(tmpDir, "backend",  { email: "bea@example.com",  name: "Bea"  });
+    const frontend = createRepo(tmpDir, "frontend", { email: "fred@example.com", name: "Fred" });
+    const mono     = createRepo(tmpDir, "mono",     { email: "mira@example.com", name: "Mira" });
+
+    git(`remote add backend "${backend.bare}"`, mono.working);
+    git(`remote add frontend "${frontend.bare}"`, mono.working);
+
+    // ── Phase 0: Mature backend (Bc0) — common pre-existing at canonical path
+    // .shadowignore at root excludes src/evntcore/common/ so the parent pair
+    // never carries it (in either direction — see scenario.md A13).
+    const Bc0 = commitFiles(backend, {
+      "src/init.txt": "init\n",
+      "src/evntcore/common/util.ts": "util v1\n",
+      ".shadowignore": "src/evntcore/common/**\n",
+    }, "Bc0");
+    git("push origin main", backend.working);
+
+    // ── Phase 0: Mature frontend (Fc0) — mirror; common util byte-identical
+    const Fc0 = commitFiles(frontend, {
+      "src/init.txt": "init\n",
+      "src/app/common/util.ts": "util v1\n",
+      ".shadowignore": "src/app/common/**\n",
+    }, "Fc0");
+    git("push origin main", frontend.working);
+
+    // ── Phase 0: Init monorepo (Mc0) — parent shadowignores AND common/ pre-populated
+    // byte-identical to leaves (see scenario.md A15).
+    const Mc0 = commitFiles(mono, {
+      "README.md": "# Monorepo\n",
+      ".claude/settings.json": "{}\n",
+      "backend/.shadowignore": "src/evntcore/common/**\n",
+      "frontend/.shadowignore": "src/app/common/**\n",
+      "common/util.ts": "util v1\n",
+    }, "Mc0");
+    git("push origin main", mono.working);
+
+    // 4-pair config: parent + dedicated common pairs, nested dir on the leaf side.
+    applyTestOverrides({
+      repoRoot: mono.working,
+      pairs: [
+        { name: "backend",         a: { remote: "origin", url: mono.bare, dir: "backend"  }, b: { remote: "backend",  url: backend.bare,  dir: "" } },
+        { name: "frontend",        a: { remote: "origin", url: mono.bare, dir: "frontend" }, b: { remote: "frontend", url: frontend.bare, dir: "" } },
+        { name: "common-backend",  a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "backend",  url: backend.bare,  dir: "src/evntcore/common"   } },
+        { name: "common-frontend", a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "frontend", url: frontend.bare, dir: "src/app/common"        } },
+      ],
+      shadowBranchPrefix: "shadow",
+    });
+    void Bc0; void Fc0; void Mc0;
+
+    // ── Phase 1: Initial sync --from b ──────────────────────────────────────
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 1] --from b initial sync: ${r.stderr.slice(0, 400)}`);
+    }
+
+    git("fetch origin", mono.working);
+    // Shadow refs on monorepo are monorepo-shaped: leaf content is spliced under
+    // the target dir, monorepo's bootstrap tree (Mc0) provides everything else.
+    // Parent-pair shadow refs: canonical common excluded by .shadowignore.
+    assertPathPresent(mono, "origin/shadow/backend/main",  "backend/src/init.txt",      "[Phase 1 backend shadow]");
+    assertPathPresent(mono, "origin/shadow/backend/main",  "backend/.shadowignore",     "[Phase 1 backend shadow] .shadowignore itself flows");
+    assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/evntcore/common/util.ts", "[Phase 1 backend shadow] canonical common excluded");
+    assertPathPresent(mono, "origin/shadow/frontend/main", "frontend/src/init.txt",     "[Phase 1 frontend shadow]");
+    assertPathAbsent(mono,  "origin/shadow/frontend/main", "frontend/src/app/common/util.ts", "[Phase 1 frontend shadow] canonical common excluded");
+    // Common-pair shadow refs: canonical common content under "common/" prefix.
+    assertPathPresent(mono, "origin/shadow/common-backend/main",  "common/util.ts", "[Phase 1 common-backend shadow] util.ts under common/");
+    assertContent(mono, "origin/shadow/common-backend/main", "common/util.ts", "util v1\n", "[Phase 1 common-backend shadow]");
+    assertPathPresent(mono, "origin/shadow/common-frontend/main", "common/util.ts", "[Phase 1 common-frontend shadow] util.ts under common/");
+    assertContent(mono, "origin/shadow/common-frontend/main", "common/util.ts", "util v1\n", "[Phase 1 common-frontend shadow]");
+    // Common-pair shadow refs must NOT carry non-common leaf content (e.g. src/init.txt).
+    assertPathAbsent(mono, "origin/shadow/common-backend/main",  "backend/src/init.txt", "[Phase 1 common-backend shadow] no non-common leaf content");
+    assertPathAbsent(mono, "origin/shadow/common-frontend/main", "frontend/src/init.txt", "[Phase 1 common-frontend shadow] no non-common leaf content");
+
+    // ── Phase 1b: Merge shadow refs into monorepo main ──────────────────────
+    // Order: backend → common-backend → frontend → common-frontend.
+    // The second common merge is a no-op (same byte content from byte-identical leaves).
+    const Mcm1 = mergeRef(mono, "origin/shadow/backend/main",         "Mcm1");
+    const Mcm2 = mergeRef(mono, "origin/shadow/common-backend/main",  "Mcm2");
+    const Mcm3 = mergeRef(mono, "origin/shadow/frontend/main",        "Mcm3");
+    const Mcm4 = mergeRef(mono, "origin/shadow/common-frontend/main", "Mcm4");
+    git("push origin main", mono.working);
+    void Mcm1; void Mcm2; void Mcm3;
+
+    // Mcm4 is the post-init monorepo state. Verify the layout matches the design:
+    // root common/, no nested canonical common under backend/ or frontend/.
+    assertPathPresent(mono, Mcm4, "common/util.ts", "[Phase 1 monorepo state] common/ at root");
+    assertContent(mono, Mcm4, "common/util.ts", "util v1\n", "[Phase 1 monorepo state]");
+    assertPathPresent(mono, Mcm4, "backend/src/init.txt", "[Phase 1 monorepo state] backend/ slice");
+    assertPathPresent(mono, Mcm4, "frontend/src/init.txt", "[Phase 1 monorepo state] frontend/ slice");
+    assertPathAbsent(mono, Mcm4, "backend/src/evntcore/common/util.ts", "[Phase 1 monorepo state] no nested canonical common under backend/");
+    assertPathAbsent(mono, Mcm4, "frontend/src/app/common/util.ts", "[Phase 1 monorepo state] no nested canonical common under frontend/");
+
+    // Leaves still hold their canonical common (sync did not touch them).
+    assertContent(backend,  "main", "src/evntcore/common/util.ts", "util v1\n", "[Phase 1] backend canonical common preserved");
+    assertContent(frontend, "main", "src/app/common/util.ts",      "util v1\n", "[Phase 1] frontend canonical common preserved");
+
+    // ── Phase 2: Monorepo-sourced common edit reaches both leaves ───────────
+    const Mcm5 = commitFiles(mono, { "common/util.ts": "util v2\n" }, "Mcm5");
+    git("push origin main", mono.working);
+    void Mcm5;
+
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 2] --from a after Mcm5: ${r.stderr.slice(0, 400)}`);
+    }
+
+    // Each leaf merges its dedicated common shadow ref to land the v2 update at
+    // its own canonical path.
+    git("fetch origin", backend.working);
+    const Bcm1 = mergeRef(backend, "origin/shadow/common-backend/main", "Bcm1");
+    git("push origin main", backend.working);
+    git("fetch origin", frontend.working);
+    const Fcm1 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm1");
+    git("push origin main", frontend.working);
+
+    assertContent(backend,  Bcm1, "src/evntcore/common/util.ts", "util v2\n", "[Phase 2] backend canonical = v2");
+    assertContent(frontend, Fcm1, "src/app/common/util.ts",      "util v2\n", "[Phase 2] frontend canonical = v2");
+    // Confirm v2 did NOT land at the leaves' roots or under unexpected paths.
+    assertPathAbsent(backend,  Bcm1, "common/util.ts",    "[Phase 2] backend has no root-level common/");
+    assertPathAbsent(backend,  Bcm1, "src/common/util.ts","[Phase 2] backend has no src/common/");
+    assertPathAbsent(frontend, Fcm1, "common/util.ts",    "[Phase 2] frontend has no root-level common/");
+    assertPathAbsent(frontend, Fcm1, "src/common/util.ts","[Phase 2] frontend has no src/common/");
+
+    // ── Phase 3: Cross-cutting commit — each pair carries its own slice ─────
+    const Mcm6 = commitFiles(mono, {
+      "common/util.ts":            "util v3\n",
+      "backend/src/api.ts":        "api v1\n",
+      "frontend/src/component.ts": "component v1\n",
+    }, "Mcm6");
+    git("push origin main", mono.working);
+    void Mcm6;
+
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 3] --from a after Mcm6: ${r.stderr.slice(0, 400)}`);
+    }
+
+    git("fetch origin", backend.working);
+    const Bcm2 = mergeRef(backend, "origin/shadow/backend/main",        "Bcm2");
+    const Bcm3 = mergeRef(backend, "origin/shadow/common-backend/main", "Bcm3");
+    git("push origin main", backend.working);
+    void Bcm2;
+
+    git("fetch origin", frontend.working);
+    const Fcm2 = mergeRef(frontend, "origin/shadow/frontend/main",        "Fcm2");
+    const Fcm3 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm3");
+    git("push origin main", frontend.working);
+    void Fcm2;
+
+    assertPathPresent(backend, Bcm3, "src/api.ts", "[Phase 3] backend got api.ts via parent pair");
+    assertContent(backend, Bcm3, "src/api.ts", "api v1\n", "[Phase 3] backend api.ts content");
+    assertContent(backend, Bcm3, "src/evntcore/common/util.ts", "util v3\n", "[Phase 3] backend canonical common = v3");
+    assertPathAbsent(backend, Bcm3, "src/component.ts", "[Phase 3] frontend slice did NOT leak to backend");
+
+    assertPathPresent(frontend, Fcm3, "src/component.ts", "[Phase 3] frontend got component.ts via parent pair");
+    assertContent(frontend, Fcm3, "src/component.ts", "component v1\n", "[Phase 3] frontend component.ts content");
+    assertContent(frontend, Fcm3, "src/app/common/util.ts", "util v3\n", "[Phase 3] frontend canonical common = v3");
+    assertPathAbsent(frontend, Fcm3, "src/api.ts", "[Phase 3] backend slice did NOT leak to frontend");
+
+    // ── Phase 4: Variant non-interference ───────────────────────────────────
+    // A file under backend/eventus/edu-src/app/common/ is a *variant* common file.
+    // It must flow via the parent pair (because it's outside src/evntcore/common/),
+    // and it must NOT appear in the common pair's shadow chain or in monorepo/common/.
+    const Mcm7 = commitFiles(mono, {
+      "backend/eventus/edu-src/app/common/variant-only.ts": "variant only\n",
+    }, "Mcm7");
+    git("push origin main", mono.working);
+    void Mcm7;
+
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 4] --from a after Mcm7: ${r.stderr.slice(0, 400)}`);
+    }
+
+    git("fetch origin", backend.working);
+    const Bcm4 = mergeRef(backend, "origin/shadow/backend/main", "Bcm4");
+    git("push origin main", backend.working);
+
+    // Variant file landed via the parent pair, in its variant directory.
+    assertContent(backend, Bcm4, "eventus/edu-src/app/common/variant-only.ts", "variant only\n",
+      "[Phase 4] variant file landed at variant path via parent pair");
+    // Canonical common is unchanged by the variant addition.
+    assertContent(backend, Bcm4, "src/evntcore/common/util.ts", "util v3\n",
+      "[Phase 4] canonical common still at v3, variant did not leak in");
+
+    // The common pair must not have picked up the variant file. On the
+    // common-backend shadow (mono-shaped), the leaf's src/evntcore/common/
+    // content is spliced under "common/" — a variant-only.ts under "common/"
+    // there would indicate leakage.
+    git("fetch origin", mono.working);
+    assertPathAbsent(mono, "origin/shadow/common-backend/main", "common/variant-only.ts",
+      "[Phase 4] variant file did NOT leak into common-backend shadow");
+
+    // monorepo/common/ must not gain variant-only.ts (the strict mapping invariant).
+    // Re-fetch and check the post-Mcm7 main tip's tree.
+    git("fetch origin", mono.working);
+    const monoMainTip = git("rev-parse origin/main", mono.working);
+    assertPathAbsent(mono, monoMainTip, "common/variant-only.ts",
+      "[Phase 4] variant file is NOT visible at monorepo/common/ — strict alias invariant");
+
+    // ── Phase 5: Convergence after stray leaf edit ──────────────────────────
+    // A direct edit on the backend leaf to canonical common. There's no automatic
+    // shadow-sync hard-fail for this (see scenario.md A16); instead --from b
+    // brings the leaf change back to monorepo's shadow/common-backend, the
+    // operator merges it, and --from a propagates to the frontend leaf.
+    const Bcm5 = commitFiles(backend, {
+      "src/evntcore/common/util.ts": "util v3 leaf-stray\n",
+    }, "Bcm5");
+    git("push origin main", backend.working);
+    void Bcm5;
+
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 5] --from b after stray leaf edit: ${r.stderr.slice(0, 400)}`);
+    }
+
+    git("fetch origin", mono.working);
+    // Bcm5 was replayed onto common-backend's shadow chain on monorepo.
+    assertContent(mono, "origin/shadow/common-backend/main", "common/util.ts", "util v3 leaf-stray\n",
+      "[Phase 5] leaf-stray edit reached monorepo's shadow/common-backend");
+    // Operator merges to accept the leaf change into monorepo's common/.
+    git("checkout main", mono.working);
+    git("pull origin main", mono.working);
+    const Mcm8 = mergeRef(mono, "origin/shadow/common-backend/main", "Mcm8");
+    git("push origin main", mono.working);
+    void Mcm8;
+
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 5] --from a propagating leaf-stray to frontend: ${r.stderr.slice(0, 400)}`);
+    }
+
+    git("fetch origin", frontend.working);
+    const Fcm4 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm4");
+    git("push origin main", frontend.working);
+
+    // Final --from b captures Fcm4 in monorepo's shadow chain. Without this,
+    // the idempotence loop below would re-replay Fcm4 every time (the merge has
+    // no trailer of its own; loadReplayedMappings only sees it as "replayed"
+    // once Fcm4'_mono exists on monorepo's shadow/common-frontend/main).
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 5] final --from b capturing Fcm4: ${r.stderr.slice(0, 400)}`);
+    }
+
+    // All three sides converge on the leaf-stray content.
+    assertContent(backend,  "main", "src/evntcore/common/util.ts", "util v3 leaf-stray\n", "[Phase 5] backend (origin)");
+    assertContent(mono,     "main", "common/util.ts",              "util v3 leaf-stray\n", "[Phase 5] monorepo");
+    assertContent(frontend, Fcm4,   "src/app/common/util.ts",      "util v3 leaf-stray\n", "[Phase 5] frontend (propagated)");
+
+    // ── Idempotence (post Phase 5): clean end state must produce no replays ─
+    for (const from of ["a", "b"] as const) {
+      const r = runSync({ from });
+      assertEqual(r.exitCode, 0, `[idempotence post-Phase-5] --from ${from}: ${r.stderr.slice(0, 300)}`);
+      const replayLines = r.stdout.split("\n").filter(l => /^\s*Replaying /.test(l));
+      if (replayLines.length > 0) {
+        throw new Error(
+          `[idempotence post-Phase-5] --from ${from} re-replayed:\n  ${replayLines.join("\n  ")}`,
+        );
+      }
+    }
+
+    // ── Phase 6: B′ composed-squash recovery on a project branch ────────────
+    // See scenario.md sht6 Phase 6 for narrative. Backend opens project-a,
+    // project-b; mono adds outer-divergent commits; backend merges + adds Bp1x;
+    // backend's project-b → project-a merge (Bm) has mapped parents disagreeing
+    // on README.md; engine halts; operator merges project-b on mono's project-a
+    // (Mm); --from b with SHADOW_ALLOW_COMPOSED_SQUASH=1 emits sq composed of
+    // (Mm.outer + Bm.inner under backend/).
+
+    // 6.0 Backend creates project-a, project-b from Bc0 (clean ancestry, no inherited
+    // merges — required for findResolutionCandidate to identify Mm uniquely; the scan
+    // range "shadowRef..targetInto" would otherwise pick up Phase 1-5's main-side merges).
+    git(`checkout -b project-a ${Bc0}`, backend.working);
+    const Bp1 = commitFiles(backend, { "src/feat-a.ts": "feat a\n" }, "Bp1");
+    git("push origin project-a", backend.working);
+    git(`checkout -b project-b ${Bc0}`, backend.working);
+    const Bp2 = commitFiles(backend, { "src/feat-b.ts": "feat b\n" }, "Bp2");
+    git("push origin project-b", backend.working);
+    void Bp1; void Bp2;
+
+    // 6.1 --from b — engine creates shadow/backend/{project-a,project-b} on mono
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 6.1] --from b: ${r.stderr.slice(0, 400)}`);
+    }
+
+    // 6.2 Mono creates project-a, project-b from Mc0 (matching backend's clean ancestry
+    // — see Phase 6.0 comment) and adds outer-divergent commits. Each commit touches
+    // backend/* (survives parent-pair TREESAME-drop) AND README.md (outer file →
+    // divergence the engine can't auto-resolve).
+    git(`checkout -b project-a ${Mc0}`, mono.working);
+    const Mp1c = commitFiles(mono, {
+      "backend/release-notes.txt": "release a\n",
+      "README.md": "v_a\n",
+    }, "Mp1c");
+    git("push origin project-a", mono.working);
+    git(`checkout -b project-b ${Mc0}`, mono.working);
+    const Mp2c = commitFiles(mono, {
+      "backend/release-notes.txt": "release b\n",
+      "README.md": "v_b\n",
+    }, "Mp2c");
+    git("push origin project-b", mono.working);
+    void Mp1c; void Mp2c;
+
+    // 6.3 --from a — pushes Mp1c/Mp2c onto backend's shadow/backend/{project-a,project-b}
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 6.3] --from a: ${r.stderr.slice(0, 400)}`);
+    }
+
+    // 6.4 Backend absorbs M's work on each project; Bp1x is the post-merge content
+    // the squash MUST preserve (see scenario.md A19).
+    git("fetch origin --prune", backend.working);
+    git("checkout project-a", backend.working);
+    const Bp1m = mergeRef(backend, "origin/shadow/backend/project-a", "Bp1m");
+    const Bp1x = commitFiles(backend, { "src/feat-a-extra.ts": "extra\n" }, "Bp1x");
+    git("push origin project-a", backend.working);
+    git("checkout project-b", backend.working);
+    const Bp2m = mergeRef(backend, "origin/shadow/backend/project-b", "Bp2m");
+    git("push origin project-b", backend.working);
+    void Bp1m; void Bp1x; void Bp2m;
+
+    // 6.5 Backend merges project-b → project-a → Bm (textual conflict on release-notes.txt
+    // at backend's root — Mp1c/Mp2c's "backend/release-notes.txt" maps to "release-notes.txt"
+    // on backend since backend pair's b.dir="").
+    git("checkout project-a", backend.working);
+    let Bm: string;
+    try {
+      Bm = mergeRef(backend, "project-b", "Bm");
+    } catch {
+      fs.writeFileSync(path.join(backend.working, "release-notes.txt"), "release a + release b\n");
+      git("add -A", backend.working);
+      git("commit --no-edit", backend.working);
+      Bm = git("rev-parse HEAD", backend.working);
+    }
+    git("push origin project-a", backend.working);
+
+    // 6.6 --from b — engine FAILS on Bm
+    {
+      const r = runSync({ from: "b" });
+      if (r.exitCode === 0) throw new Error(`[Phase 6.6] expected --from b to fail on Bm but it succeeded`);
+      const errText = r.stdout + "\n" + r.stderr;
+      if (!/cannot auto-resolve replay parent tree/.test(errText)) {
+        throw new Error(`[Phase 6.6] expected 'cannot auto-resolve' error, got:\n${errText.slice(0, 800)}`);
+      }
+    }
+
+    // 6.7 Mono concurrent dev edit on project-a
+    git("fetch origin --prune", mono.working);
+    git("checkout -B project-a origin/project-a", mono.working);
+    const Mp1c2 = commitFiles(mono, { "README.md": "v_a_v2\n" }, "Mp1c2");
+    git("push origin project-a", mono.working);
+    void Mp1c2;
+
+    // 6.8 Operator action — `git merge project-b` on mono's project-a → Mm
+    git("checkout -B project-b origin/project-b", mono.working);
+    git("checkout project-a", mono.working);
+    let Mm: string;
+    try {
+      Mm = mergeRef(mono, "project-b", "Mm");
+    } catch {
+      // Mm's INNER resolution must be byte-identical to Bm's INNER resolution; sq carries
+      // Bm.inner under backend/, mono.project-a carries Mm.inner — if they differ, the
+      // catch-up merge in 6.10 conflicts. Operators independently arriving at the same
+      // resolution is the realistic expectation; the test models that.
+      fs.writeFileSync(path.join(mono.working, "README.md"), "v_merged\n");
+      fs.writeFileSync(path.join(mono.working, "backend/release-notes.txt"), "release a + release b\n");
+      git("add -A", mono.working);
+      git("commit --no-edit", mono.working);
+      Mm = git("rev-parse HEAD", mono.working);
+    }
+    git("push origin project-a", mono.working);
+    void Mm;
+
+    // 6.9 --from b with SHADOW_ALLOW_COMPOSED_SQUASH=1 — engine emits sq
+    process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+    try {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 6.9] --from b with B': ${r.stderr.slice(0, 400)}`);
+    } finally {
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+    }
+
+    git("fetch origin", mono.working);
+    const sq = git("rev-parse origin/shadow/backend/project-a", mono.working);
+    const sqMsg = execSync(`git log -1 --format=%B ${sq}`, {
+      cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${Bm}`)) {
+      throw new Error(`[Phase 6.9] sq missing replay trailer for Bm=${Bm}\nsq message:\n${sqMsg}`);
+    }
+    assertContent(mono, "origin/shadow/backend/project-a", "backend/src/feat-a-extra.ts", "extra\n",
+      "[Phase 6.9] sq preserves Bp1x (backend/src/feat-a-extra.ts) — Bm.inner");
+    assertContent(mono, "origin/shadow/backend/project-a", "README.md", "v_merged\n",
+      "[Phase 6.9] sq carries Mm's outer (README.md)");
+    // backend/release-notes.txt is INNER (under backend/) → Bm.inner wins (backend's resolution)
+    assertContent(mono, "origin/shadow/backend/project-a", "backend/release-notes.txt", "release a + release b\n",
+      "[Phase 6.9] sq carries Bm's inner resolution of release-notes.txt");
+
+    // 6.10 Catch-up merge on mono's project-a — clean
+    git("checkout project-a", mono.working);
+    git("pull origin project-a", mono.working);
+    mergeRef(mono, "origin/shadow/backend/project-a", "catch-up");
+    git("push origin project-a", mono.working);
+    assertContent(mono, "project-a", "backend/src/feat-a-extra.ts", "extra\n",
+      "[Phase 6.10] catch-up brings backend/src/feat-a-extra.ts to mono.project-a");
+
+    // 6.11 Idempotency — re-running --from b with the flag is a no-op on shadow tip
+    process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+    try {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 6.11] re-run --from b: ${r.stderr.slice(0, 400)}`);
+    } finally {
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+    }
+    git("fetch origin", mono.working);
+    const sq2 = git("rev-parse origin/shadow/backend/project-a", mono.working);
+    if (sq2 !== sq) {
+      throw new Error(`[Phase 6.11] shadow tip changed on idempotent re-run: ${sq} → ${sq2}`);
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// ── sht7: B′ composed-squash (single-pair, 5 sub-tests) ─────────────────────
+async function runSht7(): Promise<void> {
+  function git(cmd: string, cwd: string): void {
+    execSync(`git ${cmd}`, { cwd, stdio: "pipe" });
+  }
+  function gitOut(cmd: string, cwd: string): string {
+    return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  }
+  function writeFile(dir: string, rel: string, content: string): void {
+    const full = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+  }
+  function assert(cond: boolean, msg: string): void {
+    if (!cond) throw new Error(`assertion failed: ${msg}`);
+  }
+  function assertEqual<T>(actual: T, expected: T, msg: string): void {
+    if (actual !== expected) throw new Error(`${msg}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+  
+  interface ConflictInfo {
+    p1: string;
+    p2: string;
+    bm: string;
+  }
+  
+  /** Drive scenario through the Bm failure; return env and parsed mapped parents. */
+  function setupAndFailReplay(envName: string): { env: TestEnv; info: ConflictInfo } {
+    const env = createTestEnv(envName, "backend");
+  
+    git("branch -m main core-dev", env.localRepo);
+    git("branch -m main core-dev", env.remoteWorking);
+  
+    // BE: Bc1 on core-dev, Bp1 on project
+    writeFile(env.remoteWorking, "api.ts", "v_be_initial\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bc1"', env.remoteWorking);
+    git("push origin core-dev", env.remoteWorking);
+    git("checkout -b project core-dev~1", env.remoteWorking);
+    writeFile(env.remoteWorking, "api.ts", "v_be_project\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bp1"', env.remoteWorking);
+    git("push origin project", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+  
+    // Initial --from b
+    const r1 = runCiSync(env);
+    if (r1.status !== 0) throw new Error(`initial --from b failed: ${r1.stderr}`);
+  
+    // M: Mc on core-dev, Mp on project, with frontend.txt divergent outer
+    git("checkout core-dev", env.localRepo);
+    writeFile(env.localRepo, "backend/notes.txt", "core notes\n");
+    writeFile(env.localRepo, "frontend.txt", "v_fe_core\n");
+    git("add -A", env.localRepo);
+    git('commit -m "Mc"', env.localRepo);
+    git("checkout -b project core-dev~1", env.localRepo);
+    writeFile(env.localRepo, "backend/notes.txt", "project notes\n");
+    writeFile(env.localRepo, "frontend.txt", "v_fe_project\n");
+    git("add -A", env.localRepo);
+    git('commit -m "Mp"', env.localRepo);
+    git("checkout core-dev", env.localRepo);
+  
+    // --from a
+    const r2 = runPush(env);
+    if (r2.status !== 0) throw new Error(`--from a failed: ${r2.stderr}`);
+  
+    // BE: Bcm, Bcx, Bpm, Bm
+    git("checkout core-dev", env.remoteWorking);
+    git("fetch origin", env.remoteWorking);
+    git('merge --no-ff origin/shadow/backend/core-dev -m "Bcm"', env.remoteWorking);
+    writeFile(env.remoteWorking, "feature.ts", "be feature added in Bcx\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bcx"', env.remoteWorking);
+    git("push origin core-dev", env.remoteWorking);
+    git("checkout project", env.remoteWorking);
+    git('merge --no-ff origin/shadow/backend/project -m "Bpm"', env.remoteWorking);
+    git("push origin project", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+    try {
+      git('merge --no-ff project -m "Bm"', env.remoteWorking);
+    } catch {
+      writeFile(env.remoteWorking, "api.ts", "v_be_initial + v_be_project\n");
+      writeFile(env.remoteWorking, "notes.txt", "core + project notes\n");
+      git("add -A", env.remoteWorking);
+      git('commit --no-edit', env.remoteWorking);
+    }
+    git("push origin core-dev", env.remoteWorking);
+  
+    // --from b — must fail
+    const r3 = runCiSync(env);
+    if (r3.status === 0) throw new Error("expected --from b to fail on Bm but it succeeded");
+  
+    // Concurrent M-side edit (Mc2)
+    git("fetch origin --prune", env.localRepo);
+    git("checkout core-dev", env.localRepo);
+    writeFile(env.localRepo, "frontend.txt", "v_fe_core_v2\n");
+    git("add -A", env.localRepo);
+    git('commit -m "Mc2"', env.localRepo);
+  
+    const errText = r3.stdout + r3.stderr;
+    const mp = errText.match(/Mapped parents on origin:\s+([0-9a-f]{40})\s+([0-9a-f]{40})/);
+    if (!mp) throw new Error("could not parse mapped parents from:\n" + errText);
+    const bmMatch = errText.match(/Source merge:\s+([0-9a-f]{40})/);
+    if (!bmMatch) throw new Error("could not parse Bm sha");
+  
+    return { env, info: { p1: mp[1], p2: mp[2], bm: bmMatch[1] } };
+  }
+  
+  /** Operator action: `git merge project` on M.core-dev. Resolves outer in-place. */
+  function operatorMergeProject(env: TestEnv): string {
+    git("checkout core-dev", env.localRepo);
+    try {
+      git('merge --no-ff project -m "Mm"', env.localRepo);
+    } catch {
+      writeFile(env.localRepo, "frontend.txt", "v_fe_merged_with_v2\n");
+      writeFile(env.localRepo, "backend/notes.txt", "core + project notes\n");
+      git("add -A", env.localRepo);
+      git('commit --no-edit', env.localRepo);
+    }
+    git("push origin core-dev", env.localRepo);
+    return gitOut("rev-parse HEAD", env.localRepo);
+  }
+  
+  function runHappyAutoDetect(): void {
+    const { env, info } = setupAndFailReplay("b-prime-happy");
+    try {
+      operatorMergeProject(env);
+      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+      const r = runCiSync(env);
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      assertEqual(r.status, 0, `--from b status (stderr=${r.stderr})`);
+  
+      git("fetch origin --prune", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assert(sqHash.length === 40, "shadow ref must exist");
+  
+      // sq must carry the replay trailer pointing at Bm
+      const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${info.bm}`),
+        `sq missing trailer for ${info.bm}\n${sqMsg}`);
+  
+      // backend/feature.ts (Bcx's content) must be present on the shadow ref tree
+      const feature = gitOut(`show origin/shadow/backend/core-dev:backend/feature.ts`, env.localRepo);
+      assert(feature.includes("be feature added in Bcx"), `feature.ts missing/wrong on shadow: ${feature}`);
+  
+      // Catch-up merge: shadow tip's outer matches M.core-dev's outer (same as Mm.tree),
+      // so the merge is clean — no second resolution needed.
+      git("merge --no-ff origin/shadow/backend/core-dev -m \"catch-up\"", env.localRepo);
+      const localFeature = fs.readFileSync(path.join(env.localRepo, "backend/feature.ts"), "utf8");
+      assert(localFeature.includes("be feature added in Bcx"), `feature.ts missing on M.core-dev`);
+    } finally {
+      env.cleanup();
+    }
+  }
+  
+  function runIdempotentRerun(): void {
+    const { env, info } = setupAndFailReplay("b-prime-idempotent");
+    try {
+      operatorMergeProject(env);
+      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+      const r1 = runCiSync(env);
+      assertEqual(r1.status, 0, `first --from b status (stderr=${r1.stderr})`);
+      git("fetch origin --prune", env.localRepo);
+      const sq1 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+  
+      const r2 = runCiSync(env);
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      assertEqual(r2.status, 0, `second --from b status (stderr=${r2.stderr})`);
+      git("fetch origin --prune", env.localRepo);
+      const sq2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assertEqual(sq2, sq1, "sq SHA must be stable across re-runs");
+      void info;
+    } finally {
+      env.cleanup();
+    }
+  }
+  
+  function runAmbiguousCandidates(): void {
+    const { env } = setupAndFailReplay("b-prime-ambiguous");
+    try {
+      // Two operator-authored merges on M.core-dev, both with parents[1] reachable
+      // from origin/project: the natural Mm (`git merge project`) plus a second
+      // merge of project after a new project commit lands.
+      operatorMergeProject(env);
+  
+      // New commit on project (Mp2), then merge again on core-dev.
+      git("checkout project", env.localRepo);
+      writeFile(env.localRepo, "backend/p2.txt", "p2\n");
+      git("add -A", env.localRepo);
+      git('commit -m "Mp2"', env.localRepo);
+      git("push origin project", env.localRepo);
+      git("checkout core-dev", env.localRepo);
+      git('merge --no-ff project -m "Mm-extra"', env.localRepo);
+      git("push origin core-dev", env.localRepo);
+  
+      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+      const r = runCiSync(env);
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      assert(r.status !== 0, "expected --from b to fail on ambiguous candidates");
+      assert(/ambiguous resolution candidates/.test(r.stdout + r.stderr),
+        `expected ambiguity error, got:\n${r.stdout}\n${r.stderr}`);
+  
+      // Disambiguate with --using
+      const candidates = (r.stdout + r.stderr).match(/[0-9a-f]{40}/g) ?? [];
+      assert(candidates.length >= 2, `expected >=2 candidate SHAs printed, got ${candidates.length}`);
+      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+      // Pick the natural Mm — the one whose parents[1] is project's tip
+      const projectTip = gitOut("rev-parse project", env.localRepo);
+      const mmNatural = candidates.find(c => {
+        const parents = gitOut(`log -1 --format=%P ${c}`, env.localRepo).split(/\s+/);
+        return parents[1] === projectTip;
+      });
+      assert(!!mmNatural, `could not find natural Mm among ${candidates.join(",")}`);
+  
+      // Re-invoke with --using via runSync's options path: harness's runCiSync
+      // doesn't expose flags, so build the env override directly via require.
+      const { runSync } = require("../shadow-sync");
+      const { applyTestOverrides } = require("../shadow-common");
+      applyTestOverrides({
+        repoRoot: env.localRepo,
+        pairs: [{
+          name: env.subdir,
+          a: { remote: "origin", url: env.originBare, dir: env.subdir },
+          b: { remote: env.remoteName, url: env.remoteBare, dir: "" },
+        }],
+        shadowBranchPrefix: env.branchPrefix,
+      });
+      const r2 = runSync({ from: "b", pair: env.subdir, using: [mmNatural!] });
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      assertEqual(r2.exitCode, 0, `--from b --using ${mmNatural} status (stderr=${r2.stderr})`);
+    } finally {
+      env.cleanup();
+    }
+  }
+  
+  function runNoCandidateFallthrough(): void {
+    const { env } = setupAndFailReplay("b-prime-no-candidate");
+    try {
+      // Skip operator merge — there's nothing for auto-detect to find.
+      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
+      const r = runCiSync(env);
+      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      assert(r.status !== 0, "expected --from b to fail with no candidate");
+      // Original error message must still appear
+      assert(/cannot auto-resolve replay parent tree/.test(r.stdout + r.stderr),
+        `expected original error, got:\n${r.stdout}\n${r.stderr}`);
+    } finally {
+      env.cleanup();
+    }
+  }
+  
+  function runApproachAStillWorks(): void {
+    const { env, info } = setupAndFailReplay("b-prime-approach-a");
+    try {
+      // Hand-build X on shadow ref with existing replay trailer (Approach A recipe)
+      const { p1, p2, bm } = info;
+      git(`checkout -b manual-resolve-${bm.slice(0, 7)} ${p1}`, env.localRepo);
+      try {
+        git(`merge --no-ff ${p2}`, env.localRepo);
+      } catch {
+        writeFile(env.localRepo, "frontend.txt", "v_fe_merged\n");
+        writeFile(env.localRepo, "backend/notes.txt", "core + project notes\n");
+        writeFile(env.localRepo, "backend/api.ts", "v_be_initial + v_be_project\n");
+        git("add -A", env.localRepo);
+        git('commit --no-edit', env.localRepo);
+      }
+      const tree = gitOut("write-tree", env.localRepo);
+      const X = gitOut(
+        `commit-tree ${tree} -p ${p1} -p ${p2} -m "Manual resolution of ${bm.slice(0, 7)}" -m "Shadow-replayed-backend-team: ${bm}"`,
+        env.localRepo,
+      );
+      git(`update-ref refs/heads/shadow/backend/core-dev ${X}`, env.localRepo);
+      git(`push origin shadow/backend/core-dev`, env.localRepo);
+      git("checkout core-dev", env.localRepo);
+  
+      // Re-run without the flag — A should resume normally via loadReplayedMappings
+      const r = runCiSync(env);
+      assertEqual(r.status, 0, `A recipe --from b status (stderr=${r.stderr})`);
+    } finally {
+      env.cleanup();
+    }
+  }
+
+  const subs: Array<[string, () => void]> = [
+    ["happy-auto-detect", runHappyAutoDetect],
+    ["idempotent-rerun", runIdempotentRerun],
+    ["ambiguous-candidates", runAmbiguousCandidates],
+    ["no-candidate-fallthrough", runNoCandidateFallthrough],
+    ["approach-a-still-works", runApproachAStillWorks],
+  ];
+  let failed = 0;
+  for (const [name, fn] of subs) {
+    try { fn(); console.log(`    ✓ sht7.${name}`); }
+    catch (e: any) { console.error(`    ✘ sht7.${name}: ${e.message}`); failed++; }
+  }
+  if (failed > 0) throw new Error(`sht7: ${failed}/${subs.length} sub-test(s) failed`);
+}
+
+export default async function run() {
+  runSht5();  console.log("  ✓ sht5");
+  runSht6();  console.log("  ✓ sht6");
+  await runSht7();  console.log("  ✓ sht7");
+}
+
 if (require.main === module) {
-  run();
-  console.log("PASS  test-scenario");
+  run().then(() => console.log("PASS  test-scenario")).catch(err => { console.error(err); process.exit(1); });
 }
