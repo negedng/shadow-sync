@@ -69,7 +69,7 @@ function runComposeArgumentOrder(): void {
   gitVoid('commit -m "bm"', dir);
   const bm = git("rev-parse HEAD", dir);
 
-  const composed = composeSquashedMergeTree({ mm, bm, targetDir: "backend" });
+  const composed = composeSquashedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "backend" });
   const entries = git(`ls-tree -r ${composed}`, dir);
 
   // Outer: README.md and frontend.txt from Mm
@@ -106,7 +106,7 @@ function runComposeNoTargetDir(): void {
   gitVoid('commit -m "bm"', dir);
   const bm = git("rev-parse HEAD", dir);
 
-  const composed = composeSquashedMergeTree({ mm, bm, targetDir: "" });
+  const composed = composeSquashedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "" });
   assertEqual(composed, mmTree, "no targetDir → composed must equal Mm.tree");
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -192,7 +192,7 @@ function runFindWrongShape(): void {
     using: [],
   });
 
-  assertEqual(result.mm, null, "wrong-shape merge must not be returned as Mm");
+  assertEqual(result.targetMerge, null, "wrong-shape merge must not be returned as Mm");
   assertEqual(result.ambiguous, false, "wrong-shape should not produce ambiguity");
 
   fs.rmSync(dir, { recursive: true, force: true });

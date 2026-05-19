@@ -26,7 +26,7 @@ export interface SyncOptions {
   pair?: string;
   from?: "a" | "b";
   branch?: string;
-  /** Operator-supplied Mm SHA(s) for B' disambiguation (see findResolutionCandidate). */
+  /** Operator-supplied target-merge SHA(s) for B' disambiguation (see findResolutionCandidate). */
   using?: string[];
 }
 

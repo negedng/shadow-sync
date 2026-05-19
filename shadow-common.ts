@@ -573,23 +573,24 @@ function composeCrossRepoMergeTree(opts: {
 }
 
 /**
- * B' fast path: compose a tree from Mm's outer (everything outside target.dir/)
- * and Bm's inner (target.dir/ contents). No source-diff is applied on top — this
- * tree becomes sq's tree verbatim. When target.dir is empty, source and target
- * share file layout, so Mm.tree alone is the resolution (B-basic semantics).
+ * B' fast path: compose a tree from the target merge's outer (everything outside
+ * target.dir/) and the source merge's inner (target.dir/ contents). No source-diff
+ * is applied on top — this tree becomes the composed-squash commit's tree verbatim.
+ * When target.dir is empty, source and target share file layout, so the target
+ * merge's tree alone is the resolution (B-basic semantics).
  */
 export function composeSquashedMergeTree(opts: {
-  mm: string;
-  bm: string;
+  targetMerge: string;
+  sourceMerge: string;
   targetDir: string;
 }): string {
-  const { mm, bm, targetDir } = opts;
-  const mmTreeRes = git(["rev-parse", `${mm}^{tree}`], { safe: true });
-  if (!mmTreeRes.ok || !mmTreeRes.stdout) fail(`Cannot read tree of Mm ${mm}: ${mmTreeRes.stderr}`);
-  if (!targetDir) return mmTreeRes.stdout;
-  const bmTreeRes = git(["rev-parse", `${bm}^{tree}`], { safe: true });
-  if (!bmTreeRes.ok || !bmTreeRes.stdout) fail(`Cannot read tree of Bm ${bm}: ${bmTreeRes.stderr}`);
-  return composeSubtree(mmTreeRes.stdout, targetDir, bmTreeRes.stdout);
+  const { targetMerge, sourceMerge, targetDir } = opts;
+  const targetTreeRes = git(["rev-parse", `${targetMerge}^{tree}`], { safe: true });
+  if (!targetTreeRes.ok || !targetTreeRes.stdout) fail(`Cannot read tree of target merge ${targetMerge}: ${targetTreeRes.stderr}`);
+  if (!targetDir) return targetTreeRes.stdout;
+  const sourceTreeRes = git(["rev-parse", `${sourceMerge}^{tree}`], { safe: true });
+  if (!sourceTreeRes.ok || !sourceTreeRes.stdout) fail(`Cannot read tree of source merge ${sourceMerge}: ${sourceTreeRes.stderr}`);
+  return composeSubtree(targetTreeRes.stdout, targetDir, sourceTreeRes.stdout);
 }
 
 /**
@@ -776,8 +777,9 @@ function resolveTargetParents(
 
 /**
  * Return all source-side branch short-names that contain `commitHash`.
- * Used by findResolutionCandidate to identify Bm's into/from branches by
- * the asymmetry of "contains parent[1] but not Bm itself" = the from branch.
+ * Used by findResolutionCandidate to identify the source merge's into/from
+ * branches by the asymmetry of "contains parent[1] but not the merge itself"
+ * = the from branch.
  */
 function branchesContainingOnRemote(commitHash: string, remote: string): string[] {
   const res = git(
@@ -793,13 +795,14 @@ function branchesContainingOnRemote(commitHash: string, remote: string): string[
 }
 
 /**
- * B' auto-detect: find Mm on target.remote/<into-branch> whose tree resolves
- * the Bm merge conflict the engine couldn't auto-merge. See IMPLEMENTATION_PLAN
- * §1 in local_tests/conflict_squash/ for the design.
+ * B' auto-detect: find a target-side merge on target.remote/<into-branch> whose
+ * tree resolves the source merge conflict the engine couldn't auto-merge. See
+ * IMPLEMENTATION_PLAN §1 in local_tests/conflict_squash/ for the design.
  *
- * Returns `{ mm }` if exactly one candidate matches the shape; `{ ambiguous,
- * candidates }` if multiple match (operator must rerun with --using); null mm
- * + empty candidates if none — caller falls through to the original error.
+ * Returns `{ targetMerge }` if exactly one candidate matches the shape;
+ * `{ ambiguous, candidates }` if multiple match (operator must rerun with
+ * --using); null + empty candidates if none — caller falls through to the
+ * original error.
  *
  * Operator-supplied `using` SHAs filter candidates: if any are provided, only
  * candidates whose SHA appears (full or prefix-match) are considered.
@@ -811,24 +814,24 @@ export function findResolutionCandidate(opts: {
   target: RepoEndpoint;
   pair: SyncPair;
   using: string[];
-}): { mm: string | null; ambiguous: boolean; candidates: string[]; intoBranch: string | null } {
+}): { targetMerge: string | null; ambiguous: boolean; candidates: string[]; intoBranch: string | null } {
   const { commit, mappedParents, source, target, pair, using } = opts;
 
   // V1: 2-parent merges only. Octopus B' is deliberately out of scope.
   if (commit.parents.length !== 2 || mappedParents.length !== 2) {
-    return { mm: null, ambiguous: false, candidates: [], intoBranch: null };
+    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch: null };
   }
 
-  // Bm is on the "into" branch (operator hasn't propagated it back). The "from"
-  // branch contains parents[1] but not Bm. This handles the common case where
-  // inferSourceBranch returns null due to parents[1] being reachable from both
-  // branches post-merge.
+  // The source merge is on the "into" branch (operator hasn't propagated it
+  // back). The "from" branch contains parents[1] but not the source merge
+  // itself. This handles the common case where inferSourceBranch returns null
+  // due to parents[1] being reachable from both branches post-merge.
   const bmBranches = branchesContainingOnRemote(commit.hash, source.remote);
   const p2Branches = branchesContainingOnRemote(commit.parents[1], source.remote);
   const fromBranches = p2Branches.filter(b => !bmBranches.includes(b));
   const intoCandidates = bmBranches.filter(b => !fromBranches.includes(b) || bmBranches.length === 1);
   if (intoCandidates.length !== 1 || fromBranches.length !== 1) {
-    return { mm: null, ambiguous: false, candidates: [], intoBranch: null };
+    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch: null };
   }
   const intoBranch = intoCandidates[0];
   const fromBranch = fromBranches[0];
@@ -836,7 +839,7 @@ export function findResolutionCandidate(opts: {
   const targetInto = `${target.remote}/${intoBranch}`;
   const targetFrom = `${target.remote}/${fromBranch}`;
   if (!refExists(targetInto) || !refExists(targetFrom)) {
-    return { mm: null, ambiguous: false, candidates: [], intoBranch };
+    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch };
   }
 
   // Range "new since last sync": commits reachable from targetInto but not from
@@ -846,34 +849,35 @@ export function findResolutionCandidate(opts: {
   const range = refExists(shadowRef) ? `${shadowRef}..${targetInto}` : targetInto;
 
   const log = git(["log", "--merges", "--format=%H %P", range], { safe: true });
-  if (!log.ok || !log.stdout) return { mm: null, ambiguous: false, candidates: [], intoBranch };
+  if (!log.ok || !log.stdout) return { targetMerge: null, ambiguous: false, candidates: [], intoBranch };
 
   const candidates: string[] = [];
   for (const line of log.stdout.split("\n").filter(Boolean)) {
     const parts = line.split(/\s+/).filter(Boolean);
-    const mmHash = parts[0];
-    const mmParents = parts.slice(1);
-    if (mmParents.length !== 2) continue;
+    const candidateHash = parts[0];
+    const candidateParents = parts.slice(1);
+    if (candidateParents.length !== 2) continue;
 
-    // Shape check: Mm.parents[1] reachable from targetFrom (= operator merged
-    // FROM the right branch). Mm.parents[0] is necessarily on targetInto's
-    // history since Mm itself is — no separate check needed.
-    const isAnc = git(["merge-base", "--is-ancestor", mmParents[1], targetFrom], { safe: true });
+    // Shape check: candidate.parents[1] reachable from targetFrom (= operator
+    // merged FROM the right branch). candidate.parents[0] is necessarily on
+    // targetInto's history since the candidate itself is — no separate check
+    // needed.
+    const isAnc = git(["merge-base", "--is-ancestor", candidateParents[1], targetFrom], { safe: true });
     if (!isAnc.ok) continue;
 
-    candidates.push(mmHash);
+    candidates.push(candidateHash);
   }
 
   if (using.length > 0) {
     const filtered = candidates.filter(c => using.some(u => c === u || c.startsWith(u)));
-    if (filtered.length === 1) return { mm: filtered[0], ambiguous: false, candidates, intoBranch };
-    if (filtered.length > 1) return { mm: null, ambiguous: true, candidates: filtered, intoBranch };
-    return { mm: null, ambiguous: false, candidates, intoBranch };
+    if (filtered.length === 1) return { targetMerge: filtered[0], ambiguous: false, candidates, intoBranch };
+    if (filtered.length > 1) return { targetMerge: null, ambiguous: true, candidates: filtered, intoBranch };
+    return { targetMerge: null, ambiguous: false, candidates, intoBranch };
   }
 
-  if (candidates.length === 1) return { mm: candidates[0], ambiguous: false, candidates, intoBranch };
-  if (candidates.length > 1) return { mm: null, ambiguous: true, candidates, intoBranch };
-  return { mm: null, ambiguous: false, candidates, intoBranch };
+  if (candidates.length === 1) return { targetMerge: candidates[0], ambiguous: false, candidates, intoBranch };
+  if (candidates.length > 1) return { targetMerge: null, ambiguous: true, candidates, intoBranch };
+  return { targetMerge: null, ambiguous: false, candidates, intoBranch };
 }
 
 /**
@@ -1071,18 +1075,19 @@ function replayCommits(opts: {
       } else if (mappedParents.length > 0) {
         const merged = mergeMappedParentTrees({ mappedParents, commitShort: meta.short, targetDir: target.dir });
         if (merged === null) {
-          // B' fast path: auto-detect Mm and emit sq directly. Gated by env var
-          // so today's behavior is unchanged unless explicitly opted in.
+          // B' fast path: auto-detect the operator's target-side merge and emit
+          // a composed squash directly. Gated by env var so today's behavior is
+          // unchanged unless explicitly opted in.
           if (process.env.SHADOW_ALLOW_COMPOSED_SQUASH === "1") {
             const res = findResolutionCandidate({ commit, mappedParents, source, target, pair, using });
-            if (res.mm) {
-              const sqTree = composeSquashedMergeTree({ mm: res.mm, bm: commit.hash, targetDir: target.dir });
+            if (res.targetMerge) {
+              const composedTree = composeSquashedMergeTree({ targetMerge: res.targetMerge, sourceMerge: commit.hash, targetDir: target.dir });
               const trailer = `${dc.addTrailerKey}: ${commit.hash}`;
-              const sqMsg = appendTrailer(`Squash of ${meta.short} (composed: Mm outer + Bm inner)\n\n${meta.message}`, trailer);
+              const composedMsg = appendTrailer(`Squash of ${meta.short} (composed: target-merge outer + source-merge inner)\n\n${meta.message}`, trailer);
               const parentArgs = mappedParents.flatMap(p => ["-p", p]);
-              const sq = git(["commit-tree", sqTree, ...parentArgs, "-m", sqMsg], { env: buildCommitEnv(meta) });
-              shaMapping.set(commit.hash, sq);
-              console.log(`  ✓ Composed squash (sq=${sq.slice(0, 7)} from Mm=${res.mm.slice(0, 7)}).`);
+              const composedSquash = git(["commit-tree", composedTree, ...parentArgs, "-m", composedMsg], { env: buildCommitEnv(meta) });
+              shaMapping.set(commit.hash, composedSquash);
+              console.log(`  ✓ Composed squash ${composedSquash.slice(0, 7)} from target merge ${res.targetMerge.slice(0, 7)}.`);
               continue;
             }
             if (res.ambiguous) {
