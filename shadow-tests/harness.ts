@@ -227,7 +227,7 @@ function buildPairs(env: TestEnv): SyncPair[] {
 }
 
 /** Apply test overrides and run sync in-process. */
-function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string }): RunResult {
+function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; allowConflictResolutionOverwrite?: boolean }): RunResult {
   // Orchestrator mode reads source state from the remote-tracking ref. Tests
   // commit on localRepo without pushing, so mirror localRepo branches up to
   // originBare before each "from a" sync — otherwise origin/<branch> is stale
@@ -245,6 +245,7 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string }
   const result = runSync({
     from: opts.from,
     pair: opts.pair,
+    allowConflictResolutionOverwrite: opts.allowConflictResolutionOverwrite,
   });
 
   return {
@@ -255,8 +256,8 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string }
 }
 
 /** Pull: replay external remote commits into shadow branches on origin. */
-export function runCiSync(env: TestEnv): RunResult {
-  return runSyncInProcess(env, { from: "b" });
+export function runCiSync(env: TestEnv, opts: { allowConflictResolutionOverwrite?: boolean } = {}): RunResult {
+  return runSyncInProcess(env, { from: "b", allowConflictResolutionOverwrite: opts.allowConflictResolutionOverwrite });
 }
 
 /** Push: replay local commits to the external shadow branch.

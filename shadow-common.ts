@@ -575,11 +575,11 @@ function composeCrossRepoMergeTree(opts: {
 /**
  * B' fast path: compose a tree from the target merge's outer (everything outside
  * target.dir/) and the source merge's inner (target.dir/ contents). No source-diff
- * is applied on top — this tree becomes the composed-squash commit's tree verbatim.
+ * is applied on top — this tree becomes the resolved merge's tree verbatim.
  * When target.dir is empty, source and target share file layout, so the target
  * merge's tree alone is the resolution (B-basic semantics).
  */
-export function composeSquashedMergeTree(opts: {
+export function composeResolvedMergeTree(opts: {
   targetMerge: string;
   sourceMerge: string;
   targetDir: string;
@@ -1040,8 +1040,9 @@ function replayCommits(opts: {
   dc: DirectionConfig;
   pair: SyncPair;
   using: string[];
+  allowConflictResolutionOverwrite: boolean;
 }): void {
-  const { newCommits, shaMapping, targetInit, source, target, dc, pair, using } = opts;
+  const { newCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite } = opts;
   const tmpIndex = path.join(
     os.tmpdir(),
     `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
@@ -1076,18 +1077,18 @@ function replayCommits(opts: {
         const merged = mergeMappedParentTrees({ mappedParents, commitShort: meta.short, targetDir: target.dir });
         if (merged === null) {
           // B' fast path: auto-detect the operator's target-side merge and emit
-          // a composed squash directly. Gated by env var so today's behavior is
-          // unchanged unless explicitly opted in.
-          if (process.env.SHADOW_ALLOW_COMPOSED_SQUASH === "1") {
+          // a resolved merge directly. Gated by --allow-conflict-resolution-overwrite
+          // so today's behavior is unchanged unless explicitly opted in.
+          if (allowConflictResolutionOverwrite) {
             const res = findResolutionCandidate({ commit, mappedParents, source, target, pair, using });
             if (res.targetMerge) {
-              const composedTree = composeSquashedMergeTree({ targetMerge: res.targetMerge, sourceMerge: commit.hash, targetDir: target.dir });
+              const resolvedTree = composeResolvedMergeTree({ targetMerge: res.targetMerge, sourceMerge: commit.hash, targetDir: target.dir });
               const trailer = `${dc.addTrailerKey}: ${commit.hash}`;
-              const composedMsg = appendTrailer(`Squash of ${meta.short} (composed: target-merge outer + source-merge inner)\n\n${meta.message}`, trailer);
+              const resolvedMsg = appendTrailer(`Conflict resolution from ${meta.short} (target-merge outer + source-merge inner)\n\n${meta.message}`, trailer);
               const parentArgs = mappedParents.flatMap(p => ["-p", p]);
-              const composedSquash = git(["commit-tree", composedTree, ...parentArgs, "-m", composedMsg], { env: buildCommitEnv(meta) });
-              shaMapping.set(commit.hash, composedSquash);
-              console.log(`  ✓ Composed squash ${composedSquash.slice(0, 7)} from target merge ${res.targetMerge.slice(0, 7)}.`);
+              const resolvedMerge = git(["commit-tree", resolvedTree, ...parentArgs, "-m", resolvedMsg], { env: buildCommitEnv(meta) });
+              shaMapping.set(commit.hash, resolvedMerge);
+              console.log(`  ✓ Resolved merge ${resolvedMerge.slice(0, 7)} from target merge ${res.targetMerge.slice(0, 7)}.`);
               continue;
             }
             if (res.ambiguous) {
@@ -1148,8 +1149,9 @@ export function mirrorHistory(opts: {
   from: "a" | "b";
   branches: string[];
   using?: string[];
+  allowConflictResolutionOverwrite?: boolean;
 }): { mirrored: number; branchMapping: Map<string, string>; shaMapping: Map<string, string>; upToDate: boolean } {
-  const { pair, from, branches, using = [] } = opts;
+  const { pair, from, branches, using = [], allowConflictResolutionOverwrite = false } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
   const dc = buildDirectionConfig(pair.name, source.remote, target.remote);
@@ -1191,7 +1193,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, using });
+  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite });
 
   console.log();
   console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);

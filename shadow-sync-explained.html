@@ -238,6 +238,28 @@
   }
   .fn-group:first-of-type { margin-top: 1rem; }
 
+  .call-tree, .call-tree ul {
+    list-style: none;
+    padding-left: 1.1rem;
+    margin: 0.3rem 0;
+  }
+  .call-tree ul {
+    border-left: 1px dashed var(--border);
+    margin-left: 0.3rem;
+  }
+  .call-tree li { margin-bottom: 0.35rem; position: relative; padding-left: 0.3rem; }
+  .call-tree > li { padding-left: 0; }
+
+  /* Show nested sub-call lists inside step-list items as a tree, too. */
+  .step-list ul {
+    list-style: none;
+    padding-left: 1rem;
+    margin: 0.4rem 0 0.2rem 0.3rem;
+    border-left: 1px dashed var(--border);
+  }
+  .step-list ul li { padding-left: 0.3rem; margin-bottom: 0.25rem; }
+  .step-list ul ul { margin-top: 0.25rem; }
+
 </style>
 </head>
 <body>
@@ -536,6 +558,7 @@
   <li><a href="#sync-steps">Steps of a Sync</a></li>
   <li><a href="#scenario">Reference Scenario</a></li>
   <li><a href="#api">Function Reference</a></li>
+  <li><a href="#workflows">Workflow Walkthroughs</a></li>
   <li><a href="#merge">Shadow Branch Divergence</a></li>
   <li><a href="#dedup">Trailers &amp; Deduplication</a></li>
   <li><a href="#shadowignore">.shadowignore</a></li>
@@ -673,7 +696,7 @@ npm run sync -- --from a -r frontend
 git merge origin/shadow/frontend/main       # lands on frontend/main</code></pre>
 
 <p>Same pattern for <code>backend</code> with <code>-r backend</code>. In production you&rsquo;ll wire
-up the two reusable workflows (<a href="#files">&sect;10</a>) on a cron and let them run &mdash; the
+up the two reusable workflows (<a href="#files">&sect;11</a>) on a cron and let them run &mdash; the
 manual commands above are just for first-time testing.</p>
 
 <h3>What happens to open PRs on <code>org/frontend</code>?</h3>
@@ -1239,19 +1262,19 @@ Out: null  (no inner/outer split — caller uses plain merge logic)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>composeSquashedMergeTree({ mm, bm, targetDir }): string</code></h4>
+<h4><code>composeResolvedMergeTree({ targetMerge, sourceMerge, targetDir }): string</code></h4>
 <p>B&prime; conflict-squash composition. Splice <code>Bm</code>&rsquo;s tree at <code>targetDir/</code> over <code>Mm</code>&rsquo;s outer files &mdash; outer (everything outside <code>targetDir/</code>) comes from the operator&rsquo;s in-repo merge resolution; inner (under <code>targetDir/</code>) comes verbatim from the failing source merge. When <code>targetDir</code> is empty, source and target share file layout, so <code>Mm</code>&rsquo;s tree alone is the resolution. Called only from the replay-loop fast path when <code>findResolutionCandidate</code> returns a candidate.</p>
 <pre><code>The Bm case from local_tests/conflict_squash — backend repo merges
 project into core-dev (Bm) with outer state that diverges from the
 monorepo-side mapped parents. Operator does `git merge project` on
 M.core-dev to resolve the outer; Mm carries that resolution.
 
-In:  mm = Mm (M-side merge of project into core-dev)
-     bm = Bm (source merge that the engine couldn't auto-replay)
+In:  targetMerge = Mm (M-side merge of project into core-dev)
+     sourceMerge = Bm (source merge that the engine couldn't auto-replay)
      targetDir = "backend"
 Out: tree-SHA with Mm's outer (frontend.txt, etc.)
                  ⊕ Bm's content spliced in at backend/
-     This becomes sq's tree verbatim — buildReplayedTree is NOT
+     This becomes the composed-squash commit's tree verbatim — buildReplayedTree is NOT
      called on top (that would re-apply Bm's diff and reintroduce
      the outer conflict the engine just gave up on).
 
@@ -1308,29 +1331,29 @@ Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
 </div>
 
 <div class="card fn-card">
-<h4><code>findResolutionCandidate({ commit, mappedParents, source, target, pair, using }): { mm, ambiguous, candidates, intoBranch }</code></h4>
-<p>B&prime; auto-detect. When <code>mergeMappedParentTrees</code> returns null and the <code>SHADOW_ALLOW_COMPOSED_SQUASH=1</code> flag is set, scan <code>target.remote/&lt;into-branch&gt;</code> for a 2-parent merge whose tree resolves the conflict. Bm&rsquo;s &ldquo;into&rdquo; branch is the one containing Bm itself; the &ldquo;from&rdquo; branch is the one containing <code>parents[1]</code> but not Bm. Candidate Mm must be a 2-parent merge on the target mirror of the into branch, not on this pair&rsquo;s shadow ref (so engine-replayed commits are excluded), with <code>Mm.parents[1]</code> reachable from the target mirror of the from branch. <code>using</code> filters by operator-supplied SHA prefixes for the ambiguous case.</p>
+<h4><code>findResolutionCandidate({ commit, mappedParents, source, target, pair, using }): { targetMerge, ambiguous, candidates, intoBranch }</code></h4>
+<p>B&prime; auto-detect. When <code>mergeMappedParentTrees</code> returns null and the <code>--allow-conflict-resolution-overwrite</code> flag is set, scan <code>target.remote/&lt;into-branch&gt;</code> for a 2-parent merge whose tree resolves the conflict. Bm&rsquo;s &ldquo;into&rdquo; branch is the one containing Bm itself; the &ldquo;from&rdquo; branch is the one containing <code>parents[1]</code> but not Bm. Candidate Mm must be a 2-parent merge on the target mirror of the into branch, not on this pair&rsquo;s shadow ref (so engine-replayed commits are excluded), with <code>Mm.parents[1]</code> reachable from the target mirror of the from branch. <code>using</code> filters by operator-supplied SHA prefixes for the ambiguous case.</p>
 <pre><code>In:  commit = Bm (BE merged project→core-dev with outer-divergent state)
      mappedParents = [Bcm', Bpm'] on M
      source = backend-repo, target = monorepo, pair.name = "backend"
      using = []
      Operator has run `git merge project` on M.core-dev, creating Mm
      (only new 2-parent merge on origin/core-dev since last sync)
-Out: { mm: &lt;Mm sha&gt;, ambiguous: false,
+Out: { targetMerge:&lt;Mm sha&gt;, ambiguous: false,
        candidates: [&lt;Mm sha&gt;], intoBranch: "core-dev" }
 
 In:  Operator made two unrelated 2-parent merges on M.core-dev that both
      satisfy the shape check (parents[1] reachable from origin/project)
-Out: { mm: null, ambiguous: true,
+Out: { targetMerge:null, ambiguous: true,
        candidates: [&lt;mm1&gt;, &lt;mm2&gt;], intoBranch: "core-dev" }
      Caller fails with disambiguation prompt naming both SHAs.
 
 In:  No operator merge yet (target tip equals shadow tip)
-Out: { mm: null, ambiguous: false, candidates: [], intoBranch: "core-dev" }
+Out: { targetMerge:null, ambiguous: false, candidates: [], intoBranch: "core-dev" }
      Caller falls through to formatUnresolvableMergeError.
 
 In:  using = ["abc1234"], two candidates exist; one starts with "abc1234"
-Out: { mm: &lt;full sha starting abc1234&gt;, ambiguous: false, ... }</code></pre>
+Out: { targetMerge:&lt;full sha starting abc1234&gt;, ambiguous: false, ... }</code></pre>
 </div>
 
 <h3 class="fn-group">Parent resolution</h3>
@@ -1436,7 +1459,7 @@ Out: Map { "project" → "Bt3'", "core-dev" → "Bc4'" }</code></pre>
 
 <div class="card fn-card">
 <h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, using }): void</code></h4>
-<p>The replay loop. For each commit: resolve parents → build/merge parent tree → run <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. When <code>mergeMappedParentTrees</code> returns null and <code>SHADOW_ALLOW_COMPOSED_SQUASH=1</code> is set, attempts the B&prime; fast path (<code>findResolutionCandidate</code> → <code>composeSquashedMergeTree</code> → emit sq directly, bypassing <code>buildReplayedTree</code>) before falling through to <code>formatUnresolvableMergeError</code>. <code>using</code> carries operator-supplied Mm SHAs for ambiguity disambiguation.</p>
+<p>The replay loop. For each commit: resolve parents → build/merge parent tree → run <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. When <code>mergeMappedParentTrees</code> returns null and <code>--allow-conflict-resolution-overwrite</code> is set, attempts the B&prime; fast path (<code>findResolutionCandidate</code> → <code>composeResolvedMergeTree</code> → emit the resolved merge directly, bypassing <code>buildReplayedTree</code>) before falling through to <code>formatUnresolvableMergeError</code>. <code>using</code> carries operator-supplied Mm SHAs for ambiguity disambiguation.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
      targetInit = monorepo's init; source.dir = ""; target.dir = "backend"
 Out: void; shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
@@ -1518,9 +1541,527 @@ Out: { exitCode: 1,
   In-process callers inherit whatever git auth the parent process has.
 </div>
 
-<!-- ── 6. Shadow Branch Divergence ─────────────────────────────────────── -->
+<!-- ── 6. Workflow Walkthroughs ────────────────────────────────────────── -->
 
-<h2 id="merge">6. Shadow Branch Divergence</h2>
+<h2 id="workflows">6. Workflow Walkthroughs</h2>
+
+<p>
+  Four end-to-end traces of <code>replayCommits</code> in action, in increasing complexity. Each
+  walks through a single source-side commit and shows which functions fire &mdash; and why &mdash;
+  for that shape of commit. All four share the same setup; the divergence starts inside the replay
+  loop. Function names link mentally to <a href="#api">&sect;5</a>.
+</p>
+
+<ul>
+  <li><strong>A</strong> &mdash; single-parent commit (linear replay).</li>
+  <li><strong>B</strong> &mdash; merge with both parents on the source side (regular merge, clean
+    <code>merge-tree</code>).</li>
+  <li><strong>C</strong> &mdash; merge where one parent is an echo from the other direction (cross-repo
+    merge &mdash; triggers <code>composeCrossRepoMergeTree</code>).</li>
+  <li><strong>D</strong> &mdash; merge that <code>merge-tree</code> can&rsquo;t auto-resolve (conflict
+    &rarr; B&prime; fast path or manual recovery).</li>
+</ul>
+
+<p>
+  Lists below are <strong>nested by call hierarchy</strong>: an item indented under another is called
+  <em>from inside</em> the parent. Within each tree, top-to-bottom order is execution order.
+</p>
+
+<h3>Common setup (every sync)</h3>
+
+<p>
+  This is the call tree above the <code>replayCommits</code> loop &mdash; everything below
+  <code>mirrorHistory</code> happens once per pair, before the per-commit walkthroughs A/B/C pick up.
+</p>
+
+<ul class="call-tree">
+  <li><strong><code>runSync(options)</code></strong> &mdash; CLI/programmatic entry. Parses
+    <code>--from</code>, looks up the pair in <code>PAIRS</code>, captures stdout/stderr.
+    <ul>
+      <li>for each pair: <strong><code>mirrorHistory({ pair, from, branches, using })</code></strong>
+        &mdash; picks <code>source</code> / <code>target</code> from the direction, builds
+        <code>dc</code> (DirectionConfig with trailer keys).
+        <ul>
+          <li><code>ensureRemote(source)</code>, <code>ensureRemote(target)</code> &mdash; add or
+            update the git remote URL if the config specifies one.</li>
+          <li><code>git fetch source.remote</code>, <code>git fetch target.remote</code> &mdash; both
+            mandatory: source for new commits, target for the trailer scan and existing shadow tips.</li>
+          <li><strong><code>loadReplayedMappings({ pair, target, branches, dc })</code></strong>
+            &rarr; <code>Map&lt;sourceSHA, targetSHA&gt;</code> &mdash; cross-run memory of past replays.
+            <ul>
+              <li><code>git log --format=%H %(trailers...)</code> per shadow branch, regex-matching
+                <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sourceSHA&gt;</code>.</li>
+            </ul>
+          </li>
+          <li><strong><code>collectSourceCommits(source, branches)</code></strong> &rarr; topo-ordered
+            <code>TopoCommit[]</code>.
+            <ul>
+              <li><code>collectCommitsWithTrueParents(revListArgs)</code>:
+                <ul>
+                  <li><code>git rev-list --topo-order --format=...</code> &mdash; new commits on the
+                    source branches.</li>
+                  <li><code>fetchTrueParents(hashes)</code> &mdash; reattach grafted parents that
+                    <code>rev-list</code>&rsquo;s path-simplification would have hidden on merges
+                    TREESAME at <code>source.dir/</code>.
+                    <ul>
+                      <li><code>git log --no-walk --format=%H %P</code> &mdash; batched 500 at a time
+                        to stay under argv limits.</li>
+                    </ul>
+                  </li>
+                </ul>
+              </li>
+            </ul>
+          </li>
+          <li><strong><code>filterNotReplayedCommits(allCommits, shaMapping, dc)</code></strong>
+            &mdash; drop commits already in <code>shaMapping</code> and echoes carrying our own
+            trailer.</li>
+          <li><strong><code>collectNeededCandidates(...)</code></strong> &mdash; drop commits that no
+            branch&rsquo;s tip-walk would resolve to (would replay-then-orphan).</li>
+          <li>Resolve <code>targetInit</code>:
+            <ul>
+              <li><code>git rev-list --max-parents=0 target.remote/main</code> &rarr; init commit
+                used as fallback parent for orphan source commits.</li>
+            </ul>
+          </li>
+          <li><strong><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc,
+            pair, using })</code></strong> &mdash; per-commit loop. <em>Walkthroughs A/B/C below pick
+            up here.</em></li>
+          <li><strong><code>mapBranchesToTargetTips(source.remote, branches, shaMapping)</code></strong>
+            &rarr; <code>Map&lt;branch, targetSHA&gt;</code> &mdash; walk each branch newest-first to
+            find the first mapped ancestor.</li>
+          <li>per branch: compare target&rsquo;s existing shadow ref to the new tip
+            <ul>
+              <li><code>git push target.remote &lt;new&gt;:refs/heads/shadow/...</code> &mdash;
+                fast-forward, or <code>--force-with-lease</code> on divergence. See
+                <a href="#merge">&sect;7</a>.</li>
+            </ul>
+          </li>
+          <li>if pair has tags: <strong><code>syncTags({ source, target, shaMapping })</code></strong>.</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+</ul>
+
+<h3>Walkthrough A &mdash; Simple commit replay</h3>
+
+<p>
+  <strong>Shape:</strong> one new linear commit <code>X</code> on <code>source/feature</code>; its
+  single source-side parent <code>P</code> already has a shadow equivalent <code>P'</code> in
+  <code>shaMapping</code>. The vast majority of replays look like this.
+</p>
+
+<div class="diagram">source:   P ── X            target shadow:  P'  (after replay → P' ── X')</div>
+
+<p>Inside the <code>replayCommits</code> loop, with <code>commit = X</code>:</p>
+
+<ul class="call-tree">
+  <li><strong><code>replayCommits</code> loop body</strong>, iteration for <code>X</code>:
+    <ul>
+      <li><strong><code>getCommitMeta(X.hash)</code></strong> &mdash; pulls
+        author/committer/date/message/trailers.
+        <ul>
+          <li><code>git log -1 --format=...</code> with NUL-separated fields (so message newlines
+            can&rsquo;t shift the columns). Result feeds <code>buildCommitEnv</code> and the final
+            <code>commit-tree</code>.</li>
+        </ul>
+      </li>
+      <li><strong><code>hasTrailer(meta.trailers, dc.addTrailerKey)</code></strong> &rarr;
+        <code>false</code> &mdash; X isn&rsquo;t an echo from the other direction.</li>
+      <li><strong><code>resolveTargetParents(X, shaMapping, targetInit)</code></strong> &rarr;
+        <code>[P']</code>.
+        <ul>
+          <li><code>shaMapping.get(P)</code> &rarr; <code>P'</code> (direct hit, no fallback needed).</li>
+        </ul>
+      </li>
+      <li><strong><code>composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc
+        })</code></strong> &rarr; <code>null</code>.
+        <ul>
+          <li>Iterates <code>commit.parents</code> looking for one carrying
+            <code>dc.skipTrailerKey</code>; none match (X is a plain commit, not a merge of an
+            echo&rsquo;d commit).</li>
+        </ul>
+      </li>
+      <li><strong><code>mergeMappedParentTrees({ mappedParents: [P'], targetDir })</code></strong>
+        &rarr; <code>P'.tree</code>.
+        <ul>
+          <li>Single-parent branch: <code>git rev-parse P'^{tree}</code>. No <code>merge-tree</code>,
+            no outer-agreement check.</li>
+        </ul>
+      </li>
+      <li>read <code>.shadowignore</code> from the source commit
+        <ul>
+          <li><code>git show X:source.dir/.shadowignore</code> &mdash; engine reads it from the
+            commit tree, not the working copy.</li>
+          <li><code>compileIgnorePattern(line)</code> per non-comment line &rarr;
+            <code>RegExp[]</code>.</li>
+        </ul>
+      </li>
+      <li><strong><code>buildReplayedTree({ commitHash: X, sourceDir, targetDir, parentTree:
+        P'.tree, tmpIndex, shadowIgnorePatterns })</code></strong> &rarr; new tree SHA.
+        <ul>
+          <li><code>git read-tree P'.tree</code> &mdash; load parent into the private temp index.</li>
+          <li><code>git rev-parse X^</code> &mdash; decides diff-tree vs. ls-tree path (X has P, so
+            diff-tree).</li>
+          <li><code>git diff-tree -r X^ X -- source.dir/</code> &rarr; A/M/D/T entries scoped to the
+            synced slice.</li>
+          <li>per entry: filter via <code>shadowIgnorePatterns</code>, remap the path (strip
+            <code>sourceDir/</code>, prepend <code>targetDir/</code> &mdash; or inverse direction).</li>
+          <li><code>git rm --cached --quiet -- &lt;deletions&gt;</code> if any.</li>
+          <li><code>git update-index --index-info</code> (stdin-fed) for adds/modifies.</li>
+          <li><code>git write-tree</code> &rarr; final tree SHA.</li>
+        </ul>
+      </li>
+      <li><strong><code>appendTrailer(X.message, "Shadow-replayed-&lt;key&gt;: X.hash")</code></strong>
+        &mdash; stamps the message so the next sync&rsquo;s <code>loadReplayedMappings</code>
+        recognizes it.</li>
+      <li><strong><code>git commit-tree tree -p P' -m msg</code></strong> &rarr; <code>X'</code>.
+        <ul>
+          <li>Env from <code>buildCommitEnv(meta)</code> sets <code>GIT_AUTHOR_*</code> /
+            <code>GIT_COMMITTER_*</code> so authorship/timestamps survive the replay.</li>
+        </ul>
+      </li>
+      <li><code>shaMapping.set(X.hash, X'.hash)</code> &mdash; in-memory only; the trailer on the new
+        commit is what persists.</li>
+    </ul>
+  </li>
+</ul>
+
+<div class="highlight-box">
+  <strong>Why this path is &ldquo;clean&rdquo;:</strong> single parent + no merge &rarr; the whole
+  compose pipeline (steps&nbsp;4&ndash;5) collapses to <em>one parent tree</em>. Step&nbsp;7 then
+  layers one diff on top. No <code>merge-tree</code>, no outer/inner reconciliation, no candidate
+  search.
+</div>
+
+<h3>Walkthrough B &mdash; Merge with both parents on the source side</h3>
+
+<p>
+  <strong>Shape:</strong> source merge <code>M</code> joins <code>feature</code> back into
+  <code>main</code>. Both source parents <code>A</code> (main tip) and <code>B</code> (feature tip)
+  are native source-side commits &mdash; neither carries the cross-direction trailer
+  (<code>dc.skipTrailerKey</code>). Both already have shadow equivalents <code>A'</code>,
+  <code>B'</code> in <code>shaMapping</code>, and <code>git merge-tree A' B'</code> produces a clean
+  tree.
+</p>
+
+<div class="diagram">source:   A ─┐                     target shadow:   A' ─┐
+            X─ M  (feature merged)                       X─ M'
+   feature: B ─┘                                  B' ─┘</div>
+
+<p>
+  Same call tree as A; only the marked items differ. <code>getCommitMeta</code>, <code>hasTrailer</code>,
+  the <code>.shadowignore</code> read, and <code>appendTrailer</code> behave identically.
+</p>
+
+<ul class="call-tree">
+  <li><strong><code>replayCommits</code> loop body</strong>, iteration for <code>M</code>:
+    <ul>
+      <li><code>getCommitMeta(M.hash)</code> &mdash; same as A.</li>
+      <li><code>hasTrailer(...)</code> &rarr; <code>false</code> &mdash; same as A.</li>
+      <li><strong><code>resolveTargetParents(M, shaMapping, targetInit)</code></strong> &rarr;
+        <code>[A', B']</code>.
+        <ul>
+          <li>Loops over <code>commit.parents</code> = <code>[A, B]</code>; both hit
+            <code>shaMapping</code> directly.</li>
+        </ul>
+      </li>
+      <li><strong><code>composeCrossRepoMergeTree(...)</code></strong> &rarr; <code>null</code>.
+        <ul>
+          <li>Neither parent carries <code>dc.skipTrailerKey</code> &mdash; this is a within-repo
+            merge, not a cross-pair splice.</li>
+        </ul>
+      </li>
+      <li><strong><code>mergeMappedParentTrees({ mappedParents: [A', B'], commitShort, targetDir
+        })</code></strong> &rarr; <code>T<sub>merged</sub></code>.
+        <ul>
+          <li><code>git merge-tree --write-tree A' B'</code> &mdash; 3-way auto-merge of the two
+            mapped parents on the target side. Returns a clean tree SHA.</li>
+          <li><em>Why this normally succeeds:</em> shadow branches mirror source topology, so
+            <code>A'</code> and <code>B'</code> share a common ancestor on target. The
+            source-side conflict resolution is applied by <code>buildReplayedTree</code> on top.</li>
+        </ul>
+      </li>
+      <li>read <code>.shadowignore</code> &mdash; same as A.</li>
+      <li><strong><code>buildReplayedTree({ ..., parentTree: T<sub>merged</sub>, ... })</code></strong>
+        &rarr; new tree SHA.
+        <ul>
+          <li><code>git read-tree T<sub>merged</sub></code>.</li>
+          <li><code>git diff-tree -r M^ M -- source.dir/</code> &mdash; <code>M^</code> is
+            M&rsquo;s <em>first source parent</em>, so the diff captures the operator&rsquo;s in-repo
+            conflict resolution.</li>
+          <li>Path remap, <code>update-index</code>, <code>write-tree</code> &mdash; same primitives
+            as A.</li>
+        </ul>
+      </li>
+      <li><code>appendTrailer(...)</code> &mdash; same as A.</li>
+      <li><strong><code>git commit-tree tree -p A' -p B' -m msg</code></strong> &rarr;
+        <code>M'</code> &mdash; same two-parent topology as M.</li>
+      <li><code>shaMapping.set(M.hash, M'.hash)</code>.</li>
+    </ul>
+  </li>
+</ul>
+
+<div class="highlight-box">
+  <strong>Why <code>merge-tree</code> usually succeeds:</strong> the shadow branches mirror the
+  source&rsquo;s topology one-for-one. <code>git merge-tree</code> finds the common ancestor and
+  replays both sides automatically. Walkthrough C handles the case where one parent is an echo from
+  the other direction; walkthrough D handles the case where mapped parents disagree on outer state
+  (sibling-pair contamination).
+</div>
+
+<h3>Walkthrough C &mdash; Cross-repo merge (one parent is an echo)</h3>
+
+<p>
+  <strong>Shape:</strong> source merge <code>M</code> has two parents <code>P</code> and
+  <code>E'</code>, where <code>E'</code> carries <code>dc.skipTrailerKey</code> &mdash; meaning
+  <code>E'</code> is the source-side echo of an earlier target-side commit <code>E</code> (an
+  earlier reverse-direction sync brought <code>E</code> into source as <code>E'</code>). The
+  operator on the source side then merged that echo back into the source chain &mdash; typically the
+  &ldquo;land the shadow branch into main&rdquo; merge after a pull from target.
+</p>
+
+<p>
+  Why a special path: replaying <code>M</code> with just <code>P'</code> as parent tree would freeze
+  the shadow at the outer state of an old (often bootstrap-era) commit, even though <code>E</code>
+  &mdash; the original target-side commit that <code>E'</code> echoed &mdash; represents the
+  operator&rsquo;s intended outer state at the time of the echo. The cross-repo path splices that
+  outer over the latest shadow inner so checking out the new shadow commit shows the right thing.
+</p>
+
+<div class="diagram">source:  earlier reverse sync brought E into source as E' (echo, carries skipTrailerKey)
+
+   source main:    P ──┐
+                       X─ M       (M = "land shadow into main")
+   echo'd:        E' ──┘
+                       ↑
+                       shaMapping: E' → E (the original target-side commit)
+
+   result on target shadow:   P' ──┐
+                                   X─ M'   (parents = [P', E])
+                                 E ┘       (tree = E.outer + P':target.dir/)</div>
+
+<p>
+  Same call tree as B until the parent-tree compose step. The differences:
+</p>
+
+<ul class="call-tree">
+  <li><strong><code>replayCommits</code> loop body</strong>, iteration for <code>M</code>:
+    <ul>
+      <li><code>getCommitMeta(M.hash)</code> &mdash; same as A/B.</li>
+      <li><code>hasTrailer(meta.trailers, dc.addTrailerKey)</code> &rarr; <code>false</code> &mdash;
+        M itself isn&rsquo;t an echo (M was authored on the source side, <em>around</em> the echo).</li>
+      <li><strong><code>resolveTargetParents(M, shaMapping, targetInit)</code></strong> &rarr;
+        <code>[P', E]</code>.
+        <ul>
+          <li><code>shaMapping.get(P)</code> &rarr; <code>P'</code> (regular shadow lookup).</li>
+          <li><code>shaMapping.get(E')</code> &rarr; <code>E</code> &mdash; the echo&rsquo;s
+            <code>Shadow-replayed-&lt;pair&gt;-&lt;target-remote&gt;</code> trailer was loaded into
+            <code>shaMapping</code> by the common-setup step, so <code>E'</code> maps back to its
+            original target-side commit <code>E</code>.</li>
+        </ul>
+      </li>
+      <li><strong><code>composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc
+        })</code></strong> &rarr; composed tree (non-null this time).
+        <ul>
+          <li>iterates <code>commit.parents</code> looking for <code>dc.skipTrailerKey</code>:
+            <ul>
+              <li><code>getCommitMeta(E')</code> &mdash; called per parent; the inner
+                <code>hasTrailer(parentMeta.trailers, dc.skipTrailerKey)</code> hits true for
+                <code>E'</code>.</li>
+              <li><code>shaMapping.get(E')</code> &rarr; <code>E</code> &mdash; promotes this to
+                <code>echoTargetSHA</code>; loop breaks.</li>
+            </ul>
+          </li>
+          <li><code>git rev-parse E^{tree}</code> &rarr; <code>echoTree</code> &mdash; the full
+            target-side tree at echo time (outer + inner together, since this was a real target
+            commit).</li>
+          <li><code>git rev-parse mappedParents[0]:target.dir</code> &mdash; the shadow chain&rsquo;s
+            latest <code>target.dir/</code> subtree (= <code>P':target.dir</code>).</li>
+          <li><code>composeSubtree(echoTree, target.dir, shadowDir)</code> &mdash; splice the
+            shadow&rsquo;s inner over the echo&rsquo;s outer via temp index. Returns the composed
+            tree SHA.</li>
+        </ul>
+      </li>
+      <li><em>note:</em> <code>mergeMappedParentTrees</code> is <strong>not</strong> called when
+        <code>composeCrossRepoMergeTree</code> returns a tree &mdash; the cross-repo compose
+        short-circuits the regular merge path. <code>parentTree = composedParentTree</code>.</li>
+      <li>read <code>.shadowignore</code> &mdash; same as A.</li>
+      <li><strong><code>buildReplayedTree({ ..., parentTree: composedTree, ... })</code></strong>
+        &rarr; new tree SHA.
+        <ul>
+          <li><code>git read-tree composedTree</code>.</li>
+          <li><code>git diff-tree -r M^ M -- source.dir/</code> &mdash; M&rsquo;s source-side diff,
+            scoped to the synced slice (so it lands inside <code>target.dir/</code>).</li>
+          <li>path remap, <code>update-index</code>, <code>write-tree</code> &mdash; same primitives
+            as A/B.</li>
+        </ul>
+      </li>
+      <li><code>appendTrailer(...)</code> &mdash; same as A/B.</li>
+      <li><strong><code>git commit-tree tree -p P' -p E -m msg</code></strong> &rarr; <code>M'</code>
+        &mdash; two-parent topology preserved, but the second parent is the original target commit
+        rather than a shadow ref.</li>
+      <li><code>shaMapping.set(M.hash, M'.hash)</code>.</li>
+    </ul>
+  </li>
+</ul>
+
+<div class="highlight-box">
+  <strong>Why this avoids <code>merge-tree</code>:</strong> the two mapped parents (<code>P'</code>
+  on the shadow chain, <code>E</code> on the native target chain) live in entirely different
+  outer-state contexts. A 3-way merge of their trees would be nonsensical &mdash; one has the
+  shadow&rsquo;s frozen outer, the other has the operator&rsquo;s real outer. The cross-repo splice
+  just picks: outer from the echo (real intent), inner from the shadow (latest content).
+</div>
+
+<h3>Walkthrough D &mdash; Merge with unresolvable conflict</h3>
+
+<p>
+  <strong>Shape:</strong> same as B (both parents on the source side, no echo &mdash; so
+  <code>composeCrossRepoMergeTree</code> returns <code>null</code>), but <code>merge-tree A' B'</code>
+  fails &mdash; typically because <code>A'</code> absorbed content from a sibling pair outside
+  <code>targetDir/</code> while <code>B'</code> didn&rsquo;t (or vice-versa). The source merge
+  couldn&rsquo;t have produced that outer state, so no automatic compose works.
+</p>
+
+<p>
+  Same call tree as B up to <code>mergeMappedParentTrees</code>. From there, the engine falls through
+  three layers; once the layers exhaust, two sub-paths follow.
+</p>
+
+<ul class="call-tree">
+  <li><strong><code>replayCommits</code> loop body</strong>, iteration for <code>M</code>:
+    <ul>
+      <li><code>getCommitMeta</code>, <code>hasTrailer</code>, <code>resolveTargetParents</code> &rarr;
+        <code>[A', B']</code>, <code>composeCrossRepoMergeTree</code> &rarr; <code>null</code>
+        &mdash; same as B.</li>
+      <li><strong><code>mergeMappedParentTrees({ mappedParents: [A', B'], targetDir })</code></strong>
+        &rarr; <code>null</code>.
+        <ul>
+          <li><code>git merge-tree --write-tree A' B'</code> &mdash; conflict, no clean SHA.</li>
+          <li>falls through to the <strong>outer-agreement check</strong>:
+            <ul>
+              <li><code>outerOnlyTree(A', targetDir)</code> &mdash; everything outside
+                <code>targetDir/</code> from <code>A'</code>.
+                <ul>
+                  <li><code>git read-tree A'</code> into temp index, strip <code>targetDir</code>
+                    entries, <code>git write-tree</code>.</li>
+                </ul>
+              </li>
+              <li><code>outerOnlyTree(B', targetDir)</code> &mdash; same for <code>B'</code>.</li>
+              <li>compare the two outer-tree SHAs:
+                <ul>
+                  <li>equal &rarr; outer is consistent. <code>composeSubtree(outer, targetDir,
+                    A':targetDir)</code> splices <code>A'</code>&rsquo;s inner over the shared
+                    outer; replay continues into <code>buildReplayedTree</code> normally.</li>
+                  <li>different &rarr; <code>return null</code>. The source commit cannot have
+                    produced this outer divergence, so no automatic reconciliation is possible.</li>
+                </ul>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li>back in <code>replayCommits</code>: <code>merged === null</code> &mdash; pick a sub-path
+        (C1 or C2 below).</li>
+    </ul>
+  </li>
+</ul>
+
+<p><strong>Sub-path C1 &mdash; B&prime; fast path (flag <code>--allow-conflict-resolution-overwrite</code>):</strong></p>
+
+<ul class="call-tree">
+  <li><strong><code>findResolutionCandidate({ commit: M, mappedParents, source, target, pair, using
+    })</code></strong> &mdash; look for the operator&rsquo;s real merge on the target&rsquo;s
+    into-branch.
+    <ul>
+      <li><code>branchesContainingOnRemote(M, source.remote)</code> &mdash; M&rsquo;s
+        &ldquo;into&rdquo; branch.
+        <ul>
+          <li><code>git for-each-ref --contains M refs/remotes/source.remote/</code>.</li>
+        </ul>
+      </li>
+      <li><code>branchesContainingOnRemote(M.parents[1], source.remote)</code> &mdash; the
+        &ldquo;from&rdquo; branch (same primitive).</li>
+      <li>identify <code>intoBranch</code> / <code>fromBranch</code> by set difference; bail on
+        ambiguous shape.</li>
+      <li><code>git log --merges --format=%H %P {shadowRef}..{target.remote/intoBranch}</code>
+        &mdash; candidate target-side merge commits since the last sync.</li>
+      <li>per candidate Mm: <code>git merge-base --is-ancestor Mm.parents[1] target/fromBranch</code>
+        &mdash; confirms the operator actually merged FROM the right branch on target.</li>
+      <li>if operator passed <code>--using</code>: filter candidates by SHA (full or prefix match).</li>
+      <li>returns <code>{ targetMerge }</code> on exactly one match, <code>{ ambiguous, candidates }</code>
+        on multiple.</li>
+    </ul>
+  </li>
+  <li>if <code>targetMerge</code> is set: <strong><code>composeResolvedMergeTree({ targetMerge, sourceMerge: M.hash,
+    targetDir })</code></strong> &rarr; spliced tree.
+    <ul>
+      <li><code>git rev-parse targetMerge^{tree}</code> &mdash; outer (operator&rsquo;s real resolution
+        outside <code>targetDir/</code>).</li>
+      <li><code>git rev-parse sourceMerge^{tree}</code> &mdash; inner (source merge&rsquo;s tree at the
+        synced slice).</li>
+      <li><code>composeSubtree(targetMerge.tree, targetDir, sourceMerge.tree)</code> &mdash; splice via temp index.</li>
+    </ul>
+  </li>
+  <li><strong><code>git commit-tree resolvedTree -p A' -p B' -m msg</code></strong> &rarr; <code>resolvedMerge</code>.
+    <ul>
+      <li>Message: <code>"Conflict resolution from M (target-merge outer + source-merge inner)\n\n..."</code> with the
+        <code>Shadow-replayed-&lt;key&gt;: M.hash</code> trailer appended.</li>
+      <li><code>shaMapping.set(M.hash, resolvedMerge); continue;</code> &mdash; on to the next commit. The
+        two-parent topology is preserved; the tree reflects the operator&rsquo;s real on-target
+        resolution.</li>
+    </ul>
+  </li>
+  <li>if <code>ambiguous</code>: <strong><code>fail()</code></strong> with the candidate list and
+    instruction to rerun with <code>--using &lt;sha&gt;</code>.</li>
+</ul>
+
+<p><strong>Sub-path C2 &mdash; manual resolution (default, or no candidate found):</strong></p>
+
+<ul class="call-tree">
+  <li><strong><code>formatUnresolvableMergeError({ commit: M, meta, mappedParents, source, target,
+    pair })</code></strong> &mdash; build a human-readable recipe.
+    <ul>
+      <li><code>inferSourceBranch(M, source.remote)</code> &mdash; pointer to the shadow ref in the
+        error.
+        <ul>
+          <li><code>git for-each-ref --contains M refs/remotes/source.remote/</code> &mdash; same
+            primitive as <code>branchesContainingOnRemote</code> but returns null on ambiguity.</li>
+        </ul>
+      </li>
+      <li><code>replayedTrailerKey(pair.name, source.remote)</code> &mdash; computes the exact
+        trailer the operator must embed.</li>
+      <li>assembles a multi-line message: source SHA, divergent mapped parents, an explanation
+        that source-side content can&rsquo;t have resolved an outer-state conflict, and a copy-paste
+        recipe using <code>git checkout</code> / <code>git merge</code> /
+        <code>commit-tree -p A' -p B'</code> / <code>update-ref</code> / <code>push</code>.</li>
+    </ul>
+  </li>
+  <li><strong><code>fail(formattedError)</code></strong> &rarr; throws <code>ShadowSyncError</code>.
+    Sync aborts on this branch; other branches in the same pair may have replayed successfully
+    already.</li>
+  <li><em>operator action:</em> follow the recipe to push a hand-built shadow commit carrying the
+    trailer.
+    <ul>
+      <li>on the next sync, <code>loadReplayedMappings</code> (common setup) picks up that trailer,
+        places M into <code>shaMapping</code>, and <code>filterNotReplayedCommits</code> drops M
+        from the work list. The sync proceeds.</li>
+    </ul>
+  </li>
+</ul>
+
+<div class="highlight-box">
+  <strong>Why three layers (merge-tree &rarr; outer-agreement &rarr; B&prime; / manual):</strong>
+  each layer is a strictly weaker invariant. <code>merge-tree</code> is the cheap happy path.
+  Outer-agreement is correct when only the inner slice changed across the merge but the mapped
+  parents carry different sibling content. B&prime; reconstructs the operator&rsquo;s real merge
+  resolution from target. Manual is the floor &mdash; never silently wrong, always paged to a human.
+</div>
+
+<!-- ── 7. Shadow Branch Divergence ─────────────────────────────────────── -->
+
+<h2 id="merge">7. Shadow Branch Divergence</h2>
 
 <p>
   Two situations after replay: pushing the shadow ref (handled by the engine, with one fast-forward
@@ -1626,9 +2167,9 @@ git merge origin/shadow/backend/main</code></pre>
   need manual resolution.
 </p>
 
-<!-- ── 7. Trailers & Deduplication ─────────────────────────────────────── -->
+<!-- ── 8. Trailers & Deduplication ─────────────────────────────────────── -->
 
-<h2 id="dedup">7. Trailers &amp; Deduplication</h2>
+<h2 id="dedup">8. Trailers &amp; Deduplication</h2>
 
 <p>
   In a bidirectional system, replayed commits would bounce back and forth forever without deduplication.
@@ -1700,9 +2241,9 @@ RepoB main now contains X', plus a merge commit M whose parents are
   only proper trailer lines at the end of the message count. See <code>test-push-content.ts</code>, phase 5.
 </div>
 
-<!-- ── 8. .shadowignore ────────────────────────────────────────────────── -->
+<!-- ── 9. .shadowignore ────────────────────────────────────────────────── -->
 
-<h2 id="shadowignore">8. .shadowignore</h2>
+<h2 id="shadowignore">9. .shadowignore</h2>
 
 <p>
   Each repo can control which files it <em>sends</em> to the other side. Place a <code>.shadowignore</code>
@@ -1733,9 +2274,9 @@ secrets/</code></pre>
   on the next sync &mdash; no config change required.
 </p>
 
-<!-- ── 9. Preflight Checks ─────────────────────────────────────────────── -->
+<!-- ── 10. Preflight Checks ────────────────────────────────────────────── -->
 
-<h2 id="preflight">9. Preflight Checks</h2>
+<h2 id="preflight">10. Preflight Checks</h2>
 
 <p>
   Preflight only flags conditions the engine can&rsquo;t handle. Anything it does handle &mdash;
@@ -1767,9 +2308,9 @@ secrets/</code></pre>
 
 <p>Branches with preflight errors are skipped; the rest of the sync continues.</p>
 
-<!-- ── 10. File Reference ──────────────────────────────────────────────── -->
+<!-- ── 11. File Reference ──────────────────────────────────────────────── -->
 
-<h2 id="files">10. File Reference</h2>
+<h2 id="files">11. File Reference</h2>
 
 <table>
   <tr><th>File</th><th>Purpose</th></tr>

@@ -81,7 +81,7 @@ In rare cases the engine can't auto-resolve a source-side merge because the mapp
 
 Two recovery flows:
 
-**B′ — engine-composed squash (preferred).** Resolve the merge on the target's working branch, then re-run sync. The engine auto-detects your resolution and composes the right tree.
+**B′ — engine-composed resolved merge (preferred).** Resolve the merge on the target's working branch, then re-run sync. The engine auto-detects your resolution and composes the right tree.
 
 ```bash
 # 1. The sync failed on a merge (call it Bm). Switch to the target's working branch.
@@ -94,7 +94,7 @@ git merge --no-ff project
 git push origin core-dev
 
 # 3. Re-run sync with the feature flag.
-SHADOW_ALLOW_COMPOSED_SQUASH=1 npm run sync -- --from b
+npm run sync -- --from b --allow-conflict-resolution-overwrite
 ```
 
 The engine identifies your merge by shape — a 2-parent merge on the into-branch whose second parent is reachable from the from-branch — composes its outer with the source merge's inner, and writes the result to the shadow ref. No new trailers or operator-supplied SHAs needed in the common case.
@@ -102,10 +102,10 @@ The engine identifies your merge by shape — a 2-parent merge on the into-branc
 If you made multiple unrelated merges on the target's into-branch and several pass the shape check, the engine errors with `ambiguous resolution candidates: <sha1>, <sha2>; rerun with --using <sha>`. Pick the right one:
 
 ```bash
-SHADOW_ALLOW_COMPOSED_SQUASH=1 npm run sync -- --from b --using <sha>
+npm run sync -- --from b --using <sha> --allow-conflict-resolution-overwrite
 ```
 
-**A — hand-built resolution on the shadow ref (always available, no flag).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run. This path works regardless of whether `SHADOW_ALLOW_COMPOSED_SQUASH` is set.
+**A — hand-built resolution on the shadow ref (always available, no flag).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run. This path works regardless of whether `--allow-conflict-resolution-overwrite` is set.
 
 The full B′ design and a worked example are in [`local_tests/conflict_squash/`](local_tests/conflict_squash/) (`IMPLEMENTATION_PLAN.md` and `run_scenario.ts`).
 

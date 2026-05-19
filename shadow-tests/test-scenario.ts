@@ -1253,8 +1253,8 @@ function runSht6() {
     // project-b; mono adds outer-divergent commits; backend merges + adds Bp1x;
     // backend's project-b → project-a merge (Bm) has mapped parents disagreeing
     // on README.md; engine halts; operator merges project-b on mono's project-a
-    // (Mm); --from b with SHADOW_ALLOW_COMPOSED_SQUASH=1 emits sq composed of
-    // (Mm.outer + Bm.inner under backend/).
+    // (Mm); --from b --allow-conflict-resolution-overwrite emits a resolved
+    // merge composed of (Mm.outer + Bm.inner under backend/).
 
     // 6.0 Backend creates project-a, project-b from Bc0 (clean ancestry, no inherited
     // merges — required for findResolutionCandidate to identify Mm uniquely; the scan
@@ -1361,13 +1361,10 @@ function runSht6() {
     git("push origin project-a", mono.working);
     void Mm;
 
-    // 6.9 --from b with SHADOW_ALLOW_COMPOSED_SQUASH=1 — engine emits sq
-    process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-    try {
-      const r = runSync({ from: "b" });
+    // 6.9 --from b with --allow-conflict-resolution-overwrite — engine emits the resolved merge
+    {
+      const r = runSync({ from: "b", allowConflictResolutionOverwrite: true });
       assertEqual(r.exitCode, 0, `[Phase 6.9] --from b with B': ${r.stderr.slice(0, 400)}`);
-    } finally {
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
     }
 
     git("fetch origin", mono.working);
@@ -1395,12 +1392,9 @@ function runSht6() {
       "[Phase 6.10] catch-up brings backend/src/feat-a-extra.ts to mono.project-a");
 
     // 6.11 Idempotency — re-running --from b with the flag is a no-op on shadow tip
-    process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-    try {
-      const r = runSync({ from: "b" });
+    {
+      const r = runSync({ from: "b", allowConflictResolutionOverwrite: true });
       assertEqual(r.exitCode, 0, `[Phase 6.11] re-run --from b: ${r.stderr.slice(0, 400)}`);
-    } finally {
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
     }
     git("fetch origin", mono.working);
     const sq2 = git("rev-parse origin/shadow/backend/project-a", mono.working);
@@ -1539,9 +1533,7 @@ async function runSht7(): Promise<void> {
     const { env, info } = setupAndFailReplay("b-prime-happy");
     try {
       operatorMergeProject(env);
-      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-      const r = runCiSync(env);
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
       assertEqual(r.status, 0, `--from b status (stderr=${r.stderr})`);
   
       git("fetch origin --prune", env.localRepo);
@@ -1571,14 +1563,12 @@ async function runSht7(): Promise<void> {
     const { env, info } = setupAndFailReplay("b-prime-idempotent");
     try {
       operatorMergeProject(env);
-      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-      const r1 = runCiSync(env);
+      const r1 = runCiSync(env, { allowConflictResolutionOverwrite: true });
       assertEqual(r1.status, 0, `first --from b status (stderr=${r1.stderr})`);
       git("fetch origin --prune", env.localRepo);
       const sq1 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
-  
-      const r2 = runCiSync(env);
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+
+      const r2 = runCiSync(env, { allowConflictResolutionOverwrite: true });
       assertEqual(r2.status, 0, `second --from b status (stderr=${r2.stderr})`);
       git("fetch origin --prune", env.localRepo);
       const sq2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
@@ -1607,17 +1597,14 @@ async function runSht7(): Promise<void> {
       git('merge --no-ff project -m "Mm-extra"', env.localRepo);
       git("push origin core-dev", env.localRepo);
   
-      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-      const r = runCiSync(env);
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
       assert(r.status !== 0, "expected --from b to fail on ambiguous candidates");
       assert(/ambiguous resolution candidates/.test(r.stdout + r.stderr),
         `expected ambiguity error, got:\n${r.stdout}\n${r.stderr}`);
-  
+
       // Disambiguate with --using
       const candidates = (r.stdout + r.stderr).match(/[0-9a-f]{40}/g) ?? [];
       assert(candidates.length >= 2, `expected >=2 candidate SHAs printed, got ${candidates.length}`);
-      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
       // Pick the natural Mm — the one whose parents[1] is project's tip
       const projectTip = gitOut("rev-parse project", env.localRepo);
       const mmNatural = candidates.find(c => {
@@ -1625,9 +1612,9 @@ async function runSht7(): Promise<void> {
         return parents[1] === projectTip;
       });
       assert(!!mmNatural, `could not find natural Mm among ${candidates.join(",")}`);
-  
+
       // Re-invoke with --using via runSync's options path: harness's runCiSync
-      // doesn't expose flags, so build the env override directly via require.
+      // takes the squash flag, but --using needs the full SyncOptions surface.
       const { runSync } = require("../shadow-sync");
       const { applyTestOverrides } = require("../shadow-common");
       applyTestOverrides({
@@ -1639,8 +1626,7 @@ async function runSht7(): Promise<void> {
         }],
         shadowBranchPrefix: env.branchPrefix,
       });
-      const r2 = runSync({ from: "b", pair: env.subdir, using: [mmNatural!] });
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      const r2 = runSync({ from: "b", pair: env.subdir, using: [mmNatural!], allowConflictResolutionOverwrite: true });
       assertEqual(r2.exitCode, 0, `--from b --using ${mmNatural} status (stderr=${r2.stderr})`);
     } finally {
       env.cleanup();
@@ -1651,9 +1637,7 @@ async function runSht7(): Promise<void> {
     const { env } = setupAndFailReplay("b-prime-no-candidate");
     try {
       // Skip operator merge — there's nothing for auto-detect to find.
-      process.env.SHADOW_ALLOW_COMPOSED_SQUASH = "1";
-      const r = runCiSync(env);
-      delete process.env.SHADOW_ALLOW_COMPOSED_SQUASH;
+      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
       assert(r.status !== 0, "expected --from b to fail with no candidate");
       // Original error message must still appear
       assert(/cannot auto-resolve replay parent tree/.test(r.stdout + r.stderr),
@@ -1711,9 +1695,11 @@ async function runSht7(): Promise<void> {
 }
 
 export default async function run() {
-  runSht5();  console.log("  ✓ sht5");
-  runSht6();  console.log("  ✓ sht6");
-  await runSht7();  console.log("  ✓ sht7");
+  // SCENARIO=sht5,sht7 to run a subset; default = all
+  const filter = (process.env.SCENARIO ?? "sht5,sht6,sht7").split(",").map(s => s.trim());
+  if (filter.includes("sht5")) { runSht5();       console.log("  ✓ sht5"); }
+  if (filter.includes("sht6")) { runSht6();       console.log("  ✓ sht6"); }
+  if (filter.includes("sht7")) { await runSht7(); console.log("  ✓ sht7"); }
 }
 
 if (require.main === module) {

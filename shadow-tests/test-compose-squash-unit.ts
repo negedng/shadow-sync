@@ -1,7 +1,7 @@
 /**
  * test-compose-squash-unit.ts — unit tests for B' composition.
  *
- * Focuses on composeSquashedMergeTree's argument order (an argument-swap bug
+ * Focuses on composeResolvedMergeTree's argument order (an argument-swap bug
  * would silently produce a wrong tree). Most of findResolutionCandidate is
  * exercised end-to-end in test-conflict-squash-b-prime.ts; this file covers
  * just the wrong-shape rejection path that the integration test cannot easily
@@ -11,7 +11,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { composeSquashedMergeTree, findResolutionCandidate, applyTestOverrides } from "../shadow-common";
+import { composeResolvedMergeTree, findResolutionCandidate, applyTestOverrides } from "../shadow-common";
 
 function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
@@ -69,7 +69,7 @@ function runComposeArgumentOrder(): void {
   gitVoid('commit -m "bm"', dir);
   const bm = git("rev-parse HEAD", dir);
 
-  const composed = composeSquashedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "backend" });
+  const composed = composeResolvedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "backend" });
   const entries = git(`ls-tree -r ${composed}`, dir);
 
   // Outer: README.md and frontend.txt from Mm
@@ -106,7 +106,7 @@ function runComposeNoTargetDir(): void {
   gitVoid('commit -m "bm"', dir);
   const bm = git("rev-parse HEAD", dir);
 
-  const composed = composeSquashedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "" });
+  const composed = composeResolvedMergeTree({ targetMerge: mm, sourceMerge: bm, targetDir: "" });
   assertEqual(composed, mmTree, "no targetDir → composed must equal Mm.tree");
 
   fs.rmSync(dir, { recursive: true, force: true });

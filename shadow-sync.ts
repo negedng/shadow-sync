@@ -28,6 +28,8 @@ export interface SyncOptions {
   branch?: string;
   /** Operator-supplied target-merge SHA(s) for B' disambiguation (see findResolutionCandidate). */
   using?: string[];
+  /** Opt-in: when a source-merge conflict resolution can't be auto-replayed, overwrite with a resolved merge composed from the operator's target-side merge. */
+  allowConflictResolutionOverwrite?: boolean;
 }
 
 export interface SyncResult {
@@ -136,6 +138,7 @@ function _runSyncCore(options: SyncOptions): number {
         from: fromSide,
         branches: validBranches,
         using: options.using ?? [],
+        allowConflictResolutionOverwrite: options.allowConflictResolutionOverwrite ?? false,
       });
 
       // Update shadow branches on target's remote
@@ -245,6 +248,7 @@ if (require.main === module) {
       from:   { type: "string", short: "f" },
       branch: { type: "string", short: "b" },
       using:  { type: "string", multiple: true },
+      "allow-conflict-resolution-overwrite": { type: "boolean" },
     },
     strict: true,
   });
@@ -254,6 +258,7 @@ if (require.main === module) {
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch,
     using: values.using,
+    allowConflictResolutionOverwrite: values["allow-conflict-resolution-overwrite"] ?? false,
   });
 
   if (result.stdout) process.stdout.write(result.stdout + "\n");
