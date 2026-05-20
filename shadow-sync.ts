@@ -14,7 +14,7 @@
 import { parseArgs } from "util";
 import {
   PAIRS, ShadowSyncError,
-  git, refExists, listRemoteBranches,
+  git, refExists, listRemoteBranches, filterBranchesForRemote,
   shadowBranchName, ensureRemote,
   mirrorHistory, syncTags, runPreflightChecks, printPreflightResults,
   validateName, fail,
@@ -104,10 +104,10 @@ function _runSyncCore(options: SyncOptions): number {
 
     const branches = options.branch
       ? [options.branch]
-      : listRemoteBranches(source.remote);
+      : filterBranchesForRemote(source.remote, listRemoteBranches(source.remote));
 
     if (branches.length === 0) {
-      console.log(`  No branches found on '${source.remote}'.`);
+      console.log(`  No branches to sync on '${source.remote}' (after filter).`);
       continue;
     }
 

@@ -448,8 +448,8 @@ function computeAutoIgnorePatterns(
   return { patterns, reasons };
 }
 
-/** Compile a .shadowignore pattern (supports * and ** globs) into a regex. */
-function compileIgnorePattern(pattern: string): RegExp {
+/** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
+export function compileIgnorePattern(pattern: string): RegExp {
   const regex = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
@@ -458,6 +458,40 @@ function compileIgnorePattern(pattern: string): RegExp {
     .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
     .replace(/<<GLOBSTAR>>/g, ".*");
   return new RegExp(`^${regex}$`);
+}
+
+// ── Branch filters ────────────────────────────────────────────────────────────
+
+interface BranchFilterDoc { filters?: Record<string, string[]>; }
+
+const BRANCH_FILTERS_PATH = path.join(path.dirname(CONFIG_PATH), "branch-filters.json");
+
+/** null = file absent (back-compat: pass-through); Map = strict allowlist. */
+function loadBranchFilters(): Map<string, RegExp[]> | null {
+  if (!fs.existsSync(BRANCH_FILTERS_PATH)) return null;
+  const doc = JSON.parse(fs.readFileSync(BRANCH_FILTERS_PATH, "utf8")) as BranchFilterDoc;
+  const out = new Map<string, RegExp[]>();
+  for (const [remote, patterns] of Object.entries(doc.filters ?? {})) {
+    out.set(remote, (patterns ?? []).map(compileIgnorePattern));
+  }
+  return out;
+}
+
+let _branchFilters: Map<string, RegExp[]> | null = loadBranchFilters();
+if (_branchFilters === null) {
+  console.error("  branch-filters.json not present — syncing all branches.");
+}
+
+export function filterBranchesForRemote(remote: string, branches: string[]): string[] {
+  if (_branchFilters === null) return branches;
+  const patterns = _branchFilters.get(remote);
+  if (patterns === undefined) return [];
+  return branches.filter(b => patterns.some(re => re.test(b)));
+}
+
+/** Test hook — installs an in-memory filter map (or null for back-compat). */
+export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): void {
+  _branchFilters = map;
 }
 
 /**
