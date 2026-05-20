@@ -405,6 +405,49 @@ function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCom
 
 // ── Tree composition & parent resolution ──────────────────────────────────────
 
+/**
+ * Derive ignore patterns for paths owned by another pair nested inside this
+ * pair's source/target endpoint on the same remote. Lets two pairs share a
+ * remote where one's `dir` is inside the other's without the outer pair
+ * carrying the inner pair's content (which would duplicate on the target).
+ */
+function computeAutoIgnorePatterns(
+  source: RepoEndpoint,
+  target: RepoEndpoint,
+  pair: SyncPair,
+  allPairs: SyncPair[] = PAIRS,
+): { patterns: string[]; reasons: Map<string, string[]> } {
+  const seen = new Set<string>();
+  const patterns: string[] = [];
+  const reasons = new Map<string, string[]>();
+
+  for (const other of allPairs) {
+    if (other.name === pair.name) continue;
+    for (const o of [other.a, other.b]) {
+      for (const myEnd of [source, target]) {
+        if (o.remote !== myEnd.remote) continue;
+        let rel: string | null = null;
+        if (myEnd.dir === "") {
+          if (o.dir !== "") rel = o.dir;
+        } else if (o.dir.startsWith(myEnd.dir + "/")) {
+          rel = o.dir.slice(myEnd.dir.length + 1);
+        }
+        if (!rel) continue;
+        for (const pat of [rel, `${rel}/**`]) {
+          if (seen.has(pat)) continue;
+          seen.add(pat);
+          patterns.push(pat);
+          const list = reasons.get(other.name) ?? [];
+          list.push(pat);
+          reasons.set(other.name, list);
+        }
+      }
+    }
+  }
+
+  return { patterns, reasons };
+}
+
 /** Compile a .shadowignore pattern (supports * and ** globs) into a regex. */
 function compileIgnorePattern(pattern: string): RegExp {
   const regex = pattern
@@ -1041,8 +1084,9 @@ function replayCommits(opts: {
   pair: SyncPair;
   using: string[];
   allowConflictResolutionOverwrite: boolean;
+  autoIgnorePatterns: RegExp[];
 }): void {
-  const { newCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite } = opts;
+  const { newCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite, autoIgnorePatterns } = opts;
   const tmpIndex = path.join(
     os.tmpdir(),
     `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
@@ -1108,9 +1152,10 @@ function replayCommits(opts: {
 
       const ignorePath = source.dir ? `${source.dir}/.shadowignore` : ".shadowignore";
       const ignoreContent = git(["show", `${commit.hash}:${ignorePath}`], { safe: true });
-      const shadowIgnorePatterns = ignoreContent.ok && ignoreContent.stdout
+      const fileIgnorePatterns = ignoreContent.ok && ignoreContent.stdout
         ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
         : [];
+      const shadowIgnorePatterns = [...autoIgnorePatterns, ...fileIgnorePatterns];
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,
@@ -1156,6 +1201,14 @@ export function mirrorHistory(opts: {
   const target = from === "a" ? pair.b : pair.a;
   const dc = buildDirectionConfig(pair.name, source.remote, target.remote);
 
+  const auto = computeAutoIgnorePatterns(source, target, pair);
+  const autoIgnorePatterns = auto.patterns.map(compileIgnorePattern);
+  if (auto.reasons.size > 0) {
+    for (const [fromPair, pats] of auto.reasons) {
+      console.log(`Auto-ignoring nested-pair paths from "${fromPair}": ${pats.join(", ")}`);
+    }
+  }
+
   console.log("Scanning history for already-replayed commits...");
   const shaMapping = loadReplayedMappings({ pair, target, branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
@@ -1193,7 +1246,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite });
+  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite, autoIgnorePatterns });
 
   console.log();
   console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);

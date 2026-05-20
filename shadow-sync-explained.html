@@ -2274,6 +2274,33 @@ secrets/</code></pre>
   on the next sync &mdash; no config change required.
 </p>
 
+<h3>Auto-derived nested-pair ignores</h3>
+
+<p>
+  When two pairs in <code>shadow-config.json</code> share a remote and one pair's
+  <code>dir</code> is nested inside the other's, the engine auto-derives an ignore pattern
+  at the start of <code>mirrorHistory</code> so the outer pair never carries the inner
+  pair's content (which would duplicate on the target).
+</p>
+
+<p>
+  Example: a <code>backend</code> pair maps <code>mono:backend/</code> &harr;
+  <code>backend-repo:""</code>, and a <code>common-backend</code> pair maps
+  <code>mono:common/</code> &harr; <code>backend-repo:"src/evntcore/common"</code>. The
+  <code>common-backend</code> b-side is nested inside <code>backend</code>'s b-side
+  (same remote, dir <code>src/evntcore/common</code> inside <code>""</code>), so the
+  engine emits <code>src/evntcore/common</code> and <code>src/evntcore/common/**</code>
+  as auto-ignore patterns when replaying <code>backend</code>. The inner pair
+  (<code>common-backend</code>) is unaffected and carries the nested content normally.
+</p>
+
+<p>
+  Detection is by <code>remote</code> name (matching how trailers are scoped). Manual
+  <code>.shadowignore</code> files are still honored and are unioned with auto-derived
+  patterns &mdash; useful for non-nested exclusions like <code>*.local</code> or
+  <code>**/CLAUDE.md</code>.
+</p>
+
 <!-- ── 10. Preflight Checks ────────────────────────────────────────────── -->
 
 <h2 id="preflight">10. Preflight Checks</h2>
