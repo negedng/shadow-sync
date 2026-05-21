@@ -391,16 +391,41 @@ function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
+const ANY_SHADOW_TRAILER_RE = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
+
+// Discriminator: drop a merge iff TREESAME to some parent under the path filter
+// AND no non-first parent carries any Shadow-replayed-* trailer (any pair).
+// Keeps Case B (same-pair echo on 2nd parent), §5 variant (same shape with
+// inverted resolution), and Case A (sibling-pair echo). Drops Cases C/D
+// (purely local TREESAME merges with no cross-repo significance).
+// See local_tests/keep_drop_test/full_history_explained.html §5.
+function isLoadBearingMerge(c: TopoCommit, sourceDir: string): boolean {
+  if (c.parents.length < 2 || !sourceDir) return true;
+  const mt = git(["rev-parse", `${c.hash}:${sourceDir}`], { safe: true });
+  if (!mt.ok) return true;
+  const treesameToSome = c.parents.some(p => {
+    const pt = git(["rev-parse", `${p}:${sourceDir}`], { safe: true });
+    return pt.ok && pt.stdout === mt.stdout;
+  });
+  if (!treesameToSome) return true;
+  for (let i = 1; i < c.parents.length; i++) {
+    const meta = getCommitMeta(c.parents[i]);
+    if (ANY_SHADOW_TRAILER_RE.test(meta.trailers)) return true;
+  }
+  return false;
+}
+
 function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
-  // --full-history is required when source.dir is non-empty: rev-list's default
-  // history simplification drops consumer-merges TREESAME to a parent at the
-  // path, which silently loses concurrent-merge round descendants and breaks
-  // C6's FF-only invariant. See M1 (where the splice + --full-history pairing
-  // is described) and C6 (the push-time invariant it protects).
+  // --full-history surfaces all merges in the path-filtered reachable set; the
+  // post-filter via isLoadBearingMerge drops the non-load-bearing ones. The
+  // rationale (rev-list's default simplification rewrites the walk through a
+  // TREESAME parent, which can route into the source-side echo chain — see
+  // full_history_explained.html) is what mandates --full-history; the
+  // discriminator then drops merges that carry no cross-repo trailer.
   const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
     ...branches.map(b => `${source.remote}/${b}`)];
   if (source.dir) args.push("--", `${source.dir}/`);
-  return collectCommitsWithTrueParents(args);
+  return collectCommitsWithTrueParents(args).filter(c => isLoadBearingMerge(c, source.dir));
 }
 
 // ── Tree composition & parent resolution ──────────────────────────────────────

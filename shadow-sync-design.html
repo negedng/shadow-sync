@@ -191,7 +191,7 @@
 </nav>
 
 <div class="reading-note">
-  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R7</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C10</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C7 are the major ones, C8&ndash;C10 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
+  <strong>How to read this.</strong> Three kinds of label: <span class="ref ref-r">R1</span>&ndash;<span class="ref ref-r">R7</span> requirements (must-haves), <span class="ref ref-c">C1</span>&ndash;<span class="ref ref-c">C12</span> design choices (real alternatives existed; we picked one with tradeoffs &mdash; C1&ndash;C7 are the major ones, C8&ndash;C12 are minor), and <span class="ref ref-m">M1</span>&ndash;<span class="ref ref-m">M9</span> mechanisms (forced by a choice; no real alternative once the choice is made). Every claim in sections 2&ndash;4 traces back to a label. If a claim can&rsquo;t, something&rsquo;s wrong with the plan &mdash; not the implementation.
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -421,7 +421,7 @@
 </div>
 
 <h3 class="subsection">Minor choices</h3>
-<p>Three more decisions with genuine alternatives but narrower blast radius than C1&ndash;C7. Listed briefly.</p>
+<p>Five more decisions with genuine alternatives but narrower blast radius than C1&ndash;C7. Listed briefly.</p>
 
 <div class="card compact" id="c8">
   <h3><span class="ref ref-c">C8</span> Symmetric <code>a</code> / <code>b</code> endpoints; direction is a runtime flag</h3>
@@ -439,6 +439,28 @@
   <h3><span class="ref ref-c">C10</span> Pin cross-platform git behaviour via <code>-c</code> overrides on every <code>git</code> call</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> trust the user&rsquo;s global git config; <code>git config --local</code> (mutates the repo we&rsquo;ve been handed); or <code>GIT_CONFIG_COUNT</code>/<code>_KEY_i</code> env vars.</p>
   <p>Every invocation prepends <code>-c core.autocrlf=false -c core.safecrlf=false -c core.precomposeunicode=true -c core.quotepath=false</code>. Linux and Windows runners produce byte-identical trees; the user&rsquo;s global config can&rsquo;t corrupt a replay. Without these, the same line written on a Windows runner would land as CRLF on shadow and LF on the consumer&rsquo;s tree, producing exactly the kind of phantom conflict <a class="ref ref-r" href="#r5">R5</a> forbids.</p>
+</div>
+
+<div class="card compact" id="c11">
+  <h3><span class="ref ref-c">C11</span> Loose any-pair trailer rule on the consumer-merge discriminator (keep cross-pair noop synthetics)</h3>
+  <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> strict same-pair rule (drop iff TS-some AND no non-first parent carries <code>dc.skipTrailerKey</code>); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case B and the &sect;5 variant).</p>
+  <p>
+    <code>collectSourceCommits</code>&rsquo;s <code>isLoadBearingMerge</code> post-filter drops a merge iff it&rsquo;s TREESAME to some parent under the path filter AND no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any pair, any direction). The any-pair form keeps Case A merges &mdash; mono operator runs <code>git merge shadow/&lt;sibling-pair&gt;/main</code>, the merge is TS-some under this pair&rsquo;s filter, and the 2nd parent is a cross-pair echo. Those produce noop self-ancestor synthetics on the shadow chain (e.g. <code>Mc6'_be&lt;noop&gt;</code>) that look like clutter but carry <code>Shadow-replayed-monorepo: Mc6</code> trailers that <a class="ref ref-m" href="#m1">M1</a>&rsquo;s round-trip splice reads on subsequent <code>--from b</code> runs to compose the consumer-side outer state correctly.
+  </p>
+  <p>
+    Dropping them (strict rule) would tighten the chain but cause silent cross-pair drift: <code>Bc4'_mono</code>&rsquo;s outer would splice from a pre-Mc6 state, missing the sibling pair&rsquo;s recent content. The drift only surfaces in non-standard workflows (a project branch merging the shadow ref directly rather than via core-dev), so a project doing only the standard workflow could afford the strict rule &mdash; but the load-bearing predicate is structural ("non-first parent has any shadow trailer"), not workflow-specific, and the loose form costs only one noop commit per cross-pair merge. See <a href="local_tests/keep_drop_test/full_history_explained.html">local_tests/keep_drop_test/full_history_explained.html</a> for the discriminator analysis, including the &sect;5 counterexample where naive parent-position rules ("drop iff TS-1st") break.
+  </p>
+</div>
+
+<div class="card compact" id="c12">
+  <h3><span class="ref ref-c">C12</span> Merge-replay conflicts halt the branch; operator resolves on monorepo&rsquo;s working branch</h3>
+  <p class="from">Derives from <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> force-resolve via <code>-X ours</code>/<code>-X theirs</code> merge strategy; skip the conflicting commit; pre-resolve via engine-authored tree composition; throw and abort the whole sync.</p>
+  <p>
+    When <code>mergeMappedParentTrees</code> returns <code>null</code> (mapped parents disagree on outer state outside the path filter, beyond what <code>git merge-tree</code> can FF), the engine halts <em>that branch only</em> (other branches in the same pair keep flowing) and emits a diagnostic naming the source commit and pointing the operator at the resolution recipe. The operator resolves on monorepo&rsquo;s working branch (call it <code>Mm</code>) by re-merging the relevant shadow ref into <code>main</code> with their chosen resolution. The next <code>--from a</code> propagates <code>Mm</code> onto the target&rsquo;s shadow ref; the target operator merges that shadow ref into their working branch (<code>R_be</code>); the next <code>--from b</code> sees <code>R_be</code>, identifies it via the round-trip branch of <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice, and absorbs the halted source commits (the original failing merge plus any descendants halted with it) into one squashed synthetic via multiple <code>Shadow-replayed</code> trailers.
+  </p>
+  <p>
+    Auto-resolving the conflict (always-ours, always-theirs, or any engine-authored heuristic) would violate <a class="ref ref-r" href="#r5">R5</a>: the operator&rsquo;s actual intent for the conflicting paths is unrecoverable from the available trees, so the engine&rsquo;s "resolution" would be a phantom one made without human input. Halting puts the decision in the operator&rsquo;s hands while the rest of the sync continues, and the round-trip absorb path ensures the resolution is recorded once and propagated symmetrically to both sides.
+  </p>
 </div>
 
 
@@ -515,7 +537,8 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     FF assertion still passes.
   </p>
   <p>
-    <strong><code>rev-list --full-history</code> on source-side commit collection.</strong>
+    <strong><code>rev-list --full-history</code> + load-bearing post-filter on source-side
+    commit collection.</strong>
     Default <code>rev-list -- dir/</code> simplifies away merges that are TREESAME-at-the-path
     to one parent. Consumer-merges qualify: the merge result&rsquo;s <code>dir/</code> equals
     the shadow-side parent&rsquo;s <code>dir/</code> (the side that already had the synced
@@ -523,8 +546,16 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     their descendants get reparented to echo&rsquo;d ancestors via <a class="ref ref-m" href="#m2">M2</a>;
     the resulting shadow tip is no longer a child of the previous one, and
     <a class="ref ref-c" href="#c6">C6</a>&rsquo;s push-time FF assertion would halt. Adding
-    <code>--full-history</code> keeps the consumer-merges in the queue so M1 can splice them &mdash;
-    the cheapest fix for the rev-list visibility problem.
+    <code>--full-history</code> keeps the consumer-merges in the queue so M1 can splice them.
+    On top of that, <code>collectSourceCommits</code> post-filters via
+    <code>isLoadBearingMerge</code>: drop a merge iff TREESAME to some parent under the path
+    filter AND no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any
+    pair). Cases like &ldquo;<code>git merge --no-ff stale-feature</code>&rdquo; where the side
+    branch has no shadow trailer get dropped &mdash; no vacuous self-ancestor commit on the
+    shadow chain. Consumer-merges (whose non-first parent IS an echo, same- or sibling-pair)
+    survive the filter. See
+    <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a>
+    for the discriminator design and counterexamples it rejects.
   </p>
   <p class="from">
     <em>Rejected alternatives at this level (distinct from the plumbing-vs-porcelain axis below):</em>
