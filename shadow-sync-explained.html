@@ -1262,29 +1262,23 @@ Out: null  (no inner/outer split — caller uses plain merge logic)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>composeResolvedMergeTree({ targetMerge, sourceMerge, targetDir }): string</code></h4>
-<p>B&prime; conflict-squash composition. Splice <code>Bm</code>&rsquo;s tree at <code>targetDir/</code> over <code>Mm</code>&rsquo;s outer files &mdash; outer (everything outside <code>targetDir/</code>) comes from the operator&rsquo;s in-repo merge resolution; inner (under <code>targetDir/</code>) comes verbatim from the failing source merge. When <code>targetDir</code> is empty, source and target share file layout, so <code>Mm</code>&rsquo;s tree alone is the resolution. Called only from the replay-loop fast path when <code>findResolutionCandidate</code> returns a candidate.</p>
-<pre><code>The Bm case from local_tests/conflict_squash — backend repo merges
-project into core-dev (Bm) with outer state that diverges from the
-monorepo-side mapped parents. Operator does `git merge project` on
-M.core-dev to resolve the outer; Mm carries that resolution.
+<h4><code>collectAbsorbedHalted(commit, haltedSources, shaMapping): string[]</code></h4>
+<p>Round-trip absorption walk. BFS from <code>commit</code>&rsquo;s source-side parents through halted unmapped ancestors, stopping at mapped commits. The returned SHAs become additional <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailers on <code>commit</code>&rsquo;s replay, so <code>loadReplayedMappings</code> treats them as already-replayed on the next run and skips them. This is how a single squashed shadow commit absorbs <code>Bm</code> and any descendants halted with it after the operator&rsquo;s round-trip merge arrives.</p>
+<pre><code>In:  commit = R_be (BE-side merge of [Bm, Mm'_on_be] after the round-trip)
+     haltedSources = { Bm, Bm+1, Bm+2 }   (Bm halted; Bm+1/Bm+2 propagated)
+     shaMapping has Bp1', Bp2m' (and Mm'_on_be → Mm via the existing trailer)
+Out: [ Bm, Bm+1, Bm+2 ]
+     (walk starts at R_be.parents, hops through halted ancestors,
+      stops where it hits clean mapped commits Bp1' / Bp2m')
 
-In:  targetMerge = Mm (M-side merge of project into core-dev)
-     sourceMerge = Bm (source merge that the engine couldn't auto-replay)
-     targetDir = "backend"
-Out: tree-SHA with Mm's outer (frontend.txt, etc.)
-                 ⊕ Bm's content spliced in at backend/
-     This becomes the composed-squash commit's tree verbatim — buildReplayedTree is NOT
-     called on top (that would re-apply Bm's diff and reintroduce
-     the outer conflict the engine just gave up on).
-
-In:  targetDir = "" (source and target share layout, e.g. monorepo→backend)
-Out: Mm.tree (no outer/inner split; B-basic semantics)</code></pre>
+In:  commit replays cleanly with no halted ancestors reachable
+Out: []
+     (no extra trailers; one trailer for the commit itself)</code></pre>
 </div>
 
 <div class="card fn-card">
 <h4><code>mergeMappedParentTrees({ mappedParents, commitShort, targetDir }): string | null</code></h4>
-<p>Pick a parent-tree base when no cross-repo splice fires. 1 parent → that tree; 2 parents → <code>git merge-tree</code>; ≥3 parents or merge-tree conflict → outer-agreement check (if every parent has identical content outside <code>targetDir/</code>, splice <code>[0]</code>&rsquo;s inner over the shared outer). Returns null if outers diverge &mdash; caller fails with the unresolvable-merge recipe.</p>
+<p>Pick a parent-tree base when no cross-repo splice fires. 1 parent → that tree; 2 parents → <code>git merge-tree</code>; ≥3 parents or merge-tree conflict → outer-agreement check (if every parent has identical content outside <code>targetDir/</code>, splice <code>[0]</code>&rsquo;s inner over the shared outer). Returns null if outers diverge &mdash; caller halts the branch (see Walkthrough D).</p>
 <pre><code>In:  mappedParents = [Bc3']
 Out: Bc3''s tree (`rev-parse Bc3'^{tree}`)
 
@@ -1316,14 +1310,14 @@ Out: null</code></pre>
 
 <div class="card fn-card">
 <h4><code>formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }): string</code></h4>
-<p>Build the operator recipe printed when <code>mergeMappedParentTrees</code> returns null and no B&prime; candidate is available. Names the divergent parents, the required trailer, and copy-pasteable shell commands for Approach A (hand-build a resolution commit on the shadow ref).</p>
+<p>Build the halt diagnostic printed when <code>mergeMappedParentTrees</code> returns null. Names the divergent parents and presents two recovery paths: (1) the recommended round-trip + squash — resolve on the target&rsquo;s working branch and let the next sync cycle absorb the halt naturally; (2) the always-available hand-built recipe — create a commit on the shadow ref with the divergent mapped parents as its git parents and the <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailer in its message, so <code>loadReplayedMappings</code> skips the source merge on the next run. The function returns the string; the caller stores it on the <code>haltReasons</code> map and surfaces it via <code>mirrorHistory</code>&rsquo;s <code>haltedBranches</code>.</p>
 <pre><code>In:  octopus merge with 3 mapped parents on monorepo,
      source = team repo, target = monorepo (target.dir="backend"),
      pair.name = "backend"
-Out: multi-line string starting "abc1234: cannot auto-resolve replay parent tree.",
-     listing the 3 mapped parents, the required trailer
-     "Shadow-replayed-team: &lt;full-source-sha&gt;",
-     and shell commands targeting refs/heads/shadow/backend/&lt;inferred-branch&gt;
+Out: multi-line string starting "abc1234: cannot auto-resolve replay parent tree — branch halted.",
+     listing the 3 mapped parents, the round-trip steps targeting
+     monorepo's working branch, and (alternative) shell commands for
+     a hand-built commit on refs/heads/shadow/backend/&lt;inferred-branch&gt;
 
 In:  2-parent merge-tree conflict, source branch is ambiguous (in &gt;1 branch)
 Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
@@ -1331,29 +1325,19 @@ Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
 </div>
 
 <div class="card fn-card">
-<h4><code>findResolutionCandidate({ commit, mappedParents, source, target, pair, using }): { targetMerge, ambiguous, candidates, intoBranch }</code></h4>
-<p>B&prime; auto-detect. When <code>mergeMappedParentTrees</code> returns null and the <code>--allow-conflict-resolution-overwrite</code> flag is set, scan <code>target.remote/&lt;into-branch&gt;</code> for a 2-parent merge whose tree resolves the conflict. Bm&rsquo;s &ldquo;into&rdquo; branch is the one containing Bm itself; the &ldquo;from&rdquo; branch is the one containing <code>parents[1]</code> but not Bm. Candidate Mm must be a 2-parent merge on the target mirror of the into branch, not on this pair&rsquo;s shadow ref (so engine-replayed commits are excluded), with <code>Mm.parents[1]</code> reachable from the target mirror of the from branch. <code>using</code> filters by operator-supplied SHA prefixes for the ambiguous case.</p>
-<pre><code>In:  commit = Bm (BE merged project→core-dev with outer-divergent state)
-     mappedParents = [Bcm', Bpm'] on M
-     source = backend-repo, target = monorepo, pair.name = "backend"
-     using = []
-     Operator has run `git merge project` on M.core-dev, creating Mm
-     (only new 2-parent merge on origin/core-dev since last sync)
-Out: { targetMerge:&lt;Mm sha&gt;, ambiguous: false,
-       candidates: [&lt;Mm sha&gt;], intoBranch: "core-dev" }
+<h4><code>resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons): string[]</code></h4>
+<p>Like <code>resolveTargetParents</code>, but when a source parent is in <code>haltedSources</code>, splice in the FULL set of mapped parents the halt-causer had (from <code>haltReasons</code>) rather than letting <code>findEchoAnchor</code> pick one non-deterministically. This keeps the previously-pushed shadow tip (which <code>mapBranchesToTargetTips</code> chose by the same newest-first walk) in the resulting parent set, so the round-trip absorption&rsquo;s FF push remains valid.</p>
+<pre><code>In:  commit = R_be (parents = [Bm, Mm'_on_be])
+     haltedSources = { Bm }
+     haltReasons[Bm] = { mappedParents: [Bp1x', Bp2m'], ... }
+     shaMapping[Mm'_on_be] = Mm (via the existing skip trailer)
+Out: [ Bp1x', Bp2m', Mm ]
+     (Bm expanded to ALL of its halt mappedParents; Mm appended from
+      the second R_be parent. Bp1x' was the previous shadow tip on
+      project-a, so the downstream FF push succeeds.)
 
-In:  Operator made two unrelated 2-parent merges on M.core-dev that both
-     satisfy the shape check (parents[1] reachable from origin/project)
-Out: { targetMerge:null, ambiguous: true,
-       candidates: [&lt;mm1&gt;, &lt;mm2&gt;], intoBranch: "core-dev" }
-     Caller fails with disambiguation prompt naming both SHAs.
-
-In:  No operator merge yet (target tip equals shadow tip)
-Out: { targetMerge:null, ambiguous: false, candidates: [], intoBranch: "core-dev" }
-     Caller falls through to formatUnresolvableMergeError.
-
-In:  using = ["abc1234"], two candidates exist; one starts with "abc1234"
-Out: { targetMerge:&lt;full sha starting abc1234&gt;, ambiguous: false, ... }</code></pre>
+In:  commit has no halted parents
+Out: identical to resolveTargetParents (single mapping per source parent)</code></pre>
 </div>
 
 <h3 class="fn-group">Parent resolution</h3>
@@ -1578,9 +1562,12 @@ Out: { exitCode: 1,
   <li><strong><code>runSync(options)</code></strong> &mdash; CLI/programmatic entry. Parses
     <code>--from</code>, looks up the pair in <code>PAIRS</code>, captures stdout/stderr.
     <ul>
-      <li>for each pair: <strong><code>mirrorHistory({ pair, from, branches, using })</code></strong>
+      <li>for each pair: <strong><code>mirrorHistory({ pair, from, branches })</code></strong>
         &mdash; picks <code>source</code> / <code>target</code> from the direction, builds
-        <code>dc</code> (DirectionConfig with trailer keys).
+        <code>dc</code> (DirectionConfig with trailer keys). Returns <code>haltedBranches: HaltedBranch[]</code>
+        (one entry per source-side merge that the engine could not auto-replay, with the
+        operator-facing diagnostic); the CLI prints those to stderr and increments the failed-pair
+        counter without throwing.
         <ul>
           <li><code>ensureRemote(source)</code>, <code>ensureRemote(target)</code> &mdash; add or
             update the git remote URL if the config specifies one.</li>
@@ -1968,95 +1955,93 @@ Out: { exitCode: 1,
   </li>
 </ul>
 
-<p><strong>Sub-path C1 &mdash; B&prime; fast path (flag <code>--allow-conflict-resolution-overwrite</code>):</strong></p>
-
-<ul class="call-tree">
-  <li><strong><code>findResolutionCandidate({ commit: M, mappedParents, source, target, pair, using
-    })</code></strong> &mdash; look for the operator&rsquo;s real merge on the target&rsquo;s
-    into-branch.
-    <ul>
-      <li><code>branchesContainingOnRemote(M, source.remote)</code> &mdash; M&rsquo;s
-        &ldquo;into&rdquo; branch.
-        <ul>
-          <li><code>git for-each-ref --contains M refs/remotes/source.remote/</code>.</li>
-        </ul>
-      </li>
-      <li><code>branchesContainingOnRemote(M.parents[1], source.remote)</code> &mdash; the
-        &ldquo;from&rdquo; branch (same primitive).</li>
-      <li>identify <code>intoBranch</code> / <code>fromBranch</code> by set difference; bail on
-        ambiguous shape.</li>
-      <li><code>git log --merges --format=%H %P {shadowRef}..{target.remote/intoBranch}</code>
-        &mdash; candidate target-side merge commits since the last sync.</li>
-      <li>per candidate Mm: <code>git merge-base --is-ancestor Mm.parents[1] target/fromBranch</code>
-        &mdash; confirms the operator actually merged FROM the right branch on target.</li>
-      <li>if operator passed <code>--using</code>: filter candidates by SHA (full or prefix match).</li>
-      <li>returns <code>{ targetMerge }</code> on exactly one match, <code>{ ambiguous, candidates }</code>
-        on multiple.</li>
-    </ul>
-  </li>
-  <li>if <code>targetMerge</code> is set: <strong><code>composeResolvedMergeTree({ targetMerge, sourceMerge: M.hash,
-    targetDir })</code></strong> &rarr; spliced tree.
-    <ul>
-      <li><code>git rev-parse targetMerge^{tree}</code> &mdash; outer (operator&rsquo;s real resolution
-        outside <code>targetDir/</code>).</li>
-      <li><code>git rev-parse sourceMerge^{tree}</code> &mdash; inner (source merge&rsquo;s tree at the
-        synced slice).</li>
-      <li><code>composeSubtree(targetMerge.tree, targetDir, sourceMerge.tree)</code> &mdash; splice via temp index.</li>
-    </ul>
-  </li>
-  <li><strong><code>git commit-tree resolvedTree -p A' -p B' -m msg</code></strong> &rarr; <code>resolvedMerge</code>.
-    <ul>
-      <li>Message: <code>"Conflict resolution from M (target-merge outer + source-merge inner)\n\n..."</code> with the
-        <code>Shadow-replayed-&lt;key&gt;: M.hash</code> trailer appended.</li>
-      <li><code>shaMapping.set(M.hash, resolvedMerge); continue;</code> &mdash; on to the next commit. The
-        two-parent topology is preserved; the tree reflects the operator&rsquo;s real on-target
-        resolution.</li>
-    </ul>
-  </li>
-  <li>if <code>ambiguous</code>: <strong><code>fail()</code></strong> with the candidate list and
-    instruction to rerun with <code>--using &lt;sha&gt;</code>.</li>
-</ul>
-
-<p><strong>Sub-path C2 &mdash; manual resolution (default, or no candidate found):</strong></p>
+<p><strong>Sub-path D1 &mdash; halt:</strong></p>
 
 <ul class="call-tree">
   <li><strong><code>formatUnresolvableMergeError({ commit: M, meta, mappedParents, source, target,
-    pair })</code></strong> &mdash; build a human-readable recipe.
+    pair })</code></strong> &mdash; build the operator-facing diagnostic naming the divergent
+    parents, the round-trip recipe, and (as alternative) the hand-built shell commands targeting
+    <code>refs/heads/shadow/{pair}/{branch}</code>.</li>
+  <li><strong><code>haltedSources.add(M.hash)</code></strong> &mdash; mark the source merge as
+    halted. M is NOT added to <code>shaMapping</code>, so later descendants either inherit the
+    halt (via the all-parents-halted check) or absorb it via the round-trip path (D2).</li>
+  <li><strong><code>haltReasons.set(M.hash, &hellip;)</code></strong> &mdash; store
+    <code>mappedParents</code> (used by <code>resolveHaltAwareParents</code> when an escaping
+    descendant arrives) and the diagnostic (surfaced to the CLI).</li>
+  <li><code>continue</code> &mdash; the loop moves to the next commit. Other branches in the same
+    <code>replayCommits</code> call keep flowing. No <code>fail()</code>, no throw.</li>
+  <li>at end-of-loop: <code>mirrorHistory</code> projects <code>haltReasons</code> (entries with
+    non-empty diagnostics) into <code>haltedBranches</code>. The CLI prints each diagnostic to
+    stderr and returns non-zero, but the replay pushed whatever it could finish.</li>
+</ul>
+
+<p><strong>Sub-path D2 &mdash; round-trip absorption (preferred recovery):</strong></p>
+
+<ul class="call-tree">
+  <li><em>operator action:</em> resolve the merge on the target&rsquo;s working branch as
+    <code>Mm</code> (e.g. <code>git checkout core-dev && git merge --no-ff project</code>); push.</li>
+  <li><em>next CI cycle (<code>--from a</code>):</em> <code>Mm</code> is replayed onto
+    <code>source.remote/shadow/&lt;pair&gt;/&lt;branch&gt;</code> as <code>Mm'_on_source</code>,
+    carrying the <code>Shadow-replayed-&lt;pair&gt;-&lt;target.remote&gt;: Mm</code> trailer
+    (echo skip-trailer from the source side&rsquo;s perspective).</li>
+  <li><em>operator action:</em> on the source repo, <code>git merge
+    origin/shadow/&lt;pair&gt;/&lt;branch&gt;</code> into the working branch &rarr;
+    <code>R_be</code>, a real source-side merge whose second parent is <code>Mm'_on_source</code>.
+    Push.</li>
+  <li><em>next CI cycle (<code>--from b</code>):</em>
     <ul>
-      <li><code>inferSourceBranch(M, source.remote)</code> &mdash; pointer to the shadow ref in the
-        error.
-        <ul>
-          <li><code>git for-each-ref --contains M refs/remotes/source.remote/</code> &mdash; same
-            primitive as <code>branchesContainingOnRemote</code> but returns null on ambiguity.</li>
-        </ul>
-      </li>
-      <li><code>replayedTrailerKey(pair.name, source.remote)</code> &mdash; computes the exact
-        trailer the operator must embed.</li>
-      <li>assembles a multi-line message: source SHA, divergent mapped parents, an explanation
-        that source-side content can&rsquo;t have resolved an outer-state conflict, and a copy-paste
-        recipe using <code>git checkout</code> / <code>git merge</code> /
-        <code>commit-tree -p A' -p B'</code> / <code>update-ref</code> / <code>push</code>.</li>
-    </ul>
-  </li>
-  <li><strong><code>fail(formattedError)</code></strong> &rarr; throws <code>ShadowSyncError</code>.
-    Sync aborts on this branch; other branches in the same pair may have replayed successfully
-    already.</li>
-  <li><em>operator action:</em> follow the recipe to push a hand-built shadow commit carrying the
-    trailer.
-    <ul>
-      <li>on the next sync, <code>loadReplayedMappings</code> (common setup) picks up that trailer,
-        places M into <code>shaMapping</code>, and <code>filterNotReplayedCommits</code> drops M
-        from the work list. The sync proceeds.</li>
+      <li><code>filterNotReplayedCommits</code> picks up <code>Mm'_on_source</code>&rsquo;s skip
+        trailer, records <code>shaMapping[Mm'_on_source] = Mm</code>, and filters it out of the
+        work list. <code>R_be</code> stays in the work list (no trailer of its own yet).</li>
+      <li>the replay loop reaches <code>R_be</code>. Its parents are <code>[Bm, Mm'_on_source]</code>.
+        Not all halted+unmapped (Mm'_on_source is mapped) &rarr; proceed.</li>
+      <li><strong><code>resolveHaltAwareParents(R_be, &hellip;)</code></strong> expands
+        <code>Bm</code> to its halt <code>mappedParents</code> (e.g. <code>[A', B']</code>) and
+        appends <code>Mm</code> from the second parent &rarr;
+        <code>[A', B', Mm]</code>. <code>A'</code> is the previous shadow tip
+        on this branch, so the downstream FF push will succeed.</li>
+      <li><strong><code>composeCrossRepoMergeTree</code></strong> detects the round-trip case
+        (echo target <code>Mm</code> already in mappedParents) &rarr; splices the CURRENT
+        commit&rsquo;s source-side tree into <code>Mm</code>&rsquo;s outer at
+        <code>target.dir/</code>. Outer comes from <code>Mm</code> (operator-resolved); inner
+        comes from <code>R_be</code> on the source side (carries any backend-only intermediate
+        work like <code>feat-a-extra.ts</code>).</li>
+      <li><strong><code>buildReplayedTree</code></strong> applies <code>R_be</code>&rsquo;s
+        small source-diff vs first parent on top of the composed tree (typically a no-op
+        because <code>R_be</code>&rsquo;s tree is the operator&rsquo;s merge result already).</li>
+      <li><strong><code>collectAbsorbedHalted(R_be, haltedSources, shaMapping)</code></strong>
+        &rarr; <code>[Bm]</code> (and any other halted ancestors reachable through
+        <code>R_be</code>&rsquo;s parents).</li>
+      <li><strong><code>git commit-tree tree -p A' -p B' -p Mm -m msg</code></strong> &rarr;
+        <code>sq</code>. Message: <code>R_be</code>&rsquo;s original message + one
+        <code>Shadow-replayed-&lt;key&gt;: R_be</code> trailer + one per absorbed SHA.</li>
+      <li><code>shaMapping.set(R_be, sq); shaMapping.set(Bm, sq); haltedSources.delete(Bm)</code>
+        &mdash; <code>Bm</code> is now mapped via <code>sq</code>&rsquo;s extra trailer; next
+        sync runs <code>loadReplayedMappings</code> picks it up and skips it.</li>
     </ul>
   </li>
 </ul>
 
+<p><strong>Sub-path D3 &mdash; hand-built resolution (always available):</strong></p>
+
+<ul class="call-tree">
+  <li><em>operator action:</em> follow the recipe in <code>formatUnresolvableMergeError</code>&rsquo;s
+    output &mdash; create a commit on <code>refs/heads/shadow/{pair}/{branch}</code> with the
+    divergent mapped parents as git parents, a tree of the operator&rsquo;s choosing, and
+    <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;: M.hash</code> in the message
+    body. Push.</li>
+  <li>on the next sync, <code>loadReplayedMappings</code> (common setup) picks up that trailer,
+    places M into <code>shaMapping</code>, and <code>filterNotReplayedCommits</code> drops M
+    from the work list. Sync proceeds without revisiting the halt.</li>
+</ul>
+
 <div class="highlight-box">
-  <strong>Why three layers (merge-tree &rarr; outer-agreement &rarr; B&prime; / manual):</strong>
+  <strong>Why three layers (merge-tree &rarr; outer-agreement &rarr; halt + round-trip):</strong>
   each layer is a strictly weaker invariant. <code>merge-tree</code> is the cheap happy path.
   Outer-agreement is correct when only the inner slice changed across the merge but the mapped
-  parents carry different sibling content. B&prime; reconstructs the operator&rsquo;s real merge
-  resolution from target. Manual is the floor &mdash; never silently wrong, always paged to a human.
+  parents carry different sibling content. The halt is the floor &mdash; never silently wrong,
+  always paged to a human; the round-trip absorption replays naturally once the operator&rsquo;s
+  resolution flows back through the source repo, no shape-detection heuristic involved.
 </div>
 
 <!-- ── 7. Shadow Branch Divergence ─────────────────────────────────────── -->

@@ -26,10 +26,6 @@ export interface SyncOptions {
   pair?: string;
   from?: "a" | "b";
   branch?: string;
-  /** Operator-supplied target-merge SHA(s) for B' disambiguation (see findResolutionCandidate). */
-  using?: string[];
-  /** Opt-in: when a source-merge conflict resolution can't be auto-replayed, overwrite with a resolved merge composed from the operator's target-side merge. */
-  allowConflictResolutionOverwrite?: boolean;
 }
 
 export interface SyncResult {
@@ -137,9 +133,16 @@ function _runSyncCore(options: SyncOptions): number {
         pair,
         from: fromSide,
         branches: validBranches,
-        using: options.using ?? [],
-        allowConflictResolutionOverwrite: options.allowConflictResolutionOverwrite ?? false,
       });
+
+      if (result.haltedBranches.length > 0) {
+        console.error(`\n⚠ ${result.haltedBranches.length} branch(es) halted on ${pair.name}:`);
+        for (const h of result.haltedBranches) {
+          console.error(`\n── Halt on ${pair.name}/${h.branch ?? "<unknown>"} (${h.commitShort}) ──`);
+          console.error(h.diagnostic);
+        }
+        failed++;
+      }
 
       // Update shadow branches on target's remote
       for (const branch of validBranches) {
@@ -247,8 +250,6 @@ if (require.main === module) {
       remote: { type: "string", short: "r" },  // alias for --pair
       from:   { type: "string", short: "f" },
       branch: { type: "string", short: "b" },
-      using:  { type: "string", multiple: true },
-      "allow-conflict-resolution-overwrite": { type: "boolean" },
     },
     strict: true,
   });
@@ -257,8 +258,6 @@ if (require.main === module) {
     pair: values.pair ?? values.remote,
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch,
-    using: values.using,
-    allowConflictResolutionOverwrite: values["allow-conflict-resolution-overwrite"] ?? false,
   });
 
   if (result.stdout) process.stdout.write(result.stdout + "\n");

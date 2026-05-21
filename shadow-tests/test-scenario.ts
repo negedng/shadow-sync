@@ -1248,17 +1248,17 @@ function runSht6() {
       }
     }
 
-    // ── Phase 6: B′ composed-squash recovery on a project branch ────────────
+    // ── Phase 6: round-trip + squash recovery on a project branch ───────────
     // See scenario.md sht6 Phase 6 for narrative. Backend opens project-a,
     // project-b; mono adds outer-divergent commits; backend merges + adds Bp1x;
     // backend's project-b → project-a merge (Bm) has mapped parents disagreeing
-    // on README.md; engine halts; operator merges project-b on mono's project-a
-    // (Mm); --from b --allow-conflict-resolution-overwrite emits a resolved
-    // merge composed of (Mm.outer + Bm.inner under backend/).
+    // on README.md; engine halts. Operator merges project-b on mono's project-a
+    // (Mm); --from a propagates Mm to backend's shadow ref; backend merges that
+    // shadow ref into project-a (R_be); --from b sees R_be, naturally FFs to
+    // Mm.tree via merge-tree, and absorbs Bm into R_be's squashed replay via
+    // multi-trailer encoding.
 
-    // 6.0 Backend creates project-a, project-b from Bc0 (clean ancestry, no inherited
-    // merges — required for findResolutionCandidate to identify Mm uniquely; the scan
-    // range "shadowRef..targetInto" would otherwise pick up Phase 1-5's main-side merges).
+    // 6.0 Backend creates project-a, project-b from Bc0 (clean ancestry).
     git(`checkout -b project-a ${Bc0}`, backend.working);
     const Bp1 = commitFiles(backend, { "src/feat-a.ts": "feat a\n" }, "Bp1");
     git("push origin project-a", backend.working);
@@ -1324,13 +1324,13 @@ function runSht6() {
     }
     git("push origin project-a", backend.working);
 
-    // 6.6 --from b — engine FAILS on Bm
+    // 6.6 --from b — engine HALTS on Bm (per-branch halt; exit 1 + diagnostic)
     {
       const r = runSync({ from: "b" });
-      if (r.exitCode === 0) throw new Error(`[Phase 6.6] expected --from b to fail on Bm but it succeeded`);
+      if (r.exitCode === 0) throw new Error(`[Phase 6.6] expected --from b to halt on Bm but it succeeded`);
       const errText = r.stdout + "\n" + r.stderr;
-      if (!/cannot auto-resolve replay parent tree/.test(errText)) {
-        throw new Error(`[Phase 6.6] expected 'cannot auto-resolve' error, got:\n${errText.slice(0, 800)}`);
+      if (!/cannot auto-resolve replay parent tree — branch halted/.test(errText)) {
+        throw new Error(`[Phase 6.6] expected halt diagnostic, got:\n${errText.slice(0, 800)}`);
       }
     }
 
@@ -1348,10 +1348,10 @@ function runSht6() {
     try {
       Mm = mergeRef(mono, "project-b", "Mm");
     } catch {
-      // Mm's INNER resolution must be byte-identical to Bm's INNER resolution; sq carries
-      // Bm.inner under backend/, mono.project-a carries Mm.inner — if they differ, the
-      // catch-up merge in 6.10 conflicts. Operators independently arriving at the same
-      // resolution is the realistic expectation; the test models that.
+      // Mm's INNER resolution must be byte-identical to Bm's INNER resolution.
+      // R_be (in 6.10) is a merge of [Bm, Mm'_on_be]; if their inner content
+      // differs, that merge conflicts. Operators independently arriving at the
+      // same resolution is the realistic expectation; the test models that.
       fs.writeFileSync(path.join(mono.working, "README.md"), "v_merged\n");
       fs.writeFileSync(path.join(mono.working, "backend/release-notes.txt"), "release a + release b\n");
       git("add -A", mono.working);
@@ -1361,10 +1361,34 @@ function runSht6() {
     git("push origin project-a", mono.working);
     void Mm;
 
-    // 6.9 --from b with --allow-conflict-resolution-overwrite — engine emits the resolved merge
+    // 6.9 --from a — propagates Mm onto backend's shadow/backend/project-a as Mm'_on_be
     {
-      const r = runSync({ from: "b", allowConflictResolutionOverwrite: true });
-      assertEqual(r.exitCode, 0, `[Phase 6.9] --from b with B': ${r.stderr.slice(0, 400)}`);
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[Phase 6.9] --from a propagation: ${r.stderr.slice(0, 400)}`);
+    }
+
+    // 6.10 Backend dev merges shadow ref into project-a → R_be
+    git("fetch origin --prune", backend.working);
+    git("checkout project-a", backend.working);
+    let Rbe: string;
+    try {
+      Rbe = mergeRef(backend, "origin/shadow/backend/project-a", "R_be");
+    } catch {
+      // Inner resolutions are byte-identical between Bm and Mm'_on_be, so the
+      // merge tree is clean; this catch only fires if a tooling quirk surfaces
+      // a phantom conflict.
+      git("add -A", backend.working);
+      git("commit --no-edit", backend.working);
+      Rbe = git("rev-parse HEAD", backend.working);
+    }
+    git("push origin project-a", backend.working);
+    void Rbe;
+
+    // 6.11 --from b — engine sees R_be, naturally FFs through Mm via merge-tree,
+    // absorbs Bm into R_be's squashed replay via multi-trailer encoding.
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 6.11] --from b post-roundtrip: ${r.stderr.slice(0, 400)}`);
     }
 
     git("fetch origin", mono.working);
@@ -1373,40 +1397,42 @@ function runSht6() {
       cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
     });
     if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${Bm}`)) {
-      throw new Error(`[Phase 6.9] sq missing replay trailer for Bm=${Bm}\nsq message:\n${sqMsg}`);
+      throw new Error(`[Phase 6.11] sq missing absorbed-Bm trailer for ${Bm}\nsq message:\n${sqMsg}`);
+    }
+    if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${Rbe}`)) {
+      throw new Error(`[Phase 6.11] sq missing own R_be trailer for ${Rbe}\nsq message:\n${sqMsg}`);
     }
     assertContent(mono, "origin/shadow/backend/project-a", "backend/src/feat-a-extra.ts", "extra\n",
-      "[Phase 6.9] sq preserves Bp1x (backend/src/feat-a-extra.ts) — Bm.inner");
+      "[Phase 6.11] sq preserves Bp1x (backend/src/feat-a-extra.ts) — backend's inner");
     assertContent(mono, "origin/shadow/backend/project-a", "README.md", "v_merged\n",
-      "[Phase 6.9] sq carries Mm's outer (README.md)");
-    // backend/release-notes.txt is INNER (under backend/) → Bm.inner wins (backend's resolution)
+      "[Phase 6.11] sq carries Mm's outer (README.md) via FF to Mm.tree");
     assertContent(mono, "origin/shadow/backend/project-a", "backend/release-notes.txt", "release a + release b\n",
-      "[Phase 6.9] sq carries Bm's inner resolution of release-notes.txt");
+      "[Phase 6.11] sq carries the agreed inner resolution of release-notes.txt");
 
-    // 6.10 Catch-up merge on mono's project-a — clean
+    // 6.12 Catch-up merge on mono's project-a — clean
     git("checkout project-a", mono.working);
     git("pull origin project-a", mono.working);
     mergeRef(mono, "origin/shadow/backend/project-a", "catch-up");
     git("push origin project-a", mono.working);
     assertContent(mono, "project-a", "backend/src/feat-a-extra.ts", "extra\n",
-      "[Phase 6.10] catch-up brings backend/src/feat-a-extra.ts to mono.project-a");
+      "[Phase 6.12] catch-up brings backend/src/feat-a-extra.ts to mono.project-a");
 
-    // 6.11 Idempotency — re-running --from b with the flag is a no-op on shadow tip
+    // 6.13 Idempotency — re-running --from b is a no-op on shadow tip
     {
-      const r = runSync({ from: "b", allowConflictResolutionOverwrite: true });
-      assertEqual(r.exitCode, 0, `[Phase 6.11] re-run --from b: ${r.stderr.slice(0, 400)}`);
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 6.13] re-run --from b: ${r.stderr.slice(0, 400)}`);
     }
     git("fetch origin", mono.working);
     const sq2 = git("rev-parse origin/shadow/backend/project-a", mono.working);
     if (sq2 !== sq) {
-      throw new Error(`[Phase 6.11] shadow tip changed on idempotent re-run: ${sq} → ${sq2}`);
+      throw new Error(`[Phase 6.13] shadow tip changed on idempotent re-run: ${sq} → ${sq2}`);
     }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
-// ── sht7: B′ composed-squash (single-pair, 5 sub-tests) ─────────────────────
+// ── sht7: round-trip + squash recovery (single-pair, 4 sub-tests) ───────────
 async function runSht7(): Promise<void> {
   function git(cmd: string, cwd: string): void {
     execSync(`git ${cmd}`, { cwd, stdio: "pipe" });
@@ -1528,29 +1554,60 @@ async function runSht7(): Promise<void> {
     git("push origin core-dev", env.localRepo);
     return gitOut("rev-parse HEAD", env.localRepo);
   }
-  
-  function runHappyAutoDetect(): void {
-    const { env, info } = setupAndFailReplay("b-prime-happy");
+
+  /**
+   * Full round-trip after a halt: operator does Mm on mono; --from a propagates
+   * Mm onto backend's shadow ref; backend merges that shadow ref into core-dev
+   * (= R_be); returns R_be's SHA.
+   */
+  function roundTripResolution(env: TestEnv): { mm: string; rbe: string } {
+    const mm = operatorMergeProject(env);
+
+    // --from a propagates Mm onto backend's shadow/backend/core-dev as Mm'_on_be
+    const r = runPush(env);
+    if (r.status !== 0) throw new Error(`--from a propagation failed: ${r.stderr}`);
+
+    // Backend merges the shadow ref into core-dev → R_be
+    git("fetch origin --prune", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
     try {
-      operatorMergeProject(env);
-      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
-      assertEqual(r.status, 0, `--from b status (stderr=${r.stderr})`);
-  
+      git('merge --no-ff origin/shadow/backend/core-dev -m "R_be"', env.remoteWorking);
+    } catch {
+      // Inner resolutions are byte-identical between Bm and Mm'_on_be, so the
+      // merge tree is clean; this catch only fires on phantom tooling conflicts.
+      git("add -A", env.remoteWorking);
+      git('commit --no-edit', env.remoteWorking);
+    }
+    git("push origin core-dev", env.remoteWorking);
+    const rbe = gitOut("rev-parse HEAD", env.remoteWorking);
+    return { mm, rbe };
+  }
+
+  function runHappyRoundTrip(): void {
+    const { env, info } = setupAndFailReplay("roundtrip-happy");
+    try {
+      const { rbe } = roundTripResolution(env);
+      const r = runCiSync(env);
+      assertEqual(r.status, 0, `--from b status after round-trip (stderr=${r.stderr})`);
+
       git("fetch origin --prune", env.localRepo);
       const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
       assert(sqHash.length === 40, "shadow ref must exist");
-  
-      // sq must carry the replay trailer pointing at Bm
+
+      // sq must carry replay trailers for BOTH R_be (its own) and Bm (absorbed)
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
+        `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
       assert(sqMsg.includes(`Shadow-replayed-backend-team: ${info.bm}`),
-        `sq missing trailer for ${info.bm}\n${sqMsg}`);
-  
+        `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
+
       // backend/feature.ts (Bcx's content) must be present on the shadow ref tree
       const feature = gitOut(`show origin/shadow/backend/core-dev:backend/feature.ts`, env.localRepo);
       assert(feature.includes("be feature added in Bcx"), `feature.ts missing/wrong on shadow: ${feature}`);
-  
-      // Catch-up merge: shadow tip's outer matches M.core-dev's outer (same as Mm.tree),
+
+      // Catch-up merge: shadow tip's outer matches M.core-dev's outer (FF'd from Mm),
       // so the merge is clean — no second resolution needed.
+      git("checkout core-dev", env.localRepo);
       git("merge --no-ff origin/shadow/backend/core-dev -m \"catch-up\"", env.localRepo);
       const localFeature = fs.readFileSync(path.join(env.localRepo, "backend/feature.ts"), "utf8");
       assert(localFeature.includes("be feature added in Bcx"), `feature.ts missing on M.core-dev`);
@@ -1558,17 +1615,17 @@ async function runSht7(): Promise<void> {
       env.cleanup();
     }
   }
-  
+
   function runIdempotentRerun(): void {
-    const { env, info } = setupAndFailReplay("b-prime-idempotent");
+    const { env, info } = setupAndFailReplay("roundtrip-idempotent");
     try {
-      operatorMergeProject(env);
-      const r1 = runCiSync(env, { allowConflictResolutionOverwrite: true });
-      assertEqual(r1.status, 0, `first --from b status (stderr=${r1.stderr})`);
+      roundTripResolution(env);
+      const r1 = runCiSync(env);
+      assertEqual(r1.status, 0, `first post-roundtrip --from b status (stderr=${r1.stderr})`);
       git("fetch origin --prune", env.localRepo);
       const sq1 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
 
-      const r2 = runCiSync(env, { allowConflictResolutionOverwrite: true });
+      const r2 = runCiSync(env);
       assertEqual(r2.status, 0, `second --from b status (stderr=${r2.stderr})`);
       git("fetch origin --prune", env.localRepo);
       const sq2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
@@ -1578,70 +1635,24 @@ async function runSht7(): Promise<void> {
       env.cleanup();
     }
   }
-  
-  function runAmbiguousCandidates(): void {
-    const { env } = setupAndFailReplay("b-prime-ambiguous");
-    try {
-      // Two operator-authored merges on M.core-dev, both with parents[1] reachable
-      // from origin/project: the natural Mm (`git merge project`) plus a second
-      // merge of project after a new project commit lands.
-      operatorMergeProject(env);
-  
-      // New commit on project (Mp2), then merge again on core-dev.
-      git("checkout project", env.localRepo);
-      writeFile(env.localRepo, "backend/p2.txt", "p2\n");
-      git("add -A", env.localRepo);
-      git('commit -m "Mp2"', env.localRepo);
-      git("push origin project", env.localRepo);
-      git("checkout core-dev", env.localRepo);
-      git('merge --no-ff project -m "Mm-extra"', env.localRepo);
-      git("push origin core-dev", env.localRepo);
-  
-      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
-      assert(r.status !== 0, "expected --from b to fail on ambiguous candidates");
-      assert(/ambiguous resolution candidates/.test(r.stdout + r.stderr),
-        `expected ambiguity error, got:\n${r.stdout}\n${r.stderr}`);
 
-      // Disambiguate with --using
-      const candidates = (r.stdout + r.stderr).match(/[0-9a-f]{40}/g) ?? [];
-      assert(candidates.length >= 2, `expected >=2 candidate SHAs printed, got ${candidates.length}`);
-      // Pick the natural Mm — the one whose parents[1] is project's tip
-      const projectTip = gitOut("rev-parse project", env.localRepo);
-      const mmNatural = candidates.find(c => {
-        const parents = gitOut(`log -1 --format=%P ${c}`, env.localRepo).split(/\s+/);
-        return parents[1] === projectTip;
-      });
-      assert(!!mmNatural, `could not find natural Mm among ${candidates.join(",")}`);
-
-      // Re-invoke with --using via runSync's options path: harness's runCiSync
-      // takes the squash flag, but --using needs the full SyncOptions surface.
-      const { runSync } = require("../shadow-sync");
-      const { applyTestOverrides } = require("../shadow-common");
-      applyTestOverrides({
-        repoRoot: env.localRepo,
-        pairs: [{
-          name: env.subdir,
-          a: { remote: "origin", url: env.originBare, dir: env.subdir },
-          b: { remote: env.remoteName, url: env.remoteBare, dir: "" },
-        }],
-        shadowBranchPrefix: env.branchPrefix,
-      });
-      const r2 = runSync({ from: "b", pair: env.subdir, using: [mmNatural!], allowConflictResolutionOverwrite: true });
-      assertEqual(r2.exitCode, 0, `--from b --using ${mmNatural} status (stderr=${r2.stderr})`);
-    } finally {
-      env.cleanup();
-    }
-  }
-  
-  function runNoCandidateFallthrough(): void {
-    const { env } = setupAndFailReplay("b-prime-no-candidate");
+  function runHaltPersistence(): void {
+    const { env, info } = setupAndFailReplay("roundtrip-halt-persists");
     try {
-      // Skip operator merge — there's nothing for auto-detect to find.
-      const r = runCiSync(env, { allowConflictResolutionOverwrite: true });
-      assert(r.status !== 0, "expected --from b to fail with no candidate");
-      // Original error message must still appear
-      assert(/cannot auto-resolve replay parent tree/.test(r.stdout + r.stderr),
-        `expected original error, got:\n${r.stdout}\n${r.stderr}`);
+      // Skip the round-trip — re-run --from b and verify the halt persists
+      // with the same diagnostic and no spurious shadow advances.
+      git("fetch origin --prune", env.localRepo);
+      const tipBefore = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+
+      const r = runCiSync(env);
+      assert(r.status !== 0, "expected --from b to halt again without resolution");
+      assert(/cannot auto-resolve replay parent tree — branch halted/.test(r.stdout + r.stderr),
+        `expected halt diagnostic, got:\n${r.stdout}\n${r.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const tipAfter = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assertEqual(tipAfter, tipBefore, "shadow tip must not advance while halted");
+      void info;
     } finally {
       env.cleanup();
     }
@@ -1679,12 +1690,71 @@ async function runSht7(): Promise<void> {
     }
   }
 
+  function runMultiCommitHaltAbsorption(): void {
+    const { env, info } = setupAndFailReplay("roundtrip-multi-halt");
+    try {
+      // BE devs commit on core-dev AFTER the halt. Bm+1 is a linear child whose
+      // only source parent is the halted Bm → it inherits the halt via the
+      // all-parents-halted+unmapped rule, and the propagation step copies Bm's
+      // mappedParents into Bm+1's halt record (the `inheritedMP` block).
+      git("checkout core-dev", env.remoteWorking);
+      writeFile(env.remoteWorking, "post-halt.ts", "post-halt content\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bm+1: linear commit after halt"', env.remoteWorking);
+      const bmPlus1 = gitOut("rev-parse HEAD", env.remoteWorking);
+      git("push origin core-dev", env.remoteWorking);
+
+      // Second --from b — both Bm and Bm+1 halt (Bm directly; Bm+1 via propagation
+      // with inherited mappedParents from Bm's halt record).
+      const halt2 = runCiSync(env);
+      assert(halt2.status !== 0, "expected halt after Bm+1 added");
+      assert(/cannot auto-resolve replay parent tree — branch halted/.test(halt2.stdout + halt2.stderr),
+        "expected halt diagnostic on second --from b");
+
+      // Operator does the round-trip. BE.core-dev is now at Bm+1, so the
+      // BE-side merge of the shadow ref produces R_be with parents [Bm+1, Mm'_on_be].
+      roundTripResolution(env);
+
+      // Third --from b — absorbs BOTH Bm and Bm+1 into the squashed shadow commit.
+      const r = runCiSync(env);
+      assertEqual(r.status, 0, `--from b after multi-commit halt: ${r.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assert(sqHash.length === 40, "shadow ref must exist post-absorption");
+      const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
+
+      // sq must carry trailers for BOTH halted source SHAs (Bm AND Bm+1).
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${info.bm}`),
+        `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${bmPlus1}`),
+        `sq missing absorbed Bm+1 trailer for ${bmPlus1}\n${sqMsg}`);
+
+      // post-halt.ts (Bm+1's content) must survive in sq's tree. If
+      // resolveHaltAwareParents skipped Bm+1's inherited mappedParents, or if
+      // collectAbsorbedHalted didn't walk through Bm+1, the squash would lose it.
+      const postHalt = gitOut(`show ${sqHash}:backend/post-halt.ts`, env.localRepo);
+      assert(postHalt.includes("post-halt content"),
+        `post-halt.ts missing/wrong on squashed shadow: "${postHalt}"`);
+
+      // Re-running --from b is a no-op — loadReplayedMappings sees Bm AND Bm+1
+      // via the multi-trailer encoding and filters both out of the next work list.
+      const rerun = runCiSync(env);
+      assertEqual(rerun.status, 0, `idempotent re-run status: ${rerun.stderr}`);
+      git("fetch origin --prune", env.localRepo);
+      const sqHash2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assertEqual(sqHash2, sqHash, "shadow tip stable across multi-trailer idempotent re-run");
+    } finally {
+      env.cleanup();
+    }
+  }
+
   const subs: Array<[string, () => void]> = [
-    ["happy-auto-detect", runHappyAutoDetect],
+    ["happy-round-trip", runHappyRoundTrip],
     ["idempotent-rerun", runIdempotentRerun],
-    ["ambiguous-candidates", runAmbiguousCandidates],
-    ["no-candidate-fallthrough", runNoCandidateFallthrough],
+    ["halt-persistence", runHaltPersistence],
     ["approach-a-still-works", runApproachAStillWorks],
+    ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
   ];
   let failed = 0;
   for (const [name, fn] of subs) {

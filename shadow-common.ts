@@ -618,15 +618,23 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
  * parent's outer files, so checking out an old shadow commit reflects the
  * target's outer state then — not a frozen bootstrap snapshot. Returns null
  * to fall back to the plain first-parent tree.
+ *
+ * Round-trip exception: if the echo target is itself in mappedParents (the
+ * operator's resolution merge `Mm` was spliced in via resolveHaltAwareParents
+ * to keep the previous shadow tip in the parent set), the inner slice we want
+ * is the CURRENT commit's source-side tree — that's the operator's resolved
+ * inner including any backend-only intermediate work (e.g. files added between
+ * the halt and the round-trip). Splice that into Mm's outer.
  */
 function composeCrossRepoMergeTree(opts: {
   commit: TopoCommit;
   mappedParents: string[];
+  source: RepoEndpoint;
   target: RepoEndpoint;
   shaMapping: Map<string, string>;
   dc: DirectionConfig;
 }): string | null {
-  const { commit, mappedParents, target, shaMapping, dc } = opts;
+  const { commit, mappedParents, source, target, shaMapping, dc } = opts;
   if (!target.dir || mappedParents.length === 0) return null;
 
   let echoTargetSHA: string | null = null;
@@ -644,30 +652,19 @@ function composeCrossRepoMergeTree(opts: {
 
   const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
   if (!echoTreeRes.ok) return null;
+
+  // Round-trip case: echo target in mappedParents → splice source's inner over Mm's outer.
+  if (mappedParents.includes(echoTargetSHA)) {
+    const sourceInnerRes = source.dir
+      ? git(["rev-parse", `${commit.hash}:${source.dir}`], { safe: true })
+      : git(["rev-parse", `${commit.hash}^{tree}`], { safe: true });
+    if (!sourceInnerRes.ok) return echoTreeRes.stdout;
+    return composeSubtree(echoTreeRes.stdout, target.dir, sourceInnerRes.stdout);
+  }
+
   const shadowDirRes = git(["rev-parse", `${mappedParents[0]}:${target.dir}`], { safe: true });
   if (!shadowDirRes.ok) return echoTreeRes.stdout;
   return composeSubtree(echoTreeRes.stdout, target.dir, shadowDirRes.stdout);
-}
-
-/**
- * B' fast path: compose a tree from the target merge's outer (everything outside
- * target.dir/) and the source merge's inner (target.dir/ contents). No source-diff
- * is applied on top — this tree becomes the resolved merge's tree verbatim.
- * When target.dir is empty, source and target share file layout, so the target
- * merge's tree alone is the resolution (B-basic semantics).
- */
-export function composeResolvedMergeTree(opts: {
-  targetMerge: string;
-  sourceMerge: string;
-  targetDir: string;
-}): string {
-  const { targetMerge, sourceMerge, targetDir } = opts;
-  const targetTreeRes = git(["rev-parse", `${targetMerge}^{tree}`], { safe: true });
-  if (!targetTreeRes.ok || !targetTreeRes.stdout) fail(`Cannot read tree of target merge ${targetMerge}: ${targetTreeRes.stderr}`);
-  if (!targetDir) return targetTreeRes.stdout;
-  const sourceTreeRes = git(["rev-parse", `${sourceMerge}^{tree}`], { safe: true });
-  if (!sourceTreeRes.ok || !sourceTreeRes.stdout) fail(`Cannot read tree of source merge ${sourceMerge}: ${sourceTreeRes.stderr}`);
-  return composeSubtree(targetTreeRes.stdout, targetDir, sourceTreeRes.stdout);
 }
 
 /**
@@ -780,8 +777,9 @@ function formatUnresolvableMergeError(opts: {
   const trailer = `${replayedTrailerKey(pair.name, source.remote)}: ${commit.hash}`;
 
   const shortHash = commit.hash.slice(0, 7);
+  const branchLabel = branchHint ?? "<source-branch>";
   return [
-    `${meta.short}: cannot auto-resolve replay parent tree.`,
+    `${meta.short}: cannot auto-resolve replay parent tree — branch halted.`,
     ``,
     `  Source merge:   ${commit.hash}  (${meta.short})`,
     `  Failure:        ${reason}`,
@@ -790,14 +788,29 @@ function formatUnresolvableMergeError(opts: {
     ``,
     `  ${outerNote}`,
     ``,
-    `To reconcile manually, create a commit on ${shadowRef} that`,
-    `  - has the divergent mapped parents above as its git parents`,
-    `  - has a tree you choose (the resolved outer state + the merged inner state)`,
-    `  - includes this trailer in its message body (exact text):`,
+    `Recovery — choose ONE:`,
     ``,
-    `      ${trailer}`,
+    `  (Recommended) Round-trip + squash.`,
+    `    1. Resolve the merge on ${target.remote}'s working branch as you would`,
+    `       normally — e.g. \`git checkout ${branchLabel} && git merge --no-ff <from-branch>\`,`,
+    `       resolve conflicts, commit (call this Mm), and push.`,
+    `    2. Run shadow-sync in the other direction so Mm is replayed onto`,
+    `       ${source.remote}'s shadow ref (\`shadow/${pair.name}/${branchLabel}\`).`,
+    `    3. On ${source.remote}, merge that shadow ref into the working branch`,
+    `       (\`git merge origin/shadow/${pair.name}/${branchLabel}\`) and push.`,
+    `    4. Re-run this sync. The engine absorbs ${meta.short} (and any`,
+    `       descendants halted with it) into the resulting merge's replay`,
+    `       automatically — no flags needed.`,
     ``,
-    `On the next sync run, ${meta.short} will be picked up via that trailer and skipped.`,
+    `  (Alternative) Hand-built resolution on the shadow ref. Create a commit`,
+    `  on ${shadowRef} that`,
+    `    - has the divergent mapped parents above as its git parents`,
+    `    - has a tree you choose (the resolved outer state + the merged inner state)`,
+    `    - includes this trailer in its message body (exact text):`,
+    ``,
+    `        ${trailer}`,
+    ``,
+    `  On the next sync run, ${meta.short} will be picked up via that trailer and skipped.`,
     ``,
     `  Suggested commands (run in this repo, with ${target.remote} fetched):`,
     `    git checkout -b manual-resolve-${shortHash} ${mappedParents[0]}`,
@@ -850,111 +863,74 @@ function resolveTargetParents(
   return parents;
 }
 
+/**
+ * Like resolveTargetParents, but when a source parent is in haltedSources,
+ * splice in the FULL set of mapped parents the halt-causer had (from
+ * haltReasons), rather than letting findEchoAnchor pick one non-deterministically.
+ * This keeps the previously-pushed shadow tip (which mapBranchesToTargetTips
+ * chose by the same newest-first walk) in the resulting parent set, so the
+ * downstream FF push remains valid when a round-trip merge absorbs a halt.
+ */
+function resolveHaltAwareParents(
+  commit: TopoCommit,
+  shaMapping: Map<string, string>,
+  targetInit: string | null,
+  haltedSources: Set<string>,
+  haltReasons: Map<string, { mappedParents: string[]; diagnostic: string; commitShort: string }>,
+): string[] {
+  if (commit.parents.length === 0) {
+    return targetInit ? [targetInit] : [];
+  }
+  const parents: string[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (sha: string | null | undefined) => {
+    if (sha && !seen.has(sha)) { parents.push(sha); seen.add(sha); }
+  };
+  for (const parentHash of commit.parents) {
+    if (shaMapping.has(parentHash)) {
+      pushUnique(shaMapping.get(parentHash));
+      continue;
+    }
+    if (haltedSources.has(parentHash)) {
+      const reason = haltReasons.get(parentHash);
+      if (reason && reason.mappedParents.length > 0) {
+        for (const mp of reason.mappedParents) pushUnique(mp);
+        continue;
+      }
+    }
+    pushUnique(findEchoAnchor(parentHash, shaMapping) ?? targetInit);
+  }
+  return parents;
+}
+
 // ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
- * Return all source-side branch short-names that contain `commitHash`.
- * Used by findResolutionCandidate to identify the source merge's into/from
- * branches by the asymmetry of "contains parent[1] but not the merge itself"
- * = the from branch.
+ * BFS from the commit's source-side parents through halted unmapped ancestors,
+ * stopping at mapped commits. Returns the halted SHAs to encode as
+ * `Shadow-replayed` trailers on this commit's replay, so subsequent sync runs
+ * see them as already replayed and skip retrying them.
  */
-function branchesContainingOnRemote(commitHash: string, remote: string): string[] {
-  const res = git(
-    ["for-each-ref", "--format=%(refname:short)", "--contains", commitHash, `refs/remotes/${remote}/`],
-    { safe: true },
-  );
-  if (!res.ok || !res.stdout) return [];
-  return res.stdout.split("\n")
-    .map(l => l.trim())
-    .filter(Boolean)
-    .map(r => r.startsWith(`${remote}/`) ? r.slice(remote.length + 1) : r)
-    .filter(b => b && b !== "HEAD");
-}
-
-/**
- * B' auto-detect: find a target-side merge on target.remote/<into-branch> whose
- * tree resolves the source merge conflict the engine couldn't auto-merge. See
- * IMPLEMENTATION_PLAN §1 in local_tests/conflict_squash/ for the design.
- *
- * Returns `{ targetMerge }` if exactly one candidate matches the shape;
- * `{ ambiguous, candidates }` if multiple match (operator must rerun with
- * --using); null + empty candidates if none — caller falls through to the
- * original error.
- *
- * Operator-supplied `using` SHAs filter candidates: if any are provided, only
- * candidates whose SHA appears (full or prefix-match) are considered.
- */
-export function findResolutionCandidate(opts: {
-  commit: TopoCommit;
-  mappedParents: string[];
-  source: RepoEndpoint;
-  target: RepoEndpoint;
-  pair: SyncPair;
-  using: string[];
-}): { targetMerge: string | null; ambiguous: boolean; candidates: string[]; intoBranch: string | null } {
-  const { commit, mappedParents, source, target, pair, using } = opts;
-
-  // V1: 2-parent merges only. Octopus B' is deliberately out of scope.
-  if (commit.parents.length !== 2 || mappedParents.length !== 2) {
-    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch: null };
+function collectAbsorbedHalted(
+  commit: TopoCommit,
+  haltedSources: Set<string>,
+  shaMapping: Map<string, string>,
+): string[] {
+  const absorbed = new Set<string>();
+  const seen = new Set<string>();
+  const stack = [...commit.parents];
+  while (stack.length) {
+    const p = stack.pop()!;
+    if (seen.has(p) || shaMapping.has(p)) continue;
+    seen.add(p);
+    if (!haltedSources.has(p)) continue;
+    absorbed.add(p);
+    const parents = git(["log", "-1", "--format=%P", p], { safe: true });
+    if (parents.ok && parents.stdout) {
+      for (const pp of parents.stdout.split(/\s+/).filter(Boolean)) stack.push(pp);
+    }
   }
-
-  // The source merge is on the "into" branch (operator hasn't propagated it
-  // back). The "from" branch contains parents[1] but not the source merge
-  // itself. This handles the common case where inferSourceBranch returns null
-  // due to parents[1] being reachable from both branches post-merge.
-  const bmBranches = branchesContainingOnRemote(commit.hash, source.remote);
-  const p2Branches = branchesContainingOnRemote(commit.parents[1], source.remote);
-  const fromBranches = p2Branches.filter(b => !bmBranches.includes(b));
-  const intoCandidates = bmBranches.filter(b => !fromBranches.includes(b) || bmBranches.length === 1);
-  if (intoCandidates.length !== 1 || fromBranches.length !== 1) {
-    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch: null };
-  }
-  const intoBranch = intoCandidates[0];
-  const fromBranch = fromBranches[0];
-
-  const targetInto = `${target.remote}/${intoBranch}`;
-  const targetFrom = `${target.remote}/${fromBranch}`;
-  if (!refExists(targetInto) || !refExists(targetFrom)) {
-    return { targetMerge: null, ambiguous: false, candidates: [], intoBranch };
-  }
-
-  // Range "new since last sync": commits reachable from targetInto but not from
-  // this pair's shadow ref for the same branch. Engine-replayed commits are on
-  // the shadow ref, so this naturally excludes them.
-  const shadowRef = `${target.remote}/${shadowBranchName(pair.name, intoBranch)}`;
-  const range = refExists(shadowRef) ? `${shadowRef}..${targetInto}` : targetInto;
-
-  const log = git(["log", "--merges", "--format=%H %P", range], { safe: true });
-  if (!log.ok || !log.stdout) return { targetMerge: null, ambiguous: false, candidates: [], intoBranch };
-
-  const candidates: string[] = [];
-  for (const line of log.stdout.split("\n").filter(Boolean)) {
-    const parts = line.split(/\s+/).filter(Boolean);
-    const candidateHash = parts[0];
-    const candidateParents = parts.slice(1);
-    if (candidateParents.length !== 2) continue;
-
-    // Shape check: candidate.parents[1] reachable from targetFrom (= operator
-    // merged FROM the right branch). candidate.parents[0] is necessarily on
-    // targetInto's history since the candidate itself is — no separate check
-    // needed.
-    const isAnc = git(["merge-base", "--is-ancestor", candidateParents[1], targetFrom], { safe: true });
-    if (!isAnc.ok) continue;
-
-    candidates.push(candidateHash);
-  }
-
-  if (using.length > 0) {
-    const filtered = candidates.filter(c => using.some(u => c === u || c.startsWith(u)));
-    if (filtered.length === 1) return { targetMerge: filtered[0], ambiguous: false, candidates, intoBranch };
-    if (filtered.length > 1) return { targetMerge: null, ambiguous: true, candidates: filtered, intoBranch };
-    return { targetMerge: null, ambiguous: false, candidates, intoBranch };
-  }
-
-  if (candidates.length === 1) return { targetMerge: candidates[0], ambiguous: false, candidates, intoBranch };
-  if (candidates.length > 1) return { targetMerge: null, ambiguous: true, candidates, intoBranch };
-  return { targetMerge: null, ambiguous: false, candidates, intoBranch };
+  return [...absorbed];
 }
 
 /**
@@ -1104,9 +1080,34 @@ function mapBranchesToTargetTips(
   return branchMapping;
 }
 
+/** Per-source-commit halt reason — surfaced to the CLI via mirrorHistory. */
+export interface HaltedBranch {
+  /** Source branch the halt was discovered on, or null if undetermined. */
+  branch: string | null;
+  commitSha: string;
+  commitShort: string;
+  mappedParents: string[];
+  diagnostic: string;
+}
+
+interface ReplayHalts {
+  haltedSources: Set<string>;
+  haltReasons: Map<string, { mappedParents: string[]; diagnostic: string; commitShort: string }>;
+}
+
 /**
  * Replay newCommits in topo order, mutating `shaMapping` so each replayed
  * commit is visible to later parent resolution in the same batch.
+ *
+ * Halt semantics: when `mergeMappedParentTrees` returns null (mapped parents
+ * disagree on outer state), the failing commit is added to `haltedSources`
+ * — NOT to `shaMapping`. Subsequent commits whose source parents are ALL
+ * halted+unmapped are halted in turn. A commit with at least one mapped
+ * parent (e.g. the operator's round-trip merge `R_be` carrying `Mm` as the
+ * second parent via the existing trailer mapping) replays normally; the
+ * absorption step collects halted source ancestors reachable through its
+ * parents and encodes them as extra `Shadow-replayed` trailers, so on the
+ * next sync run `loadReplayedMappings` treats them as already replayed.
  */
 function replayCommits(opts: {
   newCommits: TopoCommit[];
@@ -1116,19 +1117,49 @@ function replayCommits(opts: {
   target: RepoEndpoint;
   dc: DirectionConfig;
   pair: SyncPair;
-  using: string[];
-  allowConflictResolutionOverwrite: boolean;
   autoIgnorePatterns: RegExp[];
-}): void {
-  const { newCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite, autoIgnorePatterns } = opts;
+}): ReplayHalts {
+  const { newCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns } = opts;
   const tmpIndex = path.join(
     os.tmpdir(),
     `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
   );
 
+  const haltedSources = new Set<string>();
+  const haltReasons = new Map<string, { mappedParents: string[]; diagnostic: string; commitShort: string }>();
+
   try {
     for (const commit of newCommits) {
       const meta = getCommitMeta(commit.hash);
+
+      // Halt-propagation: skip iff ALL source parents are halted+unmapped.
+      // A commit that has at least one mapped parent (e.g. R_be whose second
+      // parent is the round-trip-replayed Mm) is NOT halted by this rule —
+      // it falls through to normal replay, where merge-tree FF resolves the
+      // outer divergence.
+      if (commit.parents.length > 0 &&
+          commit.parents.every(p => haltedSources.has(p) && !shaMapping.has(p))) {
+        haltedSources.add(commit.hash);
+        // Inherit mappedParents from halted ancestors so a later descendant
+        // that escapes the halt (via a non-halted second parent) can splice
+        // ALL of the original halt-causer's mapped parents onto its replay.
+        // Without this, findEchoAnchor would pick one non-deterministically
+        // and FF push from the previous shadow tip could fail.
+        const inheritedMP: string[] = [];
+        const seenMP = new Set<string>();
+        for (const p of commit.parents) {
+          const reason = haltReasons.get(p);
+          if (!reason) continue;
+          for (const mp of reason.mappedParents) {
+            if (!seenMP.has(mp)) { inheritedMP.push(mp); seenMP.add(mp); }
+          }
+        }
+        if (inheritedMP.length > 0) {
+          haltReasons.set(commit.hash, { mappedParents: inheritedMP, diagnostic: "", commitShort: meta.short });
+        }
+        console.log(`  Skipping ${meta.short} (descended from halted ancestor).`);
+        continue;
+      }
 
       // Carries our own trailer → forwarded earlier and merged back; record only.
       const isEcho = hasTrailer(meta.trailers, dc.addTrailerKey);
@@ -1144,37 +1175,33 @@ function replayCommits(opts: {
         console.log(`  Replaying ${label}...`);
       }
 
-      const mappedParents = resolveTargetParents(commit, shaMapping, targetInit);
+      // Expand halted parents to their full set of mappedParents (from haltReasons).
+      // When a source parent is in haltedSources, findEchoAnchor would pick ONE of
+      // its mapped grandparents non-deterministically; the previous shadow tip we
+      // pushed (per mapBranchesToTargetTips) might be the OTHER one, and the FF
+      // check would then fail. Splicing in the full mappedParents from the halt
+      // record guarantees the previous shadow tip remains in the parent set.
+      const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons);
 
       // Cross-repo merge tree (see composeCrossRepoMergeTree).
-      const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc });
+      const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, source, target, shaMapping, dc });
       let parentTree: string | null;
       if (composedParentTree) {
         parentTree = composedParentTree;
       } else if (mappedParents.length > 0) {
         const merged = mergeMappedParentTrees({ mappedParents, commitShort: meta.short, targetDir: target.dir });
         if (merged === null) {
-          // B' fast path: auto-detect the operator's target-side merge and emit
-          // a resolved merge directly. Gated by --allow-conflict-resolution-overwrite
-          // so today's behavior is unchanged unless explicitly opted in.
-          if (allowConflictResolutionOverwrite) {
-            const res = findResolutionCandidate({ commit, mappedParents, source, target, pair, using });
-            if (res.targetMerge) {
-              const resolvedTree = composeResolvedMergeTree({ targetMerge: res.targetMerge, sourceMerge: commit.hash, targetDir: target.dir });
-              const trailer = `${dc.addTrailerKey}: ${commit.hash}`;
-              const resolvedMsg = appendTrailer(`Conflict resolution from ${meta.short} (target-merge outer + source-merge inner)\n\n${meta.message}`, trailer);
-              const parentArgs = mappedParents.flatMap(p => ["-p", p]);
-              const resolvedMerge = git(["commit-tree", resolvedTree, ...parentArgs, "-m", resolvedMsg], { env: buildCommitEnv(meta) });
-              shaMapping.set(commit.hash, resolvedMerge);
-              console.log(`  ✓ Resolved merge ${resolvedMerge.slice(0, 7)} from target merge ${res.targetMerge.slice(0, 7)}.`);
-              continue;
-            }
-            if (res.ambiguous) {
-              fail(`${meta.short}: ambiguous resolution candidates on ${target.remote}/${res.intoBranch}:\n` +
-                res.candidates.map(c => `    ${c}`).join("\n") + `\n  Rerun with --using <sha> to disambiguate.`);
-            }
-          }
-          fail(formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }));
+          // Halt this branch — do NOT add to shaMapping, do NOT throw. The
+          // diagnostic surfaces via mirrorHistory's return; other branches in
+          // this same call keep flowing.
+          haltedSources.add(commit.hash);
+          haltReasons.set(commit.hash, {
+            mappedParents,
+            diagnostic: formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }),
+            commitShort: meta.short,
+          });
+          console.log(`  ⚠ Halted on ${meta.short}: outer-state divergence between mapped parents.`);
+          continue;
         }
         parentTree = merged;
       } else if (commit.parents.length === 0) {
@@ -1205,9 +1232,17 @@ function replayCommits(opts: {
         continue;
       }
 
-      const msg = isEcho
+      // Absorption: collect halted source ancestors reachable from this commit
+      // through its source-side parents. They become additional Shadow-replayed
+      // trailers so the next sync sees them as already mapped and skips them.
+      const absorbed = collectAbsorbedHalted(commit, haltedSources, shaMapping);
+
+      let msg = isEcho
         ? appendTrailer(stripReplayedTrailers(meta.message), `${dc.addTrailerKey}: ${commit.hash}`)
         : appendTrailer(meta.message, `${dc.addTrailerKey}: ${commit.hash}`);
+      for (const sha of absorbed) {
+        msg = appendTrailer(msg, `${dc.addTrailerKey}: ${sha}`);
+      }
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
       const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", msg], {
@@ -1215,11 +1250,22 @@ function replayCommits(opts: {
       });
 
       shaMapping.set(commit.hash, newSHA);
-      console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
+      for (const sha of absorbed) {
+        shaMapping.set(sha, newSHA);
+        haltedSources.delete(sha);
+        haltReasons.delete(sha);
+      }
+      if (absorbed.length > 0) {
+        console.log(`  ✓ Replayed${isEcho ? " (recorded)" : ""}, absorbing ${absorbed.length} halted ancestor(s): ${absorbed.map(s => s.slice(0, 7)).join(", ")}.`);
+      } else {
+        console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
+      }
     }
   } finally {
     fs.rmSync(tmpIndex, { force: true });
   }
+
+  return { haltedSources, haltReasons };
 }
 
 /** Replay one side of a pair onto the other; `from` selects the source. */
@@ -1227,10 +1273,14 @@ export function mirrorHistory(opts: {
   pair: SyncPair;
   from: "a" | "b";
   branches: string[];
-  using?: string[];
-  allowConflictResolutionOverwrite?: boolean;
-}): { mirrored: number; branchMapping: Map<string, string>; shaMapping: Map<string, string>; upToDate: boolean } {
-  const { pair, from, branches, using = [], allowConflictResolutionOverwrite = false } = opts;
+}): {
+  mirrored: number;
+  branchMapping: Map<string, string>;
+  shaMapping: Map<string, string>;
+  upToDate: boolean;
+  haltedBranches: HaltedBranch[];
+} {
+  const { pair, from, branches } = opts;
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
   const dc = buildDirectionConfig(pair.name, source.remote, target.remote);
@@ -1265,6 +1315,7 @@ export function mirrorHistory(opts: {
       branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
       shaMapping,
       upToDate: true,
+      haltedBranches: [],
     };
   }
 
@@ -1280,16 +1331,38 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, using, allowConflictResolutionOverwrite, autoIgnorePatterns });
+  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns });
+
+  // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
+  // (descendants that inherited halt-state) carry an empty diagnostic — they're
+  // present in haltReasons only so resolveHaltAwareParents can splice in the
+  // halt-causer's mapped parents.
+  const haltedBranches: HaltedBranch[] = [];
+  for (const [sha, reason] of haltReasons) {
+    if (!reason.diagnostic) continue;
+    haltedBranches.push({
+      branch: inferSourceBranch(sha, source.remote),
+      commitSha: sha,
+      commitShort: reason.commitShort,
+      mappedParents: reason.mappedParents,
+      diagnostic: reason.diagnostic,
+    });
+  }
 
   console.log();
-  console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);
+  const replayedCount = usefulNewCommits.length - haltedSources.size;
+  if (haltedBranches.length > 0) {
+    console.log(`Done. ${replayedCount} commit(s) replayed; ${haltedBranches.length} halt(s) (${haltedSources.size} commit(s) blocked).`);
+  } else {
+    console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);
+  }
 
   return {
-    mirrored: usefulNewCommits.length,
+    mirrored: replayedCount,
     branchMapping: mapBranchesToTargetTips(source.remote, branches, shaMapping),
     shaMapping,
     upToDate: false,
+    haltedBranches,
   };
 }
 

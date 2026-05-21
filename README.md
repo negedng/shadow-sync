@@ -77,37 +77,43 @@ git merge origin/shadow/backend/main
 
 ### When merge replay halts
 
-In rare cases the engine can't auto-resolve a source-side merge because the mapped target-side parents disagree on **outer state** — files outside the synced subdirectory that don't exist on the source repo. This happens when both sides committed to the same branch concurrently and merged each other's work back at different times. The engine halts with a recipe rather than guessing.
+In rare cases the engine can't auto-resolve a source-side merge because the mapped target-side parents disagree on **outer state** — files outside the synced subdirectory that don't exist on the source repo. This happens when both sides committed to the same branch concurrently and merged each other's work back at different times. The engine halts the affected branch (other branches keep syncing) with a recipe and a non-zero exit, rather than guessing.
 
 Two recovery flows:
 
-**B′ — engine-composed resolved merge (preferred).** Resolve the merge on the target's working branch, then re-run sync. The engine auto-detects your resolution and composes the right tree.
+**Round-trip + squash (preferred).** Resolve the merge on the target's working branch as you would normally. The next sync cycle naturally propagates the resolution back, and the engine absorbs the halted commits into a single squashed shadow commit — no flags, no shape detection.
 
 ```bash
-# 1. The sync failed on a merge (call it Bm). Switch to the target's working branch.
+# 1. The sync halted on Bm (a source-side merge whose outer can't be reconciled).
+#    Switch to the target's working branch.
 cd /path/to/monorepo
 git checkout core-dev
 
 # 2. Resolve the merge as you would normally. Suppose Bm merges project → core-dev:
 git merge --no-ff project
 # ... resolve conflicts, commit ...
+git push origin core-dev    # creates Mm
+
+# 3. Run sync the OTHER direction so Mm reaches the source repo's shadow ref:
+npm run sync -- --from a    # Mm replayed onto shadow/<pair>/core-dev on source repo
+
+# 4. On the source side, merge that shadow ref into the working branch:
+cd /path/to/backend
+git checkout core-dev
+git merge origin/shadow/backend/core-dev    # produces R_be
 git push origin core-dev
 
-# 3. Re-run sync with the feature flag.
-npm run sync -- --from b --allow-conflict-resolution-overwrite
+# 5. Re-run the original direction. The engine sees R_be, fast-forwards through
+#    Mm via merge-tree, and absorbs Bm (and any descendants halted with it)
+#    into the resulting shadow commit via multi-trailer encoding.
+npm run sync -- --from b
 ```
 
-The engine identifies your merge by shape — a 2-parent merge on the into-branch whose second parent is reachable from the from-branch — composes its outer with the source merge's inner, and writes the result to the shadow ref. No new trailers or operator-supplied SHAs needed in the common case.
+The engine adds one `Shadow-replayed-<pair>-<source-remote>` trailer per absorbed source SHA on the new shadow commit. On subsequent runs `loadReplayedMappings` reads those trailers and skips the absorbed commits, so the squash is idempotent.
 
-If you made multiple unrelated merges on the target's into-branch and several pass the shape check, the engine errors with `ambiguous resolution candidates: <sha1>, <sha2>; rerun with --using <sha>`. Pick the right one:
+**Hand-built resolution on the shadow ref (always available).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run.
 
-```bash
-npm run sync -- --from b --using <sha> --allow-conflict-resolution-overwrite
-```
-
-**A — hand-built resolution on the shadow ref (always available, no flag).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run. This path works regardless of whether `--allow-conflict-resolution-overwrite` is set.
-
-The full B′ design and a worked example are in [`local_tests/conflict_squash/`](local_tests/conflict_squash/) (`IMPLEMENTATION_PLAN.md` and `run_scenario.ts`).
+A worked example of both flows is in [`local_tests/conflict_squash/run_scenario.ts`](local_tests/conflict_squash/run_scenario.ts).
 
 ### `.shadowignore`
 
