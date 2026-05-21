@@ -1,16 +1,19 @@
 /**
- * Branch-filter tests. Five sub-tests:
+ * Branch-filter tests. Six sub-tests:
  *
  *   1. allows-glob — allowlist with `release/*` matches future release branches
  *      and excludes everything else.
  *   2. strict-empty — file present but no entry for source remote → sync zero
  *      branches, log notes "(after filter)".
- *   3. absent-backcompat — filter map is null (file absent) → all branches sync,
- *      preserving engine-upgrade safety.
- *   4. merged-into-allowed — a filtered branch later merged into an allowed
+ *   3. absent-fail-closed — filter map is null (file absent) → sync zero
+ *      branches. The filter is a REQUIRED allowlist; missing config must
+ *      NOT silently fall through to "sync everything".
+ *   4. wildcard-allow-all — explicit `["**"]` pattern is the supported
+ *      escape hatch for tests/setups that genuinely want all branches.
+ *   5. merged-into-allowed — a filtered branch later merged into an allowed
  *      branch: filtered branch still has no shadow ref of its own, but its
  *      commits reach the shadow via reachability from the merge.
- *   5. orphan-multi-commit — a filtered branch with multiple commits that's
+ *   6. orphan-multi-commit — a filtered branch with multiple commits that's
  *      never merged anywhere: zero leakage across multiple sync cycles.
  */
 import * as fs from "fs";
@@ -74,17 +77,38 @@ function testStrictEmpty(): void {
   }
 }
 
-function testAbsentBackcompat(): void {
-  const env = createTestEnv("branch-filter-absent-backcompat");
+function testAbsentFailClosed(): void {
+  const env = createTestEnv("branch-filter-absent-fail-closed");
   try {
     makeBranchWithCommit(env, "feature/foo", "foo.ts");
     setBranchFiltersForTesting(null);
 
     const r = runCiSync(env);
-    assertEqual(r.status, 0, "[filter-absent-backcompat] sync should succeed");
-    assertEqual(hasShadowBranch(env, "main"),         true, "[filter-absent-backcompat] main shadow exists");
-    assertEqual(hasShadowBranch(env, "feature/foo"), true, "[filter-absent-backcompat] feature/foo shadow exists");
+    assertEqual(r.status, 0, "[filter-absent-fail-closed] sync exits cleanly (no work)");
+    assertIncludes(r.stdout, "(after filter)", "[filter-absent-fail-closed] log mentions filter exclusion");
+    assertEqual(hasShadowBranch(env, "main"),        false, "[filter-absent-fail-closed] no main shadow (missing filter → zero branches)");
+    assertEqual(hasShadowBranch(env, "feature/foo"), false, "[filter-absent-fail-closed] no feature/foo shadow");
   } finally {
+    env.cleanup();
+  }
+}
+
+function testWildcardAllowAll(): void {
+  const env = createTestEnv("branch-filter-wildcard-allow-all");
+  try {
+    makeBranchWithCommit(env, "feature/foo", "foo.ts");
+    makeBranchWithCommit(env, "release/v9",  "rel9.ts");
+    setBranchFiltersForTesting(new Map([
+      [env.remoteName, [compileIgnorePattern("**")]],
+    ]));
+
+    const r = runCiSync(env);
+    assertEqual(r.status, 0, "[filter-wildcard-allow-all] sync should succeed");
+    assertEqual(hasShadowBranch(env, "main"),        true, "[filter-wildcard-allow-all] main shadow");
+    assertEqual(hasShadowBranch(env, "feature/foo"), true, "[filter-wildcard-allow-all] feature/foo shadow");
+    assertEqual(hasShadowBranch(env, "release/v9"),  true, "[filter-wildcard-allow-all] release/v9 shadow");
+  } finally {
+    setBranchFiltersForTesting(null);
     env.cleanup();
   }
 }
@@ -172,7 +196,8 @@ function testOrphanMultiCommit(): void {
 function run(): void {
   testAllowsGlob();
   testStrictEmpty();
-  testAbsentBackcompat();
+  testAbsentFailClosed();
+  testWildcardAllowAll();
   testMergedIntoAllowed();
   testOrphanMultiCommit();
 }

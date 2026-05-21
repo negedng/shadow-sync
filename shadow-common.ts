@@ -491,9 +491,14 @@ interface BranchFilterDoc { filters?: Record<string, string[]>; }
 
 const BRANCH_FILTERS_PATH = path.join(path.dirname(CONFIG_PATH), "branch-filters.json");
 
-/** null = file absent (back-compat: pass-through); Map = strict allowlist. */
-function loadBranchFilters(): Map<string, RegExp[]> | null {
-  if (!fs.existsSync(BRANCH_FILTERS_PATH)) return null;
+/**
+ * Required allowlist: missing file = empty map = zero branches synced.
+ * The filter is the explicit declaration of what the operator wants synced;
+ * silently falling through to "sync everything" defeats the safety the
+ * allowlist provides.
+ */
+function loadBranchFilters(): Map<string, RegExp[]> {
+  if (!fs.existsSync(BRANCH_FILTERS_PATH)) return new Map();
   const doc = JSON.parse(fs.readFileSync(BRANCH_FILTERS_PATH, "utf8")) as BranchFilterDoc;
   const out = new Map<string, RegExp[]>();
   for (const [remote, patterns] of Object.entries(doc.filters ?? {})) {
@@ -502,21 +507,20 @@ function loadBranchFilters(): Map<string, RegExp[]> | null {
   return out;
 }
 
-let _branchFilters: Map<string, RegExp[]> | null = loadBranchFilters();
-if (_branchFilters === null) {
-  console.error("  branch-filters.json not present — syncing all branches.");
+let _branchFilters: Map<string, RegExp[]> = loadBranchFilters();
+if (_branchFilters.size === 0) {
+  console.error(`  ${fs.existsSync(BRANCH_FILTERS_PATH) ? "branch-filters.json is empty" : "branch-filters.json not present"} — no branches will be synced.`);
 }
 
 export function filterBranchesForRemote(remote: string, branches: string[]): string[] {
-  if (_branchFilters === null) return branches;
   const patterns = _branchFilters.get(remote);
   if (patterns === undefined) return [];
   return branches.filter(b => patterns.some(re => re.test(b)));
 }
 
-/** Test hook — installs an in-memory filter map (or null for back-compat). */
+/** Test hook — installs an in-memory filter map. `null` resets to empty (zero branches). */
 export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): void {
-  _branchFilters = map;
+  _branchFilters = map ?? new Map();
 }
 
 /**

@@ -26,7 +26,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { runSync } from "../shadow-sync";
-import { applyTestOverrides } from "../shadow-common";
+import { applyTestOverrides, compileIgnorePattern, setBranchFiltersForTesting } from "../shadow-common";
 
 function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
@@ -87,6 +87,12 @@ async function main() {
       ],
       shadowBranchPrefix: "shadow",
     });
+    // Not a filter test — wildcard.
+    setBranchFiltersForTesting(new Map([
+      ["origin",   [compileIgnorePattern("**")]],
+      ["backend",  [compileIgnorePattern("**")]],
+      ["frontend", [compileIgnorePattern("**")]],
+    ]));
 
     banner("Bootstrap sync");
     let r = await runSync({ from: "b" });
@@ -155,6 +161,7 @@ async function main() {
     }
 
   } finally {
+    setBranchFiltersForTesting(null);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { runSync } from "../shadow-sync";
-import { applyTestOverrides, SyncPair } from "../shadow-common";
+import { applyTestOverrides, compileIgnorePattern, setBranchFiltersForTesting, SyncPair } from "../shadow-common";
 
 export interface RemoteInfo {
   remoteName: string;
@@ -94,6 +94,20 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   };
 
   return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, branchPrefix, remotes: [primary], cleanup };
+}
+
+/**
+ * Install the in-memory branch allowlist for tests. Engine fails closed
+ * without one, so every test that runs sync must declare which branches
+ * it expects to sync — by literal name (e.g. "main") or shape-specific
+ * glob (e.g. "core-*", "release/*"). The `**` catch-all wildcard is not
+ * permitted in test code by convention — it defeats the allowlist's
+ * purpose. Pass `{}` (or no args) to reset between tests.
+ */
+export function setTestBranchAllowlist(perRemote: Record<string, string[]> = {}): void {
+  setBranchFiltersForTesting(new Map(
+    Object.entries(perRemote).map(([r, bs]) => [r, bs.map(compileIgnorePattern)]),
+  ));
 }
 
 /** Add an additional remote to an existing test env. Returns a RemoteInfo handle. */

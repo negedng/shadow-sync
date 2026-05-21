@@ -3,6 +3,7 @@ import * as path from "path";
 import { execSync } from "child_process";
 import {
   createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertNotIncludes } from "./assert";
 
@@ -294,13 +295,19 @@ function phaseH_FFMergeThenLinear(): void {
 }
 
 export default function run() {
-  phaseA_differentConflictResolutions();
-  phaseB_asymmetricTiming();
-  phaseD_crossCuttingCommit();
-  phaseE_repeatedNoFFMerges();
-  phaseF_multipleConcurrentRounds();
-  phaseG_linearAlternating();
-  phaseH_FFMergeThenLinear();
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+    phaseA_differentConflictResolutions();
+    phaseB_asymmetricTiming();
+    phaseD_crossCuttingCommit();
+    phaseE_repeatedNoFFMerges();
+    phaseF_multipleConcurrentRounds();
+    phaseG_linearAlternating();
+    phaseH_FFMergeThenLinear();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

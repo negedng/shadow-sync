@@ -15,6 +15,7 @@ import { execSync } from "child_process";
 import {
   createTestEnv, commitOnRemote, commitOnLocal,
   runCiSync, mergeShadow, runPush, readExternalShadowFile,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
@@ -148,8 +149,14 @@ function runRoundtripFileHistory(): void {
 }
 
 export default function run(): void {
-  runRoundTrip();
-  runRoundtripFileHistory();
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+    runRoundTrip();
+    runRoundtripFileHistory();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

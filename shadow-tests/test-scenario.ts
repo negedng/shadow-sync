@@ -329,6 +329,26 @@ function runSht5() {
       shadowBranchPrefix: "shadow",
     });
 
+    // Branch allowlist — the engine fails closed without one. Patterns are
+    // added by literal name (or `core-*` glob, which also exercises the
+    // pattern compiler) as the scenario creates each branch. See the
+    // allow() calls scattered through the phases below.
+    const allowed: Map<string, string[]> = new Map([
+      ["origin",   ["main", "project"]],            // Phase 3 created project on mono
+      ["backend",  ["main", "core-*", "project"]],  // Phase 1 created core-1.0 + project on backend
+      ["frontend", ["main", "core-*", "project"]],  // Phase 2 created core-1.0 + project on frontend
+    ]);
+    const installAllowed = () => setBranchFiltersForTesting(new Map(
+      Array.from(allowed.entries(), ([r, bs]) => [r, bs.map(compileIgnorePattern)]),
+    ));
+    const allow = (remote: string, ...branches: string[]): void => {
+      const list = allowed.get(remote) ?? [];
+      for (const b of branches) if (!list.includes(b)) list.push(b);
+      allowed.set(remote, list);
+      installAllowed();
+    };
+    installAllowed();
+
     // ── Phase 4: First sync --from b (line 26) ────────────────────────────
     {
       const r = runSync({ from: "b" });
@@ -405,6 +425,7 @@ function runSht5() {
     const Mc6 = mergeRef(mono, "origin/shadow/frontend/project", "Mc6");
     git("push origin main", mono.working);
     git("checkout -b core-2.0", mono.working);
+    allow("origin", "core-*");
     const Mr1 = commitFiles(mono, {
       "backend/src/release.txt":  "2.0\n",
       "frontend/src/release.txt": "2.0\n",
@@ -482,6 +503,7 @@ function runSht5() {
 
     git("push origin project", mono.working);
     git("checkout -b bug/core-2.0/fix", mono.working);
+    allow("origin", "bug/core-2.0/fix");
     const Mf1 = commitFiles(mono, { "backend/src/feature.txt": "v2 + bugfix\n" }, "Mf1");
     git("push origin bug/core-2.0/fix", mono.working);
 
@@ -500,6 +522,7 @@ function runSht5() {
     git("fetch origin", backend.working);
     git("checkout project", backend.working);
     git("checkout -b bug/core-2.0/fix", backend.working);
+    allow("backend", "bug/core-2.0/fix");
     const Bf1 = mergeRef(backend, "origin/shadow/backend/bug/core-2.0/fix", "Bf1");
     git("push origin bug/core-2.0/fix", backend.working);
     git("checkout project", backend.working);
@@ -515,12 +538,14 @@ function runSht5() {
     // ── Phase 18: Multi-project — projectB parallel to project (scenario.md) ──
     git("checkout core-1.0", backend.working);
     git("checkout -b projectB", backend.working);
+    allow("backend", "projectB");
     const BtB1 = commitFiles(backend, { "src/projectB.txt": "projB v1\n" }, "BtB1");
     git("push origin projectB", backend.working);
     git("checkout main", backend.working);
 
     git("checkout core-1.0", frontend.working);
     git("checkout -b projectB", frontend.working);
+    allow("frontend", "projectB");
     const FtB1 = commitFiles(frontend, { "src/projectB.txt": "projB v1\n" }, "FtB1");
     git("push origin projectB", frontend.working);
     git("checkout main", frontend.working);
@@ -532,6 +557,7 @@ function runSht5() {
 
     git("fetch origin", mono.working);
     git("checkout -b projectB origin/shadow/backend/projectB", mono.working);
+    allow("origin", "projectB");
     // Reset projectB tip to Mc0 (we want it to fork from Mc0, not from BtB1'_mono).
     git(`reset --hard ${Mc0}`, mono.working);
     const MtB1 = mergeRef(mono, "origin/shadow/backend/projectB",  "MtB1");
@@ -547,6 +573,7 @@ function runSht5() {
     // ── Phase 19: Fanout — feature/fanout merged into main, project, projectB ──
     git("checkout main", backend.working);
     git("checkout -b feature/fanout", backend.working);
+    allow("backend", "feature/fanout");
     const BfX1 = commitFiles(backend, { "src/fanout.txt": "fanout v1\n" }, "BfX1");
     git("push origin feature/fanout", backend.working);
 
@@ -981,6 +1008,7 @@ function runSht5() {
     }
 
   } finally {
+    setBranchFiltersForTesting(null);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
@@ -1038,6 +1066,23 @@ function runSht6() {
       shadowBranchPrefix: "shadow",
     });
     void Bc0; void Fc0; void Mc0;
+
+    // Branch allowlist (fail-closed) — grows as the scenario creates branches.
+    const allowed: Map<string, string[]> = new Map([
+      ["origin",   ["main"]],
+      ["backend",  ["main"]],
+      ["frontend", ["main"]],
+    ]);
+    const installAllowed = () => setBranchFiltersForTesting(new Map(
+      Array.from(allowed.entries(), ([r, bs]) => [r, bs.map(compileIgnorePattern)]),
+    ));
+    const allow = (remote: string, ...branches: string[]): void => {
+      const list = allowed.get(remote) ?? [];
+      for (const b of branches) if (!list.includes(b)) list.push(b);
+      allowed.set(remote, list);
+      installAllowed();
+    };
+    installAllowed();
 
     // ── Phase 1: Initial sync --from b ──────────────────────────────────────
     {
@@ -1264,9 +1309,11 @@ function runSht6() {
 
     // 6.0 Backend creates project-a, project-b from Bc0 (clean ancestry).
     git(`checkout -b project-a ${Bc0}`, backend.working);
+    allow("backend", "project-a");
     const Bp1 = commitFiles(backend, { "src/feat-a.ts": "feat a\n" }, "Bp1");
     git("push origin project-a", backend.working);
     git(`checkout -b project-b ${Bc0}`, backend.working);
+    allow("backend", "project-b");
     const Bp2 = commitFiles(backend, { "src/feat-b.ts": "feat b\n" }, "Bp2");
     git("push origin project-b", backend.working);
     void Bp1; void Bp2;
@@ -1282,12 +1329,14 @@ function runSht6() {
     // backend/* (survives parent-pair TREESAME-drop) AND README.md (outer file →
     // divergence the engine can't auto-resolve).
     git(`checkout -b project-a ${Mc0}`, mono.working);
+    allow("origin", "project-a");
     const Mp1c = commitFiles(mono, {
       "backend/release-notes.txt": "release a\n",
       "README.md": "v_a\n",
     }, "Mp1c");
     git("push origin project-a", mono.working);
     git(`checkout -b project-b ${Mc0}`, mono.working);
+    allow("origin", "project-b");
     const Mp2c = commitFiles(mono, {
       "backend/release-notes.txt": "release b\n",
       "README.md": "v_b\n",
@@ -1432,6 +1481,7 @@ function runSht6() {
       throw new Error(`[Phase 6.13] shadow tip changed on idempotent re-run: ${sq} → ${sq2}`);
     }
   } finally {
+    setBranchFiltersForTesting(null);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
@@ -1465,10 +1515,17 @@ async function runSht7(): Promise<void> {
   /** Drive scenario through the Bm failure; return env and parsed mapped parents. */
   function setupAndFailReplay(envName: string): { env: TestEnv; info: ConflictInfo } {
     const env = createTestEnv(envName, "backend");
-  
+
     git("branch -m main core-dev", env.localRepo);
     git("branch -m main core-dev", env.remoteWorking);
-  
+
+    // Branch allowlist (engine fails closed without one). sht7 doesn't create
+    // any branches beyond core-dev and project, so we list both upfront.
+    setBranchFiltersForTesting(new Map([
+      ["origin", [compileIgnorePattern("core-dev"), compileIgnorePattern("project")]],
+      ["team",   [compileIgnorePattern("core-dev"), compileIgnorePattern("project")]],
+    ]));
+
     // BE: Bc1 on core-dev, Bp1 on project
     writeFile(env.remoteWorking, "api.ts", "v_be_initial\n");
     git("add -A", env.remoteWorking);
@@ -1480,7 +1537,7 @@ async function runSht7(): Promise<void> {
     git('commit -m "Bp1"', env.remoteWorking);
     git("push origin project", env.remoteWorking);
     git("checkout core-dev", env.remoteWorking);
-  
+
     // Initial --from b
     const r1 = runCiSync(env);
     if (r1.status !== 0) throw new Error(`initial --from b failed: ${r1.stderr}`);
@@ -1761,9 +1818,13 @@ async function runSht7(): Promise<void> {
     ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
   ];
   let failed = 0;
-  for (const [name, fn] of subs) {
-    try { fn(); console.log(`    ✓ sht7.${name}`); }
-    catch (e: any) { console.error(`    ✘ sht7.${name}: ${e.message}`); failed++; }
+  try {
+    for (const [name, fn] of subs) {
+      try { fn(); console.log(`    ✓ sht7.${name}`); }
+      catch (e: any) { console.error(`    ✘ sht7.${name}: ${e.message}`); failed++; }
+    }
+  } finally {
+    setBranchFiltersForTesting(null);
   }
   if (failed > 0) throw new Error(`sht7: ${failed}/${subs.length} sub-test(s) failed`);
 }

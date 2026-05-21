@@ -21,6 +21,7 @@ import {
   readShadowFile, readExternalShadowFile,
   getShadowLogFull, getShadowDiffFiles, getShadowAuthors,
   getExternalShadowLogFull, getExternalShadowDiffFiles,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
@@ -433,22 +434,28 @@ function runSpecialModes(env: ReturnType<typeof createTestEnv>): void {
 }
 
 export default function run(): void {
-  // env1: shared across pull-content, push-content (default subdir), push-ops, special-modes.
-  // All four use frontend subdir + shadow prefix. Sub-tests use disjoint file paths so
-  // they don't collide. Order matters: pull-content seeds shadow refs, then push-content
-  // pushes more, push-ops uses ops-* paths, special-modes adds gitlink/symlink/LFS entries last.
-  const env1 = createTestEnv("content-shared");
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
   try {
-    runPullContent(env1);
-    runPushContent(env1);
-    runPushOps(env1);
-    runSpecialModes(env1);
-  } finally {
-    env1.cleanup();
-  }
+    // env1: shared across pull-content, push-content (default subdir), push-ops, special-modes.
+    // All four use frontend subdir + shadow prefix. Sub-tests use disjoint file paths so
+    // they don't collide. Order matters: pull-content seeds shadow refs, then push-content
+    // pushes more, push-ops uses ops-* paths, special-modes adds gitlink/symlink/LFS entries last.
+    const env1 = createTestEnv("content-shared");
+    try {
+      runPullContent(env1);
+      runPushContent(env1);
+      runPushOps(env1);
+      runSpecialModes(env1);
+    } finally {
+      env1.cleanup();
+    }
 
-  // env2: separate env for the dir-flag custom-dir test (different subdir).
-  runPushContentCustomDir();
+    // env2: separate env for the dir-flag custom-dir test (different subdir).
+    runPushContentCustomDir();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

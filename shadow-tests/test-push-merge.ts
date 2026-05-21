@@ -1,4 +1,4 @@
-import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile } from "./harness";
+import { createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush, readExternalShadowFile, setTestBranchAllowlist } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -23,6 +23,10 @@ function git(cmd: string, cwd: string): string {
  *        a 2-parent shadow commit with the external main tip as first parent
  */
 export default function run() {
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+
   // ── env1: four push-merge phases sharing one env ────────────────────
   const env1 = createTestEnv("push-merge-env1");
   try {
@@ -150,6 +154,10 @@ export default function run() {
     assertEqual(readExternalShadowFile(env2, "merge-marker.ts"), "merge marker\n", "[phase 5] merge-marker.ts on shadow");
   } finally {
     env2.cleanup();
+  }
+
+  } finally {
+    setTestBranchAllowlist();
   }
 }
 

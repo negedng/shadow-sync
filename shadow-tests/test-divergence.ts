@@ -17,6 +17,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile,
   getExternalShadowLogFull,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertNotEqual, assertIncludes, assertNotIncludes } from "./assert";
 
@@ -216,9 +217,15 @@ function runConcurrentMerges(): void {
 }
 
 export default function run(): void {
-  runForceRewrite();
-  runPushDiverged();
-  runConcurrentMerges();
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+    runForceRewrite();
+    runPushDiverged();
+    runConcurrentMerges();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

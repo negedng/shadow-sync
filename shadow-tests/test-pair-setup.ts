@@ -16,6 +16,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile, readLocalFile,
   getShadowLogFull, getExternalShadowLogFull,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes, assertExitCode } from "./assert";
 
@@ -252,9 +253,15 @@ function runPullConflict(): void {
 }
 
 export default function run(): void {
-  runMultiRepo();
-  runMultiPairRootFiles();
-  runPullConflict();
+  // Not a filter test — wildcard. Uses both `team` (primary) and `backend` remotes.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"], backend: ["**"] });
+  try {
+    runMultiRepo();
+    runMultiPairRootFiles();
+    runPullConflict();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

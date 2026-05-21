@@ -19,6 +19,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile,
   getShadowLogFull, getExternalShadowLogFull,
+  setTestBranchAllowlist,
 } from "./harness";
 import { applyTestOverrides, SyncPair } from "../shadow-common";
 import { runSync } from "../shadow-sync";
@@ -478,6 +479,10 @@ function runAutoIgnoreNestedPair(): void {
 }
 
 export default function run(): void {
+  // Not a filter test — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+
   // env1: shared across branches-default, shadowignore-behavior, and paths.
   // Order matters: paths runs last because phase 6 (case-conflict) is terminal —
   // it commits a poisonous tree that blocks any subsequent sync.
@@ -495,6 +500,10 @@ export default function run(): void {
   runBranchesCustomPrefix();
   runShadowignoreNeverInTree();
   runAutoIgnoreNestedPair();
+
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {

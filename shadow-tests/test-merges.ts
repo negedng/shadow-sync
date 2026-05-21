@@ -22,6 +22,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile, readLocalFile, readRemoteFile,
   getExternalShadowLogFull,
+  setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes } from "./assert";
 
@@ -679,15 +680,21 @@ function runManualMergeRecovery(): void {
 }
 
 export default function run(): void {
-  runMergeTopology();
-  runEchoMapping();
-  runEchoIntermediateOuter();
-  runPushMergeSkippedParents();
-  runSquashLocalBeforePush();
-  runSquashRemoteBeforeSync();
-  runSquashCrossRepoBroken();
-  runSquashFeatureAbsorbsShadow();
-  runManualMergeRecovery();
+  // This file tests merge topology, not the branch filter — wildcard.
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  try {
+    runMergeTopology();
+    runEchoMapping();
+    runEchoIntermediateOuter();
+    runPushMergeSkippedParents();
+    runSquashLocalBeforePush();
+    runSquashRemoteBeforeSync();
+    runSquashCrossRepoBroken();
+    runSquashFeatureAbsorbsShadow();
+    runManualMergeRecovery();
+  } finally {
+    setTestBranchAllowlist();
+  }
 }
 
 if (require.main === module) {
