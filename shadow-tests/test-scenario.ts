@@ -1,17 +1,21 @@
 /**
- * test-scenario.ts — full scenario.md walkthrough (sht5 + sht6 + sht7).
+ * test-scenario.ts — full scenario.md walkthrough (sht5 + sht6 + sht7 + sht8).
  *
- * Each scenario is a self-contained function; default export runs all three sequentially.
+ * Each scenario is a self-contained function; default export runs all four sequentially.
  *   sht5 (runSht5) — main multi-pair scenario with multi-branch fan-in/out.
  *   sht6 (runSht6) — dedicated common-pair mechanism + B′ recovery on project branches.
  *   sht7 (runSht7) — B′ composed-squash on a single backend pair (5 sub-tests).
+ *   sht8 (runSht8) — branch-filter behavior: orphan filtered branches stay absent;
+ *                    filtered branches later merged into allowed branches leak their
+ *                    commits via merge reachability, but never get a shadow ref of
+ *                    their own. Both --from b and --from a directions.
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { runSync } from "../shadow-sync";
-import { applyTestOverrides } from "../shadow-common";
+import { applyTestOverrides, setBranchFiltersForTesting, compileIgnorePattern } from "../shadow-common";
 import { assertEqual } from "./assert";
 import { createTestEnv, runCiSync, runPush, TestEnv } from "./harness";
 
@@ -1764,12 +1768,159 @@ async function runSht7(): Promise<void> {
   if (failed > 0) throw new Error(`sht7: ${failed}/${subs.length} sub-test(s) failed`);
 }
 
+// ── sht8: Branch filter — orphan filtered + filtered-then-merged ────────────
+function runSht8() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "shadow-test-filter-"));
+
+  try {
+    const backend = createRepo(tmpDir, "backend", { email: "bea@example.com", name: "Bea" });
+    const mono    = createRepo(tmpDir, "mono",    { email: "mira@example.com", name: "Mira" });
+    git(`remote add backend "${backend.bare}"`, mono.working);
+
+    // ── Phase 0: Mature backend with allowed + filtered branches ──────────
+    const Bc0 = commitFiles(backend, { "src/init.txt": "init\n" }, "Bc0");
+    const Bc1 = commitFiles(backend, { "src/feature.txt": "v1\n" }, "Bc1");
+    git("push origin main", backend.working);
+
+    // release/v1: allowed via release/* glob.
+    git("checkout -b release/v1", backend.working);
+    const Br1 = commitFiles(backend, { "src/release.txt": "1.0\n" }, "Br1");
+    git("push origin release/v1", backend.working);
+    git("checkout main", backend.working);
+
+    // feature/x: filtered, but will later be merged into main.
+    git("checkout -b feature/x", backend.working);
+    const Bfx1 = commitFiles(backend, { "src/fx.txt": "fx v1\n" }, "Bfx1");
+    const Bfx2 = commitFiles(backend, { "src/fx.txt": "fx v2\n" }, "Bfx2");
+    git("push origin feature/x", backend.working);
+
+    // feature/y: filtered, NEVER merged (orphan control case).
+    git("checkout -b feature/y main", backend.working);
+    const Bfy1 = commitFiles(backend, { "src/fy.txt": "fy v1\n" }, "Bfy1");
+    git("push origin feature/y", backend.working);
+    git("checkout main", backend.working);
+
+    // ── Phase 1: Init monorepo ────────────────────────────────────────────
+    const Mc0 = commitFiles(mono, { "README.md": "# Monorepo\n" }, "Mc0");
+    git("push origin main", mono.working);
+
+    applyTestOverrides({
+      repoRoot: mono.working,
+      pairs: [
+        { name: "backend", a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
+      ],
+      shadowBranchPrefix: "shadow",
+    });
+
+    // Filter: backend remote allows {main, release/*}; mono (origin) allows
+    // {main, release/*} too — needed so --from a is not a strict-empty no-op.
+    setBranchFiltersForTesting(new Map([
+      ["backend", [compileIgnorePattern("main"), compileIgnorePattern("release/*")]],
+      ["origin",  [compileIgnorePattern("main"), compileIgnorePattern("release/*")]],
+    ]));
+
+    try {
+      // ── Phase 2: First --from b — only main + release/v1 sync ───────────
+      {
+        const r = runSync({ from: "b" });
+        assertEqual(r.exitCode, 0, `[sht8 P2] --from b: ${r.stderr.slice(0, 300)}`);
+      }
+      git("fetch origin", mono.working);
+      assertRefExists(mono, "origin/shadow/backend/main",       "[sht8 P2] shadow/backend/main exists");
+      assertRefExists(mono, "origin/shadow/backend/release/v1", "[sht8 P2] shadow/backend/release/v1 exists");
+      assertRefAbsent(mono,  "origin/shadow/backend/feature/x", "[sht8 P2] feature/x filtered out");
+      assertRefAbsent(mono,  "origin/shadow/backend/feature/y", "[sht8 P2] feature/y filtered out");
+
+      // Filtered commits not reachable from any allowed shadow yet (no merge).
+      assertEqual(findReplay(mono, "origin/shadow/backend/main", "backend", Bfx1), null,
+        "[sht8 P2] Bfx1 not replayed (filtered branch, no merge yet)");
+      assertEqual(findReplay(mono, "origin/shadow/backend/main", "backend", Bfy1), null,
+        "[sht8 P2] Bfy1 not replayed (filtered orphan)");
+
+      // ── Phase 3: Merge filtered feature/x into allowed main ─────────────
+      git("checkout main", backend.working);
+      const Bcm = mergeRef(backend, "feature/x", "Bcm");
+      git("push origin main", backend.working);
+
+      // ── Phase 4: --from b — fx commits flow via merge reachability ──────
+      {
+        const r = runSync({ from: "b" });
+        assertEqual(r.exitCode, 0, `[sht8 P4] --from b after merge: ${r.stderr.slice(0, 300)}`);
+      }
+      git("fetch origin", mono.working);
+      // feature/x STILL has no shadow ref of its own (filter is branch-level).
+      assertRefAbsent(mono, "origin/shadow/backend/feature/x",
+        "[sht8 P4] feature/x STILL filtered (no shadow ref despite merge into main)");
+      assertRefAbsent(mono, "origin/shadow/backend/feature/y",
+        "[sht8 P4] feature/y STILL filtered (orphan)");
+
+      // But Bfx1/Bfx2/Bcm are all reachable from main → replayed onto shadow/backend/main.
+      const Bcm_mono  = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bcm,  "Bcm'_mono");
+      const Bfx1_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bfx1, "Bfx1'_mono via merge reachability");
+      const Bfx2_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bfx2, "Bfx2'_mono via merge reachability");
+      // Bcm is a merge: its second parent on the shadow side is Bfx2'_mono.
+      assertEqual(getParents(mono, Bcm_mono)[1], Bfx2_mono, "[sht8 P4] Bcm'_mono.parents[1] = Bfx2'_mono");
+      // Tree content reaches shadow/backend/main.
+      assertPathPresent(mono, "origin/shadow/backend/main", "backend/src/fx.txt", "[sht8 P4] fx.txt on shadow/main");
+      // Orphan filtered branch's content stays out.
+      assertPathAbsent(mono, "origin/shadow/backend/main", "backend/src/fy.txt", "[sht8 P4] fy.txt (orphan) absent from shadow/main");
+
+      // ── Phase 5: Filter on the --from a direction ───────────────────────
+      // Mono creates an allowed branch (release/v2) and a filtered branch (feature/z).
+      git("checkout main", mono.working);
+      git("checkout -b release/v2 main", mono.working);
+      const Mr2 = commitFiles(mono, { "backend/src/release.txt": "2.0\n" }, "Mr2");
+      git("push origin release/v2", mono.working);
+
+      git("checkout -b feature/z main", mono.working);
+      const Mz1 = commitFiles(mono, { "backend/src/z.txt": "z v1\n" }, "Mz1");
+      git("push origin feature/z", mono.working);
+      git("checkout main", mono.working);
+
+      {
+        const r = runSync({ from: "a" });
+        assertEqual(r.exitCode, 0, `[sht8 P5] --from a: ${r.stderr.slice(0, 300)}`);
+      }
+      git("fetch origin", backend.working);
+      // release/v2 (allowed on origin) propagates to backend's shadow.
+      const backendRefs = git("branch -r", backend.working);
+      assertEqual(backendRefs.includes("origin/shadow/backend/release/v2"), true,
+        "[sht8 P5] shadow/backend/release/v2 reached backend");
+      // feature/z (filtered on origin) does NOT propagate.
+      assertEqual(backendRefs.includes("origin/shadow/backend/feature/z"), false,
+        "[sht8 P5] feature/z (mono-side filtered) absent on backend");
+      assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mz1), null,
+        "[sht8 P5] Mz1 not replayed on main (only on feature/z, which is filtered)");
+      assertEqual(findReplay(backend, "origin/shadow/backend/release/v2", "origin", Mr2)?.length, 40,
+        "[sht8 P5] Mr2 replayed on shadow/backend/release/v2");
+
+      // ── Phase 6: Idempotence on a clean end-state ───────────────────────
+      for (const from of ["a", "b"] as const) {
+        const r = runSync({ from });
+        assertEqual(r.exitCode, 0, `[sht8 P6 idempotence] --from ${from}: ${r.stderr.slice(0, 300)}`);
+        const replayLines = r.stdout.split("\n").filter(l => /^\s*Replaying /.test(l));
+        if (replayLines.length > 0) {
+          throw new Error(`[sht8 P6] --from ${from} re-replayed on clean state:\n  ${replayLines.join("\n  ")}`);
+        }
+      }
+
+      // Silence unused-variable warnings (named for narrative clarity).
+      void Bc0; void Bc1; void Br1; void Bfy1; void Mc0;
+    } finally {
+      setBranchFiltersForTesting(null);
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 export default async function run() {
   // SCENARIO=sht5,sht7 to run a subset; default = all
-  const filter = (process.env.SCENARIO ?? "sht5,sht6,sht7").split(",").map(s => s.trim());
+  const filter = (process.env.SCENARIO ?? "sht5,sht6,sht7,sht8").split(",").map(s => s.trim());
   if (filter.includes("sht5")) { runSht5();       console.log("  ✓ sht5"); }
   if (filter.includes("sht6")) { runSht6();       console.log("  ✓ sht6"); }
   if (filter.includes("sht7")) { await runSht7(); console.log("  ✓ sht7"); }
+  if (filter.includes("sht8")) { runSht8();       console.log("  ✓ sht8"); }
 }
 
 if (require.main === module) {
