@@ -393,21 +393,73 @@ function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
 
 const ANY_SHADOW_TRAILER_RE = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
 
-// Discriminator: drop a merge iff TREESAME to some parent under the path filter
-// AND no non-first parent carries any Shadow-replayed-* trailer (any pair).
-// Keeps Case B (same-pair echo on 2nd parent), §5 variant (same shape with
-// inverted resolution), and Case A (sibling-pair echo). Drops Cases C/D
-// (purely local TREESAME merges with no cross-repo significance).
-// See local_tests/keep_drop_test/full_history_explained.html §5.
-function isLoadBearingMerge(c: TopoCommit, sourceDir: string): boolean {
-  if (c.parents.length < 2 || !sourceDir) return true;
-  const mt = git(["rev-parse", `${c.hash}:${sourceDir}`], { safe: true });
-  if (!mt.ok) return true;
-  const treesameToSome = c.parents.some(p => {
-    const pt = git(["rev-parse", `${p}:${sourceDir}`], { safe: true });
-    return pt.ok && pt.stdout === mt.stdout;
+// Build a tree SHA for `hash`'s source-side content under `sourceDir/`, with
+// paths matching `ignorePatterns` stripped out. The result is the tree that
+// would actually flow to the target if this commit's diff were replayed —
+// without it, a commit whose only changes are ignored produces a "ghost" tree
+// that differs at the source but is identical post-filter.
+function effectiveSourceTree(
+  hash: string,
+  sourceDir: string,
+  ignorePatterns: RegExp[],
+): string {
+  const treeRef = sourceDir ? `${hash}:${sourceDir}` : `${hash}^{tree}`;
+  return withTmpIndex("effective", idxEnv => {
+    const readRes = git(["read-tree", treeRef], { env: idxEnv, safe: true });
+    if (!readRes.ok) return "";
+    if (ignorePatterns.length === 0) return git(["write-tree"], { env: idxEnv });
+    const ls = git(["ls-files"], { env: idxEnv, safe: true });
+    if (ls.ok && ls.stdout) {
+      const toRemove = ls.stdout.split("\n").filter(Boolean)
+        .filter(p => ignorePatterns.some(re => re.test(p)));
+      if (toRemove.length > 0) {
+        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
+      }
+    }
+    return git(["write-tree"], { env: idxEnv });
   });
+}
+
+// Source-side keep/drop discriminator. Same predicate for every commit shape:
+// drop iff the commit is TREESAME-to-some-parent under the effective filter
+// (sourceDir/ + autoIgnore + this commit's .shadowignore) AND, for merges, no
+// non-first parent carries a Shadow-replayed-* trailer.
+//
+// Cases under this single rule:
+//   - Out-of-scope (every changed path outside sourceDir): already dropped at
+//     the rev-list walk via `-- sourceDir/`. Doesn't reach here.
+//   - .shadowignore-only / autoIgnore-only changes: effective tree == parent's
+//     effective tree → drop. No empty trailer-only commit emitted; on every
+//     future sync the same deterministic check drops it again.
+//   - Case A (sibling-pair echo), Case B (same-pair echo), §5 variant: TREESAME
+//     under filter BUT a non-first parent carries a Shadow-replayed-* trailer
+//     → keep (load-bearing for cross-repo composition).
+//   - Cases C/D (purely local TREESAME merges, no trailer): drop.
+//   - Non-TREESAME under filter: keep.
+// See local_tests/keep_drop_test/full_history_explained.html.
+function isLoadBearing(
+  c: TopoCommit,
+  sourceDir: string,
+  autoIgnorePatterns: RegExp[],
+): boolean {
+  if (c.parents.length === 0) return true;
+
+  const ignorePath = sourceDir ? `${sourceDir}/.shadowignore` : ".shadowignore";
+  const ignoreContent = git(["show", `${c.hash}:${ignorePath}`], { safe: true });
+  const filePatterns = ignoreContent.ok && ignoreContent.stdout
+    ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
+    : [];
+  const effectiveIgnore = [...autoIgnorePatterns, ...filePatterns];
+
+  if (!sourceDir && effectiveIgnore.length === 0) return true;
+
+  const commitTree = effectiveSourceTree(c.hash, sourceDir, effectiveIgnore);
+  if (!commitTree) return true;
+  const treesameToSome = c.parents.some(p =>
+    effectiveSourceTree(p, sourceDir, effectiveIgnore) === commitTree
+  );
   if (!treesameToSome) return true;
+
   for (let i = 1; i < c.parents.length; i++) {
     const meta = getCommitMeta(c.parents[i]);
     if (ANY_SHADOW_TRAILER_RE.test(meta.trailers)) return true;
@@ -415,17 +467,22 @@ function isLoadBearingMerge(c: TopoCommit, sourceDir: string): boolean {
   return false;
 }
 
-function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+function collectSourceCommits(
+  source: RepoEndpoint,
+  branches: string[],
+  autoIgnorePatterns: RegExp[],
+): TopoCommit[] {
   // --full-history surfaces all merges in the path-filtered reachable set; the
-  // post-filter via isLoadBearingMerge drops the non-load-bearing ones. The
+  // post-filter via isLoadBearing drops the non-load-bearing ones. The
   // rationale (rev-list's default simplification rewrites the walk through a
   // TREESAME parent, which can route into the source-side echo chain — see
-  // full_history_explained.html) is what mandates --full-history; the
-  // discriminator then drops merges that carry no cross-repo trailer.
+  // full_history_explained.html) is what mandates --full-history; isLoadBearing
+  // then drops commits whose effective tree (sourceDir minus ignore patterns)
+  // equals some parent's, modulo the load-bearing-trailer carve-out for merges.
   const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
     ...branches.map(b => `${source.remote}/${b}`)];
   if (source.dir) args.push("--", `${source.dir}/`);
-  return collectCommitsWithTrueParents(args).filter(c => isLoadBearingMerge(c, source.dir));
+  return collectCommitsWithTrueParents(args).filter(c => isLoadBearing(c, source.dir, autoIgnorePatterns));
 }
 
 // ── Tree composition & parent resolution ──────────────────────────────────────
@@ -1326,7 +1383,7 @@ export function mirrorHistory(opts: {
   const shaMapping = loadReplayedMappings({ pair, target, branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  const allCommits = collectSourceCommits(source, branches);
+  const allCommits = collectSourceCommits(source, branches, autoIgnorePatterns);
   const newCommits = filterNotReplayedCommits(allCommits, shaMapping, dc);
 
   // Drop candidates that no branch's tip-walk would resolve to (and aren't

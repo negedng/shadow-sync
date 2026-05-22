@@ -445,10 +445,10 @@
   <h3><span class="ref ref-c">C11</span> Loose any-pair trailer rule on the consumer-merge discriminator (keep cross-pair noop synthetics)</h3>
   <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> strict same-pair rule (drop iff TS-some AND no non-first parent carries <code>dc.skipTrailerKey</code>); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case B and the &sect;5 variant).</p>
   <p>
-    <code>collectSourceCommits</code>&rsquo;s <code>isLoadBearingMerge</code> post-filter drops a merge iff it&rsquo;s TREESAME to some parent under the path filter AND no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any pair, any direction). The any-pair form keeps Case A merges &mdash; mono operator runs <code>git merge shadow/&lt;sibling-pair&gt;/main</code>, the merge is TS-some under this pair&rsquo;s filter, and the 2nd parent is a cross-pair echo. Those produce noop self-ancestor synthetics on the shadow chain (e.g. <code>Mc6'_be&lt;noop&gt;</code>) that look like clutter but carry <code>Shadow-replayed-monorepo: Mc6</code> trailers that <a class="ref ref-m" href="#m1">M1</a>&rsquo;s round-trip splice reads on subsequent <code>--from b</code> runs to compose the consumer-side outer state correctly.
+    <code>collectSourceCommits</code>&rsquo;s <code>isLoadBearing</code> post-filter drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to some parent&rsquo;s effective tree AND, for merges, no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any pair, any direction). Same predicate at every commit shape; non-merges have no non-first parent so the trailer clause never applies to them. The any-pair form on the merge clause keeps Case A merges &mdash; mono operator runs <code>git merge shadow/&lt;sibling-pair&gt;/main</code>, the merge is effective-TS-some under this pair&rsquo;s filter, and the 2nd parent is a cross-pair echo. Those produce noop self-ancestor synthetics on the shadow chain (e.g. <code>Mc6'_be&lt;noop&gt;</code>) that look like clutter but carry <code>Shadow-replayed-monorepo: Mc6</code> trailers that <a class="ref ref-m" href="#m1">M1</a>&rsquo;s round-trip splice reads on subsequent <code>--from b</code> runs to compose the consumer-side outer state correctly.
   </p>
   <p>
-    Dropping them (strict rule) would tighten the chain but cause silent cross-pair drift: <code>Bc4'_mono</code>&rsquo;s outer would splice from a pre-Mc6 state, missing the sibling pair&rsquo;s recent content. The drift only surfaces in non-standard workflows (a project branch merging the shadow ref directly rather than via core-dev), so a project doing only the standard workflow could afford the strict rule &mdash; but the load-bearing predicate is structural ("non-first parent has any shadow trailer"), not workflow-specific, and the loose form costs only one noop commit per cross-pair merge. See <a href="local_tests/keep_drop_test/full_history_explained.html">local_tests/keep_drop_test/full_history_explained.html</a> for the discriminator analysis, including the &sect;5 counterexample where naive parent-position rules ("drop iff TS-1st") break.
+    Dropping them (strict rule) would tighten the chain but cause silent cross-pair drift: <code>Bc4'_mono</code>&rsquo;s outer would splice from a pre-Mc6 state, missing the sibling pair&rsquo;s recent content. The drift only surfaces in non-standard workflows (a project branch merging the shadow ref directly rather than via core-dev), so a project doing only the standard workflow could afford the strict rule &mdash; but the load-bearing predicate is structural ("non-first parent has any shadow trailer"), not workflow-specific, and the loose form costs only one noop commit per cross-pair merge. Effective TREESAME (using <code>effectiveSourceTree</code>: <code>read-tree</code> &rarr; <code>rm --cached</code> ignored paths &rarr; <code>write-tree</code>) is what extends the same rule from merges to non-merges, dropping ignore-only edits (Cases E/F) at the source walk so they never emit trailer-only target commits &mdash; idempotent across syncs because the drop is a deterministic function of source-side state. See <a href="local_tests/keep_drop_test/full_history_explained.html">local_tests/keep_drop_test/full_history_explained.html</a> for the discriminator analysis, including the &sect;5 counterexample where naive parent-position rules ("drop iff TS-1st") break and the &sect;6 effective-filter cases.
   </p>
 </div>
 
@@ -548,14 +548,18 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <a class="ref ref-c" href="#c6">C6</a>&rsquo;s push-time FF assertion would halt. Adding
     <code>--full-history</code> keeps the consumer-merges in the queue so M1 can splice them.
     On top of that, <code>collectSourceCommits</code> post-filters via
-    <code>isLoadBearingMerge</code>: drop a merge iff TREESAME to some parent under the path
-    filter AND no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any
-    pair). Cases like &ldquo;<code>git merge --no-ff stale-feature</code>&rdquo; where the side
-    branch has no shadow trailer get dropped &mdash; no vacuous self-ancestor commit on the
-    shadow chain. Consumer-merges (whose non-first parent IS an echo, same- or sibling-pair)
-    survive the filter. See
+    <code>isLoadBearing</code>: drop a commit iff its <em>effective</em> source tree
+    (<code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s
+    <code>.shadowignore</code> stripped) is TREESAME to some parent&rsquo;s effective tree AND,
+    for merges, no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any
+    pair). Same predicate at every commit shape: <code>git merge --no-ff stale-feature</code>
+    with no shadow trailer drops (Case C); a non-merge whose only changes are
+    <code>.shadowignore</code>- or <code>autoIgnore</code>-filtered also drops (Case E) without
+    emitting a trailer-only target commit. Consumer-merges (non-first parent carries an echo,
+    same- or sibling-pair) survive the filter. See
     <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a>
-    for the discriminator design and counterexamples it rejects.
+    for the discriminator design, the effective-TREESAME mechanism, and counterexamples it
+    rejects.
   </p>
   <p class="from">
     <em>Rejected alternatives at this level (distinct from the plumbing-vs-porcelain axis below):</em>

@@ -1210,38 +1210,51 @@ Out: []</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>collectSourceCommits(source, branches): TopoCommit[]</code></h4>
-<p>Runs <code>git rev-list --topo-order --reverse --full-history &lt;branches&gt; -- &lt;source.dir&gt;/</code>, then post-filters via <code>isLoadBearingMerge</code>: drops a merge iff TREESAME to some parent under the path filter AND no non-first parent carries any <code>Shadow-replayed-*</code> trailer. Consumer-merges (whose non-first parent IS an echo) survive; purely local TREESAME merges (no shadow trailer anywhere) get dropped, avoiding vacuous self-ancestor commits on the shadow chain. Required to preserve the fast-forward invariant on the shadow ref while keeping the chain free of clutter. See <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a> for the discriminator design.</p>
-<pre><code>In:  source = monorepo endpoint (dir = "backend"), branches = ["project"]
+<h4><code>collectSourceCommits(source, branches, autoIgnorePatterns): TopoCommit[]</code></h4>
+<p>Runs <code>git rev-list --topo-order --reverse --full-history &lt;branches&gt; -- &lt;source.dir&gt;/</code>, then post-filters via <code>isLoadBearing</code>: drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to some parent&rsquo;s effective tree AND, for merges, no non-first parent carries any <code>Shadow-replayed-*</code> trailer. Same predicate covers consumer-merges (kept by the trailer carve-out), purely local TREESAME merges (dropped &mdash; Cases C/D), and ignore-only edits including non-merges (dropped at the source walk &mdash; Cases E/F, so no trailer-only target commit ever lands on the shadow chain). Idempotent across syncs because the drop is a deterministic function of source-side state. See <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a> for the discriminator design.</p>
+<pre><code>In:  source = monorepo endpoint (dir = "backend"), branches = ["project"],
+     autoIgnorePatterns = [] (no sibling overlap)
      monorepo's project branch has Mc0…Mc6 plus Mt1, Mt2, Mt3, Mf1 — many of
      which don't touch backend/
-Out: [TopoCommit, ...]  every commit reachable from project where either
-     (a) the merge is non-TREESAME under backend/, or (b) it's TREESAME-some
-     AND at least one non-first parent carries a Shadow-replayed-* trailer.
+Out: [TopoCommit, ...]  every commit reachable from project where (a) the
+     effective tree differs from every parent's effective tree, or (b) for
+     merges, effective-TS-some AND at least one non-first parent carries a
+     Shadow-replayed-* trailer.
      --full-history preserves merge ancestry even where TREESAME at backend/
      (so Mt2's frontend-side parent stays in the list — see fetchTrueParents)
 
-In:  source = backend repo endpoint (dir = ""), branches = ["project", "core-dev"]
-Out: every commit topo-ordered across both branches, no path filter applied
-     (source.dir empty → discriminator returns true unconditionally, no filtering)</code></pre>
+In:  source = backend repo endpoint (dir = ""), branches = ["main"],
+     autoIgnorePatterns = [/src\/evntcore\/common(\/|$)/, ...]
+     backend's main has Bcm5 which only edits src/evntcore/common/util.ts
+Out: Bcm5 is dropped here — its effective tree (read-tree, strip
+     src/evntcore/common/**, write-tree) equals its parent's effective
+     tree → Case E drop, no trailer-only synthetic emitted. (The sibling
+     "common-backend" pair handles that subtree on its own walk.)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>isLoadBearingMerge(c, sourceDir): boolean</code></h4>
-<p>The discriminator post-filter applied by <code>collectSourceCommits</code>. Returns <code>false</code> (drop) iff the commit is a merge (≥2 parents) AND <code>sourceDir</code> is non-empty AND the merge is TREESAME to some parent under <code>sourceDir/</code> AND no non-first parent's commit message carries a trailer matching <code>^Shadow-replayed-</code> (any pair). Otherwise <code>true</code> (keep).</p>
-<p>The any-pair trailer check is intentionally loose: a sibling-pair echo on the 2nd parent matters too, because <code>composeCrossRepoMergeTree</code> reads its trailer chain on subsequent runs to compose outer state correctly. See <a href="local_tests/keep_drop_test/full_history_explained.html">full_history_explained.html §5</a> for the design rationale and counterexamples.</p>
+<h4><code>isLoadBearing(c, sourceDir, autoIgnorePatterns): boolean</code></h4>
+<p>The discriminator post-filter applied by <code>collectSourceCommits</code>. Returns <code>false</code> (drop) iff <code>c</code>&rsquo;s effective source tree is TREESAME to at least one parent&rsquo;s effective tree under (<code>sourceDir/</code>, <code>autoIgnorePatterns</code>, <code>${c.hash}:${sourceDir}/.shadowignore</code>) AND, for merges (≥2 parents), no non-first parent&rsquo;s commit message carries a trailer matching <code>^Shadow-replayed-</code> (any pair). Otherwise <code>true</code> (keep). Effective trees are computed by <code>effectiveSourceTree</code>: <code>read-tree</code> the commit&rsquo;s subtree, <code>rm --cached</code> every path matching an ignore pattern, <code>write-tree</code> &mdash; two commits whose effective trees hash to the same SHA are TREESAME under the filter.</p>
+<p>The any-pair trailer check is intentionally loose: a sibling-pair echo on the 2nd parent matters too, because <code>composeCrossRepoMergeTree</code> reads its trailer chain on subsequent runs to compose outer state correctly. See <a href="local_tests/keep_drop_test/full_history_explained.html">full_history_explained.html §5&ndash;§6</a> for the design rationale, the §5 counterexamples, and Cases E/F for non-merge / ignore-only drops.</p>
 <pre><code>In:  c = merge(Mira1, Bx'_mono) where Bx'_mono carries Shadow-replayed-backend
-     sourceDir = "backend"
-     c's backend/ tree == Mira1's backend/ tree (TS-1, mono kept its tree)
+     sourceDir = "backend",  autoIgnorePatterns = []
+     c's effective backend/ tree == Mira1's effective backend/ tree (TS-1)
 Out: true   (TS-some + non-first parent has shadow trailer → keep)
 
 In:  c = merge(main_tip, stale-feature_tip) where stale-feature has no trailer
-     sourceDir = "backend"
-     c's backend/ tree == main_tip's backend/ tree (TS-1)
+     sourceDir = "backend",  autoIgnorePatterns = []
+     c's effective backend/ tree == main_tip's effective tree (TS-1)
 Out: false  (TS-some + no shadow trailer on non-first parents → drop)
 
-In:  c.parents.length < 2  →  Out: true   (linear commit, no filter applies)
-In:  sourceDir === ""      →  Out: true   (no path filter, no filter applies)</code></pre>
+In:  c = Bcm5 (non-merge), parent = previous backend tip
+     sourceDir = "",  autoIgnorePatterns = [/src\/evntcore\/common(\/|$)/, ...]
+     Bcm5's only diff is src/evntcore/common/util.ts — entirely inside
+     autoIgnorePatterns, so the effective trees match.
+Out: false  (Case E: effective-TS-to-sole-parent → drop, no trailer carve-out
+              for non-merges)
+
+In:  c.parents.length === 0                        →  Out: true   (root)
+In:  sourceDir === "" AND no ignore patterns       →  Out: true   (no filter)</code></pre>
 </div>
 
 <h3 class="fn-group">Tree composition</h3>
@@ -1703,9 +1716,13 @@ Out: { exitCode: 1,
                   </li>
                 </ul>
               </li>
-              <li><code>.filter(c =&gt; isLoadBearingMerge(c, source.dir))</code> &mdash; post-filter
-                that drops TREESAME merges with no <code>Shadow-replayed-*</code> trailer on any
-                non-first parent (Cases C/D). Consumer-merges (Case A sibling-pair, Case B
+              <li><code>.filter(c =&gt; isLoadBearing(c, source.dir, autoIgnorePatterns))</code>
+                &mdash; post-filter that drops commits whose effective source tree (sourceDir/
+                with <code>autoIgnore</code> and the commit&rsquo;s <code>.shadowignore</code>
+                stripped) is TREESAME to some parent&rsquo;s effective tree, modulo the
+                load-bearing-trailer carve-out on non-first parents for merges. Drops Cases C/D
+                (purely local TREESAME merges, no trailer) and Cases E/F (commits whose entire
+                diff is inside the ignore filter). Consumer-merges (Case A sibling-pair, Case B
                 same-pair) survive because their non-first parent carries an echo trailer.</li>
             </ul>
           </li>
