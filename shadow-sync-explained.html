@@ -882,7 +882,11 @@ manual commands above are just for first-time testing.</p>
   <li><span class="step-num">3</span><div>
     <strong>Determine branches.</strong>
     If <code>--branch</code> is given: just that one.
-    Otherwise: all branches on the source remote, excluding <code>shadow/</code> branches.
+    Otherwise: <code>listRemoteBranches(source.remote)</code> drops <code>shadow/</code> entries and HEAD,
+    then <code>filterBranchesForRemote</code> narrows to the explicit allowlist from
+    <code>branch-filters.json</code> (sibling of <code>shadow-config.json</code>). The allowlist is
+    required and fail-closed &mdash; a missing or empty file means zero branches sync, not
+    pass-through. Any branch not matched by a glob is silently dropped before preflight.
   </div></li>
   <li><span class="step-num">4</span><div>
     <strong>Preflight checks.</strong> For each branch, scan the source tip for shallow clones and
@@ -1036,6 +1040,47 @@ Out: void; `git remote set-url upstream &lt;url&gt;` was run
 
 In:  same endpoint, URL already matches
 Out: void; no git mutation</code></pre>
+</div>
+
+<h3 class="fn-group">Branch filters</h3>
+
+<div class="card fn-card">
+<h4><code>filterBranchesForRemote(remote, branches): string[]</code></h4>
+<p>Apply <code>branch-filters.json</code>'s per-remote glob allowlist (compiled via <code>compileIgnorePattern</code>) to a branch list. Returns only branches matching at least one glob for that remote. <strong>Fail-closed:</strong> a remote with no entry in the file &mdash; or a missing file entirely &mdash; yields <code>[]</code>, not pass-through. The allowlist is the operator's explicit declaration of what to sync; silently broadening it on absence would erase the safety it exists to provide. Called once per pair in <code>_runSyncCore</code> between <code>listRemoteBranches</code> and preflight.</p>
+<pre><code>In:  remote = "backend-repo", branches = ["main", "feat-a", "wip/spike", "release/2026Q1"]
+     branch-filters.json: { "filters": { "backend-repo": ["main", "release/*"] } }
+Out: ["main", "release/2026Q1"]
+
+In:  same branches, but branch-filters.json has no "backend-repo" entry
+Out: []  (and the caller logs "No branches to sync on 'backend-repo' (after filter).")
+
+In:  branch-filters.json absent or `{ "filters": {} }`
+Out: []  (module load logs "branch-filters.json {empty|not present} — no branches will be synced.")</code></pre>
+</div>
+
+<div class="card fn-card">
+<h4><code>loadBranchFilters(): Map&lt;remote, RegExp[]&gt;</code></h4>
+<p>Read <code>branch-filters.json</code> (sibling of <code>shadow-config.json</code>) once at module load and compile each remote's glob list. Returns an empty map if the file is absent or its <code>filters</code> object is empty; the module then logs the fail-closed warning to stderr. Not re-read at runtime &mdash; tests that need a different map use <code>setBranchFiltersForTesting</code>.</p>
+<pre><code>In:  file contents { "filters": { "backend-repo": ["main", "release/*"],
+                                   "monorepo": ["main"] } }
+Out: Map { "backend-repo" → [/^main$/, /^release\/[^/]*$/],
+          "monorepo"     → [/^main$/] }
+
+In:  file missing
+Out: Map (empty); stderr: "branch-filters.json not present — no branches will be synced."
+
+In:  { "filters": {} } or { } (no filters key)
+Out: Map (empty); stderr: "branch-filters.json is empty — no branches will be synced."</code></pre>
+</div>
+
+<div class="card fn-card">
+<h4><code>setBranchFiltersForTesting(map): void</code></h4>
+<p>Test-only hook that overwrites the in-memory filter map without re-reading the file. Pass <code>null</code> to reset to the fail-closed empty state (zero branches sync). Never call from production paths.</p>
+<pre><code>In:  setBranchFiltersForTesting(new Map([["origin", [/^main$/]]]))
+Out: void; subsequent filterBranchesForRemote("origin", ...) honors the in-memory map
+
+In:  setBranchFiltersForTesting(null)
+Out: void; subsequent filterBranchesForRemote(...) returns [] for every remote</code></pre>
 </div>
 
 <h3 class="fn-group">Trailers</h3>
@@ -1200,6 +1245,24 @@ In:  sourceDir === ""      →  Out: true   (no path filter, no filter applies)<
 </div>
 
 <h3 class="fn-group">Tree composition</h3>
+
+<div class="card fn-card">
+<h4><code>computeAutoIgnorePatterns(source, target, pair, allPairs?): { patterns, reasons }</code></h4>
+<p>Derive implicit <code>.shadowignore</code> globs when sibling pairs share a remote and overlap on path. For every <em>other</em> pair in <code>allPairs</code> (defaults to <code>PAIRS</code>), if an endpoint sits on the same remote as <code>source</code> or <code>target</code> and its <code>dir</code> falls inside the current side's <code>dir</code>, emit <code>&lt;rel&gt;</code> and <code>&lt;rel&gt;/**</code> patterns so the engine doesn't replay the sibling's subtree into this pair's shadow. <code>reasons</code> maps the contributing pair name → the patterns it produced, used by <code>mirrorHistory</code> for the per-run "Auto-ignoring nested-pair paths from …" log line. Patterns are compiled by <code>compileIgnorePattern</code> and prepended to any file-based <code>.shadowignore</code> entries on a per-commit basis in <code>replayCommits</code>.</p>
+<pre><code>In:  pair "backend" (a: monorepo "" ⟷ b: backend-repo "");
+     sibling pair "frontend" (a: monorepo "frontend" ⟷ b: frontend-repo "");
+     direction = backend → monorepo (source: backend-repo, target: monorepo "")
+Out: { patterns: ["frontend", "frontend/**"],
+       reasons: Map { "frontend" → ["frontend", "frontend/**"] } }
+     (so backend→monorepo replays don't churn the frontend/ subtree the
+      frontend pair owns on the monorepo side)
+
+In:  only one pair declared in PAIRS
+Out: { patterns: [], reasons: Map() }   (no sibling overlap possible)
+
+In:  sibling endpoint sits on a different remote, or its dir is outside ours
+Out: { patterns: [], reasons: Map() }</code></pre>
+</div>
 
 <div class="card fn-card">
 <h4><code>compileIgnorePattern(pattern): RegExp</code></h4>
@@ -1462,16 +1525,27 @@ Out: Map { "project" → "Bt3'", "core-dev" → "Bc4'" }</code></pre>
 <h3 class="fn-group">Orchestration</h3>
 
 <div class="card fn-card">
-<h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, using }): void</code></h4>
-<p>The replay loop. For each commit: resolve parents → build/merge parent tree → run <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. When <code>mergeMappedParentTrees</code> returns null and <code>--allow-conflict-resolution-overwrite</code> is set, attempts the B&prime; fast path (<code>findResolutionCandidate</code> → <code>composeResolvedMergeTree</code> → emit the resolved merge directly, bypassing <code>buildReplayedTree</code>) before falling through to <code>formatUnresolvableMergeError</code>. <code>using</code> carries operator-supplied Mm SHAs for ambiguity disambiguation.</p>
+<h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns }): ReplayHalts</code></h4>
+<p>The replay loop. For each commit: <code>resolveHaltAwareParents</code> → <code>composeCrossRepoMergeTree</code> (if applicable) or <code>mergeMappedParentTrees</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{source.dir}/.shadowignore</code> are appended to <code>autoIgnorePatterns</code> (the sibling-pair pre-computed list) before tree building.</p>
+<p>When <code>mergeMappedParentTrees</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatUnresolvableMergeError</code> into <code>haltReasons</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>mappedParents</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeCrossRepoMergeTree</code> recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltReasons }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
      targetInit = monorepo's init; source.dir = ""; target.dir = "backend"
-Out: void; shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
+Out: { haltedSources: Set(), haltReasons: Map() };
+     shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
      Bc3' rooted on its mapped parent; Bt2' has parents [Bc4', Br2']
 
 In:  newCommits[i] is a merge whose mapped parents disagree on outer state
-Out: throws ShadowSyncError carrying the operator recipe
-     (no commit-tree runs for the failing commit; shaMapping has no entry for it)
+Out: that commit's hash is added to haltedSources;
+     haltReasons[hash] = { mappedParents, diagnostic, commitShort };
+     no commit-tree runs for it, shaMapping has no entry; loop proceeds
+     to subsequent commits in the batch
+
+In:  later batch contains R_be = merge(Bm, Mm'_on_be) where Bm is in haltedSources
+     and Mm'_on_be is mapped from the operator's round-trip
+Out: R_be replays via composeCrossRepoMergeTree's round-trip branch;
+     collectAbsorbedHalted returns [Bm] (plus any halted descendants);
+     R_be's commit message gains a Shadow-replayed trailer per absorbed sha;
+     shaMapping.set(Bm, R_be'); haltedSources.delete(Bm)
 
 In:  newCommits[i]'s buildReplayedTree returns null (source content went missing)
 Out: that commit is logged "Skipping ... (source content missing)" and skipped;
@@ -1479,8 +1553,8 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
 </div>
 
 <div class="card fn-card">
-<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches, using? }): { mirrored, branchMapping, shaMapping, upToDate }</code></h4>
-<p>The replay engine&rsquo;s public entry point. Composes <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>collectNeededCandidates</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction.</p>
+<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches }): { mirrored, branchMapping, shaMapping, upToDate, haltedBranches }</code></h4>
+<p>The replay engine&rsquo;s public entry point. Composes <code>computeAutoIgnorePatterns</code> → <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>collectNeededCandidates</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction. Projects original (non-empty-diagnostic) entries from <code>replayCommits</code>&rsquo;s halt records into <code>haltedBranches: HaltedBranch[]</code>; propagated halts on descendants stay internal. Does not throw on unresolvable merges &mdash; the caller (<code>_runSyncCore</code>) prints each <code>diagnostic</code> to stderr and increments its failed-pair counter, but other branches in the same pair still push.</p>
 <pre><code>In:  Fresh bootstrap of the backend pair, --from b
      (backend repo has commits Bc0..Bc4, Br1..Br2, Bt1..Bt3, Bf1;
       monorepo has no shadow/backend/* refs yet)
@@ -1488,16 +1562,27 @@ Out: { mirrored: 11,
        branchMapping: Map { "project" → "Bt3'", "core-dev" → "Bc4'",
                             "core-x" → "Br2'", "bug/core-x/fix" → "Bf1'" },
        shaMapping: 11 entries source→target,
-       upToDate: false }
+       upToDate: false,
+       haltedBranches: [] }
 
 In:  Steady state — backend hasn't moved since the last sync
 Out: { mirrored: 0,
        branchMapping: Map { "project" → "Bt3'", ... },
        shaMapping: 11 existing entries loaded from trailers,
-       upToDate: true }
+       upToDate: true,
+       haltedBranches: [] }
 
-In:  An unresolvable cross-repo merge appears in newCommits
-Out: throws ShadowSyncError with the operator recipe; nothing is pushed</code></pre>
+In:  newCommits contains a merge Bm whose mapped parents disagree on outer state;
+     other branches in the same pair are clean
+Out: { mirrored: <n-1>,    // Bm is not counted
+       branchMapping: clean branches advance to their new tips;
+                      Bm's branch points at its last clean ancestor,
+       shaMapping: entries for everything except Bm (and its halt-propagated heirs),
+       upToDate: false,
+       haltedBranches: [{ branch: "project", commitSha: Bm,
+                          commitShort: "abc1234",
+                          mappedParents: [A', B'],
+                          diagnostic: "...round-trip recipe..." }] }</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1562,8 +1647,9 @@ Out: { exitCode: 1,
     <code>merge-tree</code>).</li>
   <li><strong>C</strong> &mdash; merge where one parent is an echo from the other direction (cross-repo
     merge &mdash; triggers <code>composeCrossRepoMergeTree</code>).</li>
-  <li><strong>D</strong> &mdash; merge that <code>merge-tree</code> can&rsquo;t auto-resolve (conflict
-    &rarr; B&prime; fast path or manual recovery).</li>
+  <li><strong>D</strong> &mdash; merge that <code>merge-tree</code> can&rsquo;t auto-resolve (outer-state
+    divergence &rarr; halt the branch, surface diagnostic, absorb via operator&rsquo;s round-trip on
+    the next cycle).</li>
 </ul>
 
 <p>
@@ -1635,8 +1721,9 @@ Out: { exitCode: 1,
             </ul>
           </li>
           <li><strong><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc,
-            pair, using })</code></strong> &mdash; per-commit loop. <em>Walkthroughs A/B/C below pick
-            up here.</em></li>
+            pair, autoIgnorePatterns })</code></strong> &mdash; per-commit loop; returns
+            <code>{ haltedSources, haltReasons }</code>. <em>Walkthroughs A/B/C below pick up here;
+            walkthrough D covers the halt branch.</em></li>
           <li><strong><code>mapBranchesToTargetTips(source.remote, branches, shaMapping)</code></strong>
             &rarr; <code>Map&lt;branch, targetSHA&gt;</code> &mdash; walk each branch newest-first to
             find the first mapped ancestor.</li>
