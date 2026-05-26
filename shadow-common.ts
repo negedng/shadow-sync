@@ -136,19 +136,18 @@ export function refExists(ref: string): boolean {
   return git(["rev-parse", "--verify", ref], { safe: true }).ok;
 }
 
-/** Check existence of multiple remote-tracking refs in a single git call. */
-function filterExistingRefs(refs: string[]): Set<string> {
-  if (refs.length === 0) return new Set();
+/** Keep refs from list that exists locally */
+function filterExistingRefs(refs: string[]): string[] {
+  if (refs.length === 0) return [];
   const result = git(
     ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
     { safe: true },
   );
-  if (!result.ok || !result.stdout) return new Set();
-  const existing = new Set<string>();
-  for (const line of result.stdout.split("\n").filter(Boolean)) {
-    existing.add(line.replace(/^refs\/remotes\//, ""));
-  }
-  return existing;
+  if (!result.ok || !result.stdout) return [];
+  const existing = new Set(
+    result.stdout.split("\n").filter(Boolean).map(l => l.replace(/^refs\/remotes\//, "")),
+  );
+  return refs.filter(r => existing.has(r));
 }
 
 export function listRemoteBranches(remote: string): string[] {
@@ -219,36 +218,31 @@ function stripReplayedTrailers(message: string): string {
 }
 
 /**
- * Walk `git log` output where each commit is marked with `MARKER<hash>`
- * followed by its body. Calls `onLine(hash, line)` for every body line.
+ * Build source→target SHA mapping from commits carrying `<trailerKey>: <sha>`
+ * trailers. One target commit may carry multiple such trailers (primary +
+ * absorbed-halted ancestors), so we emit all values space-separated per line.
  */
-function scanLogLines(logArgs: string[], onLine: (hash: string, line: string) => void): void {
-  const MARKER = "SCANLOG ";
-  const log = git([...logArgs, `--format=${MARKER}%H%n%B`], { safe: true });
-  if (!log.ok || !log.stdout) return;
-  let currentHash: string | null = null;
-  for (const line of log.stdout.split("\n")) {
-    if (line.startsWith(MARKER)) {
-      currentHash = line.slice(MARKER.length).trim();
-      continue;
-    }
-    if (currentHash) onLine(currentHash, line);
-  }
-}
-
-function extractTrailerMapping(logArgs: string[], trailerRe: RegExp): Map<string, string> {
+function extractTrailerMapping(logArgs: string[], trailerKey: string): Map<string, string> {
   const mapping = new Map<string, string>();
-  scanLogLines(logArgs, (hash, line) => {
-    const match = line.match(trailerRe);
-    if (match) mapping.set(match[1], hash);
-  });
+  const result = git(
+    [...logArgs, `--format=%H %(trailers:key=${trailerKey},valueonly,separator=%x20)`],
+    { safe: true },
+  );
+  if (!result.ok || !result.stdout) return mapping;
+  for (const line of result.stdout.split("\n")) {
+    const parts = line.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) continue;
+    const targetHash = parts[0];
+    for (const src of parts.slice(1)) {
+      if (/^[0-9a-f]{7,40}$/.test(src)) mapping.set(src, targetHash);
+    }
+  }
   return mapping;
 }
 
 /** Trailer keys/regexes resolved for one replay direction. */
 interface DirectionConfig {
   addTrailerKey: string;
-  scanRe: RegExp;
   skipTrailerKey: string;
   skipScanRe: RegExp;
 }
@@ -256,7 +250,6 @@ interface DirectionConfig {
 function buildDirectionConfig(pairName: string, sourceRemote: string, targetRemote: string): DirectionConfig {
   return {
     addTrailerKey: replayedTrailerKey(pairName, sourceRemote),
-    scanRe: replayedTrailerRegex(pairName, sourceRemote),
     skipTrailerKey: replayedTrailerKey(pairName, targetRemote),
     skipScanRe: replayedTrailerRegex(pairName, targetRemote),
   };
@@ -382,17 +375,6 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-function collectCommitsWithTrueParents(revListArgs: string[]): TopoCommit[] {
-  const result = git(revListArgs, { safe: true });
-  if (!result.ok) fail(`rev-list failed (${revListArgs.join(" ")}): ${result.stderr}`);
-  if (!result.stdout) return [];
-  const hashes = result.stdout.split("\n").filter(Boolean);
-  const parentsMap = fetchTrueParents(hashes);
-  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
-}
-
-const ANY_SHADOW_TRAILER_RE = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
-
 // Build a tree SHA for `hash`'s source-side content under `sourceDir/`, with
 // paths matching `ignorePatterns` stripped out. The result is the tree that
 // would actually flow to the target if this commit's diff were replayed —
@@ -420,27 +402,41 @@ function effectiveSourceTree(
   });
 }
 
-// Source-side keep/drop discriminator. Same predicate for every commit shape:
-// drop iff the commit is TREESAME-to-some-parent under the effective filter
-// (sourceDir/ + autoIgnore + this commit's .shadowignore) AND, for merges, no
-// non-first parent carries a Shadow-replayed-* trailer.
+// Source-side keep/drop discriminator. Drop iff effective-TREESAME to the
+// FIRST parent under (sourceDir/ + autoIgnore + this commit's .shadowignore)
+// AND, for merges, no non-first parent carries a Shadow-replayed trailer for
+// THIS pair (any direction).
 //
-// Cases under this single rule:
-//   - Out-of-scope (every changed path outside sourceDir): already dropped at
-//     the rev-list walk via `-- sourceDir/`. Doesn't reach here.
-//   - .shadowignore-only / autoIgnore-only changes: effective tree == parent's
-//     effective tree → drop. No empty trailer-only commit emitted; on every
-//     future sync the same deterministic check drops it again.
-//   - Case A (sibling-pair echo), Case B (same-pair echo), §5 variant: TREESAME
-//     under filter BUT a non-first parent carries a Shadow-replayed-* trailer
-//     → keep (load-bearing for cross-repo composition).
-//   - Cases C/D (purely local TREESAME merges, no trailer): drop.
-//   - Non-TREESAME under filter: keep.
+// The TS-1st check (rather than TS-to-any-parent) is what separates noop
+// merges from content-propagation merges: TS-2nd-only means the merge took
+// the 2nd parent's tree, introducing real content from that parent — must
+// keep so cross-pair content propagates (e.g. sht6 common-backend/common-
+// frontend bridge in test-scenario.ts).
+//
+// Cases under this rule:
+//   - Out-of-scope (every changed path outside sourceDir): dropped at rev-list.
+//   - Ignore-only changes: effective tree == parent's → drop deterministically.
+//   - Case A (same-pair, TS-2 only): non-TS-1st → keep regardless of trailer.
+//     The same-pair trailer is what avoids the divergent-push halt described
+//     in full_history_explained.html §3.1.
+//   - Case B (same-pair, TS-1 variant): TS-1st BUT non-first parent carries
+//     this pair's trailer → keep. Avoids the §3.2 halt.
+//   - Case C noop (TS-1st, cross-pair trailer only): drop. Standard-workflow
+//     3-way merge resolves the resulting stale-outer naturally.
+//   - Case C content propagation (TS-2nd-only, cross-pair trailer): non-TS-1st
+//     → keep regardless of trailer. Brings new content into source.dir from
+//     a sibling shadow ref — load-bearing for the cross-pair propagation
+//     pattern (e.g. mono.common/ shared between common-backend and
+//     common-frontend pairs).
+//   - Cases D/E/F/G (purely local TS-1st or ignore-only merges, no trailer):
+//     drop.
+//   - Non-TS-1st with no same-pair trailer (rare): keep.
 // See local_tests/keep_drop_test/full_history_explained.html.
 function isLoadBearing(
   c: TopoCommit,
   sourceDir: string,
   autoIgnorePatterns: RegExp[],
+  samePairTrailerRe: RegExp,
 ): boolean {
   if (c.parents.length === 0) return true;
 
@@ -455,34 +451,37 @@ function isLoadBearing(
 
   const commitTree = effectiveSourceTree(c.hash, sourceDir, effectiveIgnore);
   if (!commitTree) return true;
-  const treesameToSome = c.parents.some(p =>
-    effectiveSourceTree(p, sourceDir, effectiveIgnore) === commitTree
-  );
-  if (!treesameToSome) return true;
+  const tree1st = effectiveSourceTree(c.parents[0], sourceDir, effectiveIgnore);
+  if (tree1st !== commitTree) return true;
 
   for (let i = 1; i < c.parents.length; i++) {
     const meta = getCommitMeta(c.parents[i]);
-    if (ANY_SHADOW_TRAILER_RE.test(meta.trailers)) return true;
+    if (samePairTrailerRe.test(meta.trailers)) return true;
   }
   return false;
 }
 
-function collectSourceCommits(
-  source: RepoEndpoint,
-  branches: string[],
-  autoIgnorePatterns: RegExp[],
-): TopoCommit[] {
-  // --full-history surfaces all merges in the path-filtered reachable set; the
-  // post-filter via isLoadBearing drops the non-load-bearing ones. The
-  // rationale (rev-list's default simplification rewrites the walk through a
-  // TREESAME parent, which can route into the source-side echo chain — see
-  // full_history_explained.html) is what mandates --full-history; isLoadBearing
-  // then drops commits whose effective tree (sourceDir minus ignore patterns)
-  // equals some parent's, modulo the load-bearing-trailer carve-out for merges.
+function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+  // --full-history surfaces all merges in the path-filtered reachable set;
+  // filterLoadBearingCommits drops the non-load-bearing ones afterward.
   const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
     ...branches.map(b => `${source.remote}/${b}`)];
   if (source.dir) args.push("--", `${source.dir}/`);
-  return collectCommitsWithTrueParents(args).filter(c => isLoadBearing(c, source.dir, autoIgnorePatterns));
+  const result = git(args, { safe: true });
+  if (!result.ok) fail(`rev-list failed (${args.join(" ")}): ${result.stderr}`);
+  if (!result.stdout) return [];
+  const hashes = result.stdout.split("\n").filter(Boolean);
+  const parentsMap = fetchTrueParents(hashes);
+  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
+}
+
+function filterLoadBearingCommits(
+  commits: TopoCommit[],
+  sourceDir: string,
+  autoIgnorePatterns: RegExp[],
+  samePairTrailerRe: RegExp,
+): TopoCommit[] {
+  return commits.filter(c => isLoadBearing(c, sourceDir, autoIgnorePatterns, samePairTrailerRe));
 }
 
 // ── Tree composition & parent resolution ──────────────────────────────────────
@@ -1020,9 +1019,7 @@ function collectAbsorbedHalted(
 }
 
 /**
- * Source→target SHA mapping from this pair's shadow branches only.
- * No --all fallback: trailers don't encode the pair name, so cross-pair
- * scans would pick up unrelated mappings sharing a source remote.
+ * Source→target SHA mapping from this pair's shadow branches from trailers: Shadow-replayed-<pair>-<sourceRemote>: <sourceSHA>
  */
 function loadReplayedMappings(opts: {
   pair: SyncPair;
@@ -1032,15 +1029,14 @@ function loadReplayedMappings(opts: {
 }): Map<string, string> {
   const { pair, target, branches, dc } = opts;
   const candidateRefs = branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`);
-  const existingRefs = filterExistingRefs(candidateRefs);
-  const shadowRefs = candidateRefs.filter(r => existingRefs.has(r));
+  const shadowRefs = filterExistingRefs(candidateRefs);
 
   if (shadowRefs.length === 0) {
     return new Map();
   }
   return extractTrailerMapping(
     ["log", ...shadowRefs, `--grep=^${dc.addTrailerKey}`],
-    dc.scanRe,
+    dc.addTrailerKey,
   );
 }
 
@@ -1383,7 +1379,11 @@ export function mirrorHistory(opts: {
   const shaMapping = loadReplayedMappings({ pair, target, branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  const allCommits = collectSourceCommits(source, branches, autoIgnorePatterns);
+  const sourceCommits = collectSourceCommits(source, branches);
+  const samePairTrailerRe = new RegExp(
+    `^${escapeRegex(REPLAYED_TRAILER)}-${escapeRegex(sanitizeTrailerToken(pair.name))}-`, "m",
+  );
+  const allCommits = filterLoadBearingCommits(sourceCommits, source.dir, autoIgnorePatterns, samePairTrailerRe);
   const newCommits = filterNotReplayedCommits(allCommits, shaMapping, dc);
 
   // Drop candidates that no branch's tip-walk would resolve to (and aren't
@@ -1468,14 +1468,8 @@ export function syncTags(opts: {
 }): { pushed: number; skipped: number } {
   const { source, target, shaMapping } = opts;
 
-  // Make sure source-side tags are in our local object DB. Limit to source
-  // remote so we don't pick up tags from the target side too.
   git(["fetch", source.remote, "--tags"], { safe: true });
 
-  // List source-side tag refs. for-each-ref over refs/tags/* gives every tag
-  // currently in the local repo; that's our source-of-truth after the fetch
-  // above. We re-resolve each one against source.remote to make sure it's
-  // actually a source-side tag (not a stray target-side one).
   const listRes = git(
     ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)"],
     { safe: true },
@@ -1511,9 +1505,6 @@ export function syncTags(opts: {
       // Annotated: rebuild tag object with new commit-target.
       const tagBodyRes = git(["cat-file", "tag", `refs/tags/${name}`], { safe: true });
       if (!tagBodyRes.ok || !tagBodyRes.stdout) { skipped++; continue; }
-      // cat-file gives us the body without a trailing newline; mktag is OK
-      // with that, but be explicit. Replace the `object <sha>` header to
-      // point at the replayed commit, then pipe through mktag.
       const newBody = tagBodyRes.stdout.replace(/^object [0-9a-f]+/m, `object ${targetCommit}`);
       const mktagRes = git(["mktag"], { input: newBody, safe: true });
       if (!mktagRes.ok || !mktagRes.stdout) {

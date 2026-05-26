@@ -1,39 +1,41 @@
 /**
- * Asserts that the unified discriminator DROPS Case F commits — merges whose
- * source-side diff under sourceDir/ is non-TREESAME to every parent (the old
- * `isLoadBearingMerge` would have kept them) but becomes effective-TREESAME
- * to some parent once the ignore filter strips every changed path, AND no
- * non-first parent carries a `Shadow-replayed-*` trailer.
+ * Asserts that the unified discriminator DROPS Case F commits — non-merges
+ * whose source-side diff under sourceDir/ is entirely inside the effective
+ * ignore filter (autoIgnorePatterns + this commit's .shadowignore). Two
+ * sub-tests:
  *
- * Case F scenario: pair "backend" (source dir="") with sibling pair
- * "common-backend" overlapping at "src/evntcore/common/". The "backend" pair
- * gets autoIgnorePatterns = ["src/evntcore/common", "src/evntcore/common/**"].
- * On backend, build a merge whose two parents introduce DIFFERENT
- * common/-subtree files (so the merge's raw tree differs from both parents
- * — non-TS-raw to either), but every changed path is inside the autoIgnore
- * set. Effective trees collapse to the same content on all three (merge +
- * both parents). The 2nd parent has no `Shadow-replayed-*` trailer (regular
- * feature branch), so the merge trailer carve-out doesn't apply: dropped.
+ *   E.1 (autoIgnore): pair "backend" maps backend (dir="") ↔ mono "backend".
+ *       Sibling pair "common-backend" owns "src/evntcore/common" on the backend
+ *       side, so the "backend" pair gets autoIgnorePatterns = ["src/evntcore/
+ *       common", "src/evntcore/common/**"]. Backend commits a change touching
+ *       ONLY that ignored subtree. The "backend" pair must drop it; the
+ *       "common-backend" pair (whose filter doesn't ignore common/) keeps it.
  *
- * Expected:
- *   1. NO `Shadow-replayed-<backend-remote>: <merge_sha>` trailer on
- *      monorepo's shadow/backend/main (the "backend" pair filtered the
- *      merge — would have been a Case F trailer-only synthetic).
- *   2. The sibling "common-backend" pair DOES carry the trailer (no
- *      autoIgnore there; the merge is a real cross-branch composition under
- *      "src/evntcore/common/").
- *   3. Idempotent: a second --from b emits no `Replaying ...` log line for
- *      the merge SHA.
+ *   E.2 (.shadowignore): single-pair, source has .shadowignore="*.local".
+ *       Source commits ONLY a *.local file. Effective tree (with *.local
+ *       stripped) equals the parent's → drop.
+ *
+ * The implemented discriminator computes effective trees via
+ * `effectiveSourceTree` (read-tree → rm --cached ignored paths → write-tree)
+ * and finds the commit's effective tree equals its parent's. Non-merge, so the
+ * trailer carve-out doesn't apply: dropped at the source walk.
+ *
+ * Expected on each sub-test:
+ *   1. NO `Shadow-replayed-<source-remote>: <sha>` trailer for the ignore-only
+ *      commit on the relevant shadow chain.
+ *   2. Idempotent: a second sync (same direction) emits NO `Replaying ...`
+ *      log line for that commit — the predicate is deterministic from source
+ *      state alone, no side cache needed.
  *
  * Counterexample (what dropping prevents):
- *   Under the old `isLoadBearingMerge` (raw-tree comparison only), the merge
- *   was non-TS-raw to every parent, so the post-filter kept it. The "backend"
- *   pair's buildReplayedTree would have stripped every changed path via
- *   autoIgnore, producing a target tree equal to the merge's first mapped
- *   parent's tree; `commit-tree` would then emit a trailer-only merge
- *   synthetic on shadow/backend/main. The shadow chain would accumulate a
- *   noop merge marker per cross-pair operator merge — exactly the clutter
- *   the discriminator is supposed to prevent.
+ *   Under the old `isLoadBearingMerge` (merges only, raw trees), the commit
+ *   was kept by the post-filter. `buildReplayedTree` at replay would strip
+ *   every changed path via the ignore filter, producing a target tree equal
+ *   to the parent's; `commit-tree` would then emit a trailer-only synthetic
+ *   on the shadow chain. Subsequent syncs would re-process the same source
+ *   SHA each time (no trailer ever lands), triggering idempotence failures
+ *   and clutter on the shadow chain (e.g. b558090-shaped commits in the
+ *   user's production sht repos).
  *
  * Run: npx tsx shadow-tests/test-discriminator-case-f.ts
  */
@@ -74,100 +76,143 @@ function commitFiles(repo: Repo, files: Record<string, string>, msg: string): st
 }
 function banner(s: string) { console.log("\n" + "─".repeat(70) + "\n  " + s + "\n" + "─".repeat(70)); }
 
+function checkTrailerAbsent(repoLogSource: { bare: string }, ref: string, sha: string, label: string) {
+  const log = git(`log --format=%B ${ref}`, repoLogSource.bare);
+  const re = new RegExp(`^Shadow-replayed-[^:]+:\\s*${sha}\\b`, "m");
+  if (re.test(log)) {
+    console.log(`  ✘ FAIL [${label}] — trailer for ${sha.slice(0, 12)} found on ${ref}`);
+    process.exit(1);
+  }
+  console.log(`  ✓ [${label}] no trailer for ${sha.slice(0, 12)} on ${ref}`);
+}
+
+function checkTrailerPresent(repoLogSource: { bare: string }, ref: string, sha: string, label: string) {
+  const log = git(`log --format=%B ${ref}`, repoLogSource.bare);
+  const re = new RegExp(`^Shadow-replayed-[^:]+:\\s*${sha}\\b`, "m");
+  if (!re.test(log)) {
+    console.log(`  ✘ FAIL [${label}] — trailer for ${sha.slice(0, 12)} expected on ${ref} but missing`);
+    process.exit(1);
+  }
+  console.log(`  ✓ [${label}] trailer for ${sha.slice(0, 12)} present on ${ref}`);
+}
+
+function assertIdempotent(syncResult: { stdout: string }, sha: string, label: string) {
+  const lines = syncResult.stdout.split("\n").filter(l => /^\s*Replaying /.test(l));
+  const offender = lines.find(l => l.includes(sha.slice(0, 7)));
+  if (offender) {
+    console.log(`  ✘ FAIL [${label}] — re-replay of ${sha.slice(0, 12)} on idempotent sync:`);
+    console.log(`      ${offender}`);
+    process.exit(1);
+  }
+  console.log(`  ✓ [${label}] idempotent — no Replaying line for ${sha.slice(0, 12)}`);
+}
+
+async function runE1AutoIgnore(tmpDir: string) {
+  banner("E.1 — autoIgnore-only non-merge");
+  const backend  = createRepo(tmpDir, "e1-backend",  { email: "bea@example.com",  name: "Bea"  });
+  const mono     = createRepo(tmpDir, "e1-mono",     { email: "mira@example.com", name: "Mira" });
+  git(`remote add backend "${backend.bare}"`, mono.working);
+
+  commitFiles(backend, { "init.txt": "init\n", "src/evntcore/common/util.ts": "util v1\n" }, "Bc0");
+  git("push origin main", backend.working);
+  commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
+  git("push origin main", mono.working);
+
+  applyTestOverrides({
+    repoRoot: mono.working,
+    pairs: [
+      // Sibling overlap: "backend" pair's source (dir="") contains
+      // "common-backend"'s source dir "src/evntcore/common". The "backend"
+      // pair gets autoIgnorePatterns covering that nested subtree.
+      { name: "backend",        a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
+      { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/evntcore/common" } },
+    ],
+    shadowBranchPrefix: "shadow",
+  });
+  setBranchFiltersForTesting(new Map([
+    ["origin",  [compileIgnorePattern("**")]],
+    ["backend", [compileIgnorePattern("**")]],
+  ]));
+
+  let r = await runSync({ from: "b" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E1 bootstrap b"); }
+  r = await runSync({ from: "a" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E1 bootstrap a"); }
+
+  // The ignore-only commit: changes ONLY a path under src/evntcore/common/
+  // which the "backend" pair's autoIgnore covers.
+  const bcm5 = commitFiles(backend, { "src/evntcore/common/util.ts": "util v2 (common-only edit)\n" }, "Bcm5: common-only edit");
+  git("push origin main", backend.working);
+  console.log(`  Bcm5 SHA: ${bcm5.slice(0, 12)}`);
+
+  r = await runSync({ from: "b" });
+  if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("E1 --from b halted"); }
+
+  git("fetch origin", mono.working);
+  // (1) "backend" pair must drop Bcm5 — its filter eats the only changed path.
+  checkTrailerAbsent({ bare: mono.bare }, "refs/heads/shadow/backend/main", bcm5, "E1.backend-pair");
+  // (2) "common-backend" pair owns that subtree — its filter doesn't ignore it.
+  checkTrailerPresent({ bare: mono.bare }, "refs/heads/shadow/common-backend/main", bcm5, "E1.common-pair");
+  // (3) Idempotence: a second --from b emits no Replaying line for Bcm5.
+  r = await runSync({ from: "b" });
+  if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("E1 idempotent --from b halted"); }
+  assertIdempotent(r, bcm5, "E1.idempotent");
+
+  setBranchFiltersForTesting(null);
+}
+
+async function runE2ShadowIgnore(tmpDir: string) {
+  banner("E.2 — .shadowignore-only non-merge");
+  const leaf = createRepo(tmpDir, "e2-leaf", { email: "lea@example.com",  name: "Lea"  });
+  const mono = createRepo(tmpDir, "e2-mono", { email: "mira@example.com", name: "Mira" });
+  git(`remote add leaf "${leaf.bare}"`, mono.working);
+
+  // Seed both sides with a .shadowignore so subsequent edits to ignored
+  // paths are dropped at the source walk by isLoadBearing.
+  commitFiles(leaf, { "init.txt": "init\n", ".shadowignore": "*.local\n" }, "Lc0");
+  git("push origin main", leaf.working);
+  commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
+  git("push origin main", mono.working);
+
+  applyTestOverrides({
+    repoRoot: mono.working,
+    pairs: [
+      { name: "leaf", a: { remote: "origin", url: mono.bare, dir: "leaf" }, b: { remote: "leaf", url: leaf.bare, dir: "" } },
+    ],
+    shadowBranchPrefix: "shadow",
+  });
+  setBranchFiltersForTesting(new Map([
+    ["origin", [compileIgnorePattern("**")]],
+    ["leaf",   [compileIgnorePattern("**")]],
+  ]));
+
+  let r = await runSync({ from: "b" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E2 bootstrap b"); }
+  r = await runSync({ from: "a" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E2 bootstrap a"); }
+
+  // The ignore-only commit: edits ONLY a *.local file (covered by Lc0's
+  // .shadowignore which is in effect at this commit's tree).
+  const lc1 = commitFiles(leaf, { "config.local": "secret stuff\n" }, "Lc1: config.local-only edit");
+  git("push origin main", leaf.working);
+  console.log(`  Lc1 SHA: ${lc1.slice(0, 12)}`);
+
+  r = await runSync({ from: "b" });
+  if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("E2 --from b halted"); }
+
+  git("fetch origin", mono.working);
+  // The pair filter drops Lc1 entirely.
+  checkTrailerAbsent({ bare: mono.bare }, "refs/heads/shadow/leaf/main", lc1, "E2.leaf-pair");
+  r = await runSync({ from: "b" });
+  if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("E2 idempotent --from b halted"); }
+  assertIdempotent(r, lc1, "E2.idempotent");
+
+  setBranchFiltersForTesting(null);
+}
+
 async function main() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-case-f-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-case-e-"));
   console.log(`[tmp] ${tmpDir}`);
-
   try {
-    const backend = createRepo(tmpDir, "backend", { email: "bea@example.com",  name: "Bea"  });
-    const mono    = createRepo(tmpDir, "mono",    { email: "mira@example.com", name: "Mira" });
-    git(`remote add backend "${backend.bare}"`, mono.working);
-
-    commitFiles(backend, { "init.txt": "init\n", "src/evntcore/common/util.ts": "util v1\n" }, "Bc0");
-    git("push origin main", backend.working);
-    commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
-    git("push origin main", mono.working);
-
-    applyTestOverrides({
-      repoRoot: mono.working,
-      pairs: [
-        { name: "backend",        a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
-        { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/evntcore/common" } },
-      ],
-      shadowBranchPrefix: "shadow",
-    });
-    setBranchFiltersForTesting(new Map([
-      ["origin",  [compileIgnorePattern("**")]],
-      ["backend", [compileIgnorePattern("**")]],
-    ]));
-
-    banner("Bootstrap sync");
-    let r = await runSync({ from: "b" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("bootstrap b"); }
-    r = await runSync({ from: "a" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("bootstrap a"); }
-
-    banner("Construct Case-F merge on backend: feat + main both add common/ files");
-    // feat branch adds common/x.ts only.
-    git("checkout -b feat", backend.working);
-    commitFiles(backend, { "src/evntcore/common/x.ts": "x branch content\n" }, "feat: add common/x");
-    // main adds common/y.ts only.
-    git("checkout main", backend.working);
-    commitFiles(backend, { "src/evntcore/common/y.ts": "y main content\n" }, "main: add common/y");
-    // Merge feat back. The merge tree has init.txt + util.ts + x.ts + y.ts.
-    // Its raw tree differs from both parents (non-TS-raw to either), but every
-    // diff path lives inside src/evntcore/common/* — fully inside the
-    // "backend" pair's autoIgnore.
-    git(`merge --no-ff feat -m "Merge feat (Case F: all changes under autoIgnore)"`, backend.working);
-    const mergeF = git("rev-parse HEAD", backend.working);
-    git("push origin main", backend.working);
-    console.log(`  Merge SHA: ${mergeF.slice(0, 12)}`);
-
-    // Sanity-check the shape — non-TS-raw to both parents, no shadow trailer on 2nd parent.
-    const mergeFullTree = git("log -1 --format=%T HEAD", backend.working);
-    const [p1, p2] = git("log -1 --format=%P HEAD", backend.working).split(" ");
-    const p1Tree = git(`log -1 --format=%T ${p1}`, backend.working);
-    const p2Tree = git(`log -1 --format=%T ${p2}`, backend.working);
-    console.log(`  Raw TS-1: ${mergeFullTree === p1Tree ? "✓ (unexpected)" : "✗ (expected — non-TS-raw)"}`);
-    console.log(`  Raw TS-2: ${mergeFullTree === p2Tree ? "✓ (unexpected)" : "✗ (expected — non-TS-raw)"}`);
-    const p2Msg = git(`log -1 --format=%B ${p2}`, backend.working);
-    const hasShadowTrailer = /^Shadow-replayed-/m.test(p2Msg);
-    console.log(`  2nd parent has Shadow-replayed-* trailer: ${hasShadowTrailer ? "✓ (unexpected)" : "✗ (expected — no trailer carve-out)"}`);
-    if (hasShadowTrailer) { console.error("setup error: 2nd parent unexpectedly has trailer"); process.exit(1); }
-
-    banner("--from b (the test)");
-    r = await runSync({ from: "b" });
-    if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("--from b halted"); }
-
-    git("fetch origin", mono.working);
-    const backendShadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, mono.bare);
-    const commonShadowLog  = git(`log --format=%B refs/heads/shadow/common-backend/main`, mono.bare);
-    const trailerRe = new RegExp(`^Shadow-replayed-[^:]+:\\s*${mergeF}\\b`, "m");
-
-    if (trailerRe.test(backendShadowLog)) {
-      console.log(`  ✘ FAIL — trailer for ${mergeF.slice(0, 12)} found on shadow/backend/main`);
-      console.log(`    Case F merge should have been dropped (effective-TS + no trailer carve-out).`);
-      process.exit(1);
-    }
-    console.log(`  ✓ trailer for ${mergeF.slice(0, 12)} ABSENT from shadow/backend/main (Case F drop confirmed)`);
-
-    if (!trailerRe.test(commonShadowLog)) {
-      console.log(`  ✘ FAIL — trailer for ${mergeF.slice(0, 12)} missing from shadow/common-backend/main`);
-      console.log(`    The common-backend pair has no autoIgnore over common/ and should keep the merge.`);
-      process.exit(1);
-    }
-    console.log(`  ✓ trailer for ${mergeF.slice(0, 12)} PRESENT on shadow/common-backend/main (drop is pair-scoped)`);
-
-    banner("Idempotence: second --from b");
-    r = await runSync({ from: "b" });
-    if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("idempotent --from b halted"); }
-    const replayLines = r.stdout.split("\n").filter(l => /^\s*Replaying /.test(l) && l.includes(mergeF.slice(0, 7)));
-    if (replayLines.length > 0) {
-      console.log(`  ✘ FAIL — re-replay of ${mergeF.slice(0, 12)} on idempotent sync:`);
-      replayLines.forEach(l => console.log(`      ${l}`));
-      process.exit(1);
-    }
-    console.log(`  ✓ idempotent — no Replaying line for ${mergeF.slice(0, 12)}`);
-
-    console.log("\n  ✓ PASS — Case F merge dropped on the autoIgnore-covered pair, kept on the owning pair, idempotent.");
+    await runE1AutoIgnore(tmpDir);
+    await runE2ShadowIgnore(tmpDir);
+    console.log("\n  ✓ PASS — Case F commits dropped, idempotent, no trailer-only synthetics.");
   } finally {
     setBranchFiltersForTesting(null);
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -1,28 +1,19 @@
 /**
- * Asserts that the §5 discriminator KEEPS Case A merges — TS-1 merges whose
- * 2nd parent carries a SIBLING-PAIR (cross-pair) `Shadow-replayed-*` trailer.
+ * Multi-pair faithful reproduction of the C6 sequence from
+ * shadow-tests/test-divergence.ts (runConcurrentMerges).
  *
- * Case A scenario: mono operator runs `git merge shadow/frontend/main` on
- * core-dev to bring the frontend pair's latest work into mono. The merge:
- *   - is TS-1 under the backend/ path filter (the frontend merge touches
- *     only frontend/, leaves backend/ unchanged), AND
- *   - has a 2nd parent (Fc1'_mono) carrying `Shadow-replayed-<frontend-pair>`.
+ * Sequence matches the harness exactly:
+ *   Round 1: concurrent commits — Bea on backend, Mira on mono.
+ *   --from b + --from a.
+ *   Round 2: BOTH sides merge shadow/<pair>/main concurrently.
+ *   Round 3: --from a (engine creates parent-swap synthetic).
+ *   Rounds 4-6: Bea linear commits + --from b + Mira mergeShadow each round.
+ *   Final --from a (this is where harness's C6 halts in DROP).
  *
- * The implemented discriminator (loose form: any-pair trailer regex) keeps
- * the merge. This matters because the resulting `Mc_A'_be<noop>` synthetic
- * on backend's shadow chain carries trailer information that
- * `composeCrossRepoMergeTree` reads on subsequent --from b runs to compose
- * outer state correctly across pairs. Dropping it would cause silent
- * cross-pair drift (see full_history_explained.html §4).
+ * Multi-pair config: backend + frontend pairs. Backend is the active side
+ * (gets the C6 pattern); frontend stays passive.
  *
- * Indirectly covered by shadow-tests/test-scenario.ts:585, :634 (which assert
- * `Bc4 = merge(Bc3, Mc6'_be<noop>)` structure). This test makes the
- * assertion explicit at the trailer level.
- *
- * Expected: backend.shadow/backend/main contains a synthetic carrying
- * `Shadow-replayed-<mono-remote>: <Mc_A_sha>`.
- *
- * Run: npx tsx local_tests/keep_drop_test/verify_case_a_kept.ts
+ * Run: npx tsx local_tests/keep_drop_test/verify_mp_c6.ts
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -62,7 +53,7 @@ function commitFiles(repo: Repo, files: Record<string, string>, msg: string): st
 function banner(s: string) { console.log("\n" + "─".repeat(70) + "\n  " + s + "\n" + "─".repeat(70)); }
 
 async function main() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-case-a-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-mp-c6-"));
   console.log(`[tmp] ${tmpDir}`);
 
   try {
@@ -72,9 +63,9 @@ async function main() {
     git(`remote add backend "${backend.bare}"`, mono.working);
     git(`remote add frontend "${frontend.bare}"`, mono.working);
 
-    git(`commit --allow-empty -m "Bc0"`, backend.working);
+    commitFiles(backend,  { "init.txt": "init\n" }, "Bc0");
     git("push origin main", backend.working);
-    git(`commit --allow-empty -m "Fc0"`, frontend.working);
+    commitFiles(frontend, { "init.txt": "init\n" }, "Fc0");
     git("push origin main", frontend.working);
     commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
     git("push origin main", mono.working);
@@ -96,75 +87,71 @@ async function main() {
 
     banner("Bootstrap sync");
     let r = await runSync({ from: "b" });
-    if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("bootstrap b"); }
+    if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("init b"); }
     r = await runSync({ from: "a" });
-    if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("bootstrap a"); }
+    if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("init a"); }
 
-    banner("Round 1: Mira commits +backend/, Fred commits +ft1 on frontend");
-    commitFiles(mono, { "backend/mira1.txt": "mira1\n" }, "Mira: backend/mira1.txt");
+    banner("Round 1: concurrent commits — bea1 on backend, mira1 on mono (backend slice)");
+    commitFiles(backend, { "bea1.txt": "Bea round 1\n" }, "Bea: bea1");
+    git("push origin main", backend.working);
+    // Mira's commit goes UNDER backend/ on mono (mirrors the backend pair's subdir).
+    commitFiles(mono, { "backend/mira1.txt": "Mira round 1\n" }, "Mira: mira1");
     git("push origin main", mono.working);
-    commitFiles(frontend, { "ft1.txt": "ft1 v1\n" }, "Fred: ft1");
-    git("push origin main", frontend.working);
 
     r = await runSync({ from: "b" }); if (r.exitCode !== 0) throw new Error("r1 b");
     r = await runSync({ from: "a" }); if (r.exitCode !== 0) throw new Error("r1 a");
 
-    banner("Mira on mono merges shadow/frontend/main into core-dev");
+    banner("Round 2: BOTH sides merge shadow/backend/main concurrently");
+    // Backend side: Bea merges shadow/backend/main into backend/main
+    git("fetch origin", backend.working);
+    git("checkout main", backend.working);
+    git(`merge --no-ff origin/shadow/backend/main -m "Bea: merge shadow r1"`, backend.working);
+    git("push origin main", backend.working);
+
+    // Mono side: Mira merges (the MISTAKE / unintended step)
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git(`merge --no-ff origin/shadow/frontend/main -m "Mira: merge shadow/frontend/main"`, mono.working);
+    git(`merge --no-ff origin/shadow/backend/main -m "Mira: merge shadow r1 (mistake on mono)"`, mono.working);
     git("push origin main", mono.working);
-    const mcA = git("rev-parse HEAD", mono.working);
-    console.log(`  Mc_A SHA: ${mcA.slice(0,12)}`);
-    console.log(`  Mc_A tree contents:`);
-    const lsTree = git(`ls-tree -r --name-only ${mcA}`, mono.working);
-    for (const line of lsTree.split("\n").filter(Boolean)) console.log(`    ${line}`);
 
-    // Helper: get backend/ subtree SHA, or empty-tree SHA if backend/ doesn't exist.
-    const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-    function getBackendTree(sha: string): string {
-      const r = execSync(`git rev-parse ${sha}:backend 2>nul`, { cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-      return r || EMPTY_TREE;
-    }
-    let mcABackendTree: string, mcAp1Tree: string, mcAp2Tree: string;
-    try {
-      mcABackendTree = git("rev-parse HEAD:backend", mono.working);
-    } catch { mcABackendTree = EMPTY_TREE; }
-    const [mcAp1, mcAp2] = git("log -1 --format=%P HEAD", mono.working).split(" ");
-    try { mcAp1Tree = git(`rev-parse ${mcAp1}:backend`, mono.working); } catch { mcAp1Tree = EMPTY_TREE; }
-    try { mcAp2Tree = git(`rev-parse ${mcAp2}:backend`, mono.working); } catch { mcAp2Tree = EMPTY_TREE; }
-    console.log(`  TS-1 under backend/: ${mcABackendTree === mcAp1Tree ? "✓" : "✗"}`);
-    console.log(`  TS-2 under backend/: ${mcABackendTree === mcAp2Tree ? "✓" : "✗ (expected — sibling-pair 2nd parent has its own non-backend content)"}`);
-    const p2Msg = git(`log -1 --format=%B ${mcAp2}`, mono.working);
-    const hasSiblingTrailer = /^Shadow-replayed-frontend/m.test(p2Msg);
-    console.log(`  2nd parent has Shadow-replayed-frontend trailer: ${hasSiblingTrailer ? "✓" : "✗"}`);
-    if (!hasSiblingTrailer) {
-      console.log("  ✘ Setup error: 2nd parent has no frontend trailer; not Case A.");
-      process.exit(1);
-    }
-
-    banner("--from a (the test)");
+    banner("Round 3: --from a");
     r = await runSync({ from: "a" });
+    console.log(`  exit: ${r.exitCode}`);
     if (r.exitCode !== 0) {
       console.error(r.stdout); console.error(r.stderr);
-      throw new Error("--from a halted unexpectedly");
+      console.log("\n  ✘ HALT at Round 3 --from a"); return;
     }
 
-    // Assertion: backend.shadow/backend/main contains a synthetic carrying
-    // Shadow-replayed-<mono-remote>: <Mc_A_sha>.
-    git("fetch origin", backend.working);
-    const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
-    const trailerRe = new RegExp(`^Shadow-replayed-[^:]+:\\s*${mcA}\\b`, "m");
-    if (trailerRe.test(shadowLog)) {
-      console.log(`\n  ✓ PASS — Mc_A'_be<noop> synthetic for ${mcA.slice(0,12)} exists on backend.shadow/backend/main.`);
-      console.log(`    Case A correctly KEPT by the discriminator (cross-pair trailer matches any-pair regex).`);
-    } else {
-      console.log(`\n  ✘ FAIL — no synthetic for Mc_A found on backend shadow chain.`);
-      console.log(`    Discriminator dropped a load-bearing Case A merge — this would cause cross-pair drift.`);
-      console.log(`    Shadow chain log:`);
-      console.log(shadowLog.split("\n").slice(0, 40).map(l => "      " + l).join("\n"));
+    banner("Rounds 4-6: Bea linear commits, --from b, Mira mergeShadow each round");
+    for (let i = 2; i <= 5; i++) {
+      git("checkout main", backend.working);
+      commitFiles(backend, { [`bea${i}.txt`]: `Bea ${i}\n` }, `Bea: bea${i}`);
+      git("push origin main", backend.working);
+
+      r = await runSync({ from: "b" });
+      if (r.exitCode !== 0) { console.error(r.stderr); console.log(`✘ round ${i} b`); return; }
+
+      git("fetch origin", mono.working);
+      git("checkout main", mono.working);
+      try {
+        git(`merge --no-ff origin/shadow/backend/main -m "Mira mergeShadow r${i}"`, mono.working);
+        git("push origin main", mono.working);
+      } catch (e: any) {
+        console.log(`  round ${i} mergeShadow: ${e.message.split("\\n")[0]}`);
+      }
+      console.log(`  ✓ round ${i} completed`);
+    }
+
+    banner("Final --from a (must succeed under the discriminator)");
+    r = await runSync({ from: "a" });
+    if (r.exitCode !== 0) {
+      console.error("STDOUT:", r.stdout);
+      console.error("STDERR:", r.stderr);
+      console.log("\n  ✘ FAIL — engine halted; discriminator should have kept Mira_merge_n (TS-2 with same-pair echo).");
       process.exit(1);
     }
+    console.log("  ✓ PASS — --from a succeeded; Case A merges replayed correctly.");
+
   } finally {
     setBranchFiltersForTesting(null);
     fs.rmSync(tmpDir, { recursive: true, force: true });

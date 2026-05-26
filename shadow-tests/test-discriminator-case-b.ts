@@ -1,19 +1,25 @@
 /**
- * Multi-pair faithful reproduction of the C6 sequence from
- * shadow-tests/test-divergence.ts (runConcurrentMerges).
+ * Regression test for the Case B (§3.2) in full_history_explained.html:
+ * confirms the discriminator keeps a TS-1st merge whose 2nd parent is on
+ * this pair's echo chain (Shadow-replayed-<backend> trailer).
  *
- * Sequence matches the harness exactly:
- *   Round 1: concurrent commits — Bea on backend, Mira on mono.
- *   --from b + --from a.
- *   Round 2: BOTH sides merge shadow/<pair>/main concurrently.
- *   Round 3: --from a (engine creates parent-swap synthetic).
- *   Rounds 4-6: Bea linear commits + --from b + Mira mergeShadow each round.
- *   Final --from a (this is where harness's C6 halts in DROP).
+ * Mirror image of verify_mp_c6.ts: same shape (mono operator merges
+ * shadow/backend/main), but Mira resolves the conflict by KEEPING MONO'S
+ * version (-X ours). The resulting Mira_merge is TREESAME-1st but its 2nd
+ * parent carries a same-pair Shadow-replayed-* trailer — the property the
+ * discriminator uses to identify load-bearing merges.
  *
- * Multi-pair config: backend + frontend pairs. Backend is the active side
- * (gets the C6 pattern); frontend stays passive.
+ * Historical note: this scenario was originally constructed to demonstrate
+ * the §3.2 counterexample to "drop iff TREESAME-to-1st-parent." Under the
+ * implemented discriminator (which keys on trailer presence rather than
+ * parent position), the merge is correctly kept, the follow-up
+ * +backend/foo.txt commit replays onto a proper shadow synthetic, and no
+ * halt occurs.
  *
- * Run: npx tsx local_tests/keep_drop_test/verify_mp_c6.ts
+ * Expected: --from a exits 0; backend.shadow/backend/main contains a
+ * synthetic carrying Shadow-replayed-<mono-remote>: <Mira_merge_sha>.
+ *
+ * Run: npx tsx local_tests/keep_drop_test/verify_ts1_variant.ts
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -53,7 +59,7 @@ function commitFiles(repo: Repo, files: Record<string, string>, msg: string): st
 function banner(s: string) { console.log("\n" + "─".repeat(70) + "\n  " + s + "\n" + "─".repeat(70)); }
 
 async function main() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-mp-c6-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-ts1-"));
   console.log(`[tmp] ${tmpDir}`);
 
   try {
@@ -63,9 +69,12 @@ async function main() {
     git(`remote add backend "${backend.bare}"`, mono.working);
     git(`remote add frontend "${frontend.bare}"`, mono.working);
 
-    commitFiles(backend,  { "init.txt": "init\n" }, "Bc0");
+    // Empty bootstrap on backend/frontend so they have no init.txt — keeps
+    // the merge tree clean enough that the merged result equals Mira's own
+    // pre-merge backend slice (TREESAME-1).
+    git(`commit --allow-empty -m "Bc0"`, backend.working);
     git("push origin main", backend.working);
-    commitFiles(frontend, { "init.txt": "init\n" }, "Fc0");
+    git(`commit --allow-empty -m "Fc0"`, frontend.working);
     git("push origin main", frontend.working);
     commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
     git("push origin main", mono.working);
@@ -91,66 +100,65 @@ async function main() {
     r = await runSync({ from: "a" });
     if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("init a"); }
 
-    banner("Round 1: concurrent commits — bea1 on backend, mira1 on mono (backend slice)");
-    commitFiles(backend, { "bea1.txt": "Bea round 1\n" }, "Bea: bea1");
+    banner("Round 1: conflicting commits — bea1 on backend, mira1 on mono");
+    // Both sides touch the SAME path with different content. After --from b
+    // and --from a, the shadow refs will carry the opposite side's content.
+    commitFiles(backend, { "shared.txt": "bea's version\n" }, "Bea: shared.txt = bea");
     git("push origin main", backend.working);
-    // Mira's commit goes UNDER backend/ on mono (mirrors the backend pair's subdir).
-    commitFiles(mono, { "backend/mira1.txt": "Mira round 1\n" }, "Mira: mira1");
+    commitFiles(mono, { "backend/shared.txt": "mira's version\n" }, "Mira: backend/shared.txt = mira");
     git("push origin main", mono.working);
 
     r = await runSync({ from: "b" }); if (r.exitCode !== 0) throw new Error("r1 b");
     r = await runSync({ from: "a" }); if (r.exitCode !== 0) throw new Error("r1 a");
 
-    banner("Round 2: BOTH sides merge shadow/backend/main concurrently");
-    // Backend side: Bea merges shadow/backend/main into backend/main
-    git("fetch origin", backend.working);
-    git("checkout main", backend.working);
-    git(`merge --no-ff origin/shadow/backend/main -m "Bea: merge shadow r1"`, backend.working);
-    git("push origin main", backend.working);
-
-    // Mono side: Mira merges (the MISTAKE / unintended step)
+    banner("Round 2: Mira merges shadow/backend/main on mono with -X ours");
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git(`merge --no-ff origin/shadow/backend/main -m "Mira: merge shadow r1 (mistake on mono)"`, mono.working);
+    git(`merge --no-ff -X ours origin/shadow/backend/main -m "Mira: merge shadow (took mono's)"`, mono.working);
     git("push origin main", mono.working);
 
-    banner("Round 3: --from a");
+    // Verify the resulting merge is actually TS-1 (took mono's tree).
+    const mergeBackendTree = git("rev-parse HEAD:backend", mono.working);
+    const mira1Sha = git("log -1 --format=%P HEAD", mono.working).split(" ")[0];
+    const mira1BackendTree = git(`rev-parse ${mira1Sha}:backend`, mono.working);
+    console.log(`  Merge backend/ tree: ${mergeBackendTree}`);
+    console.log(`  1st parent (Mira1) backend/ tree: ${mira1BackendTree}`);
+    console.log(`  TREESAME-1st: ${mergeBackendTree === mira1BackendTree ? "✓" : "✗"}`);
+    if (mergeBackendTree !== mira1BackendTree) {
+      console.log("  ✘ Setup error: merge was not TS-1; can't reproduce the variant.");
+      return;
+    }
+
+    banner("Round 3: Mira adds a non-TREESAME backend commit");
+    commitFiles(mono, { "backend/foo.txt": "Mira foo\n" }, "Mira: +backend/foo.txt");
+    git("push origin main", mono.working);
+
+    // Capture the Mira_merge SHA so we can verify its synthetic later.
+    const miraMergeSha = git(`rev-parse HEAD~1`, mono.working);
+
+    banner("Final --from a (expected to succeed under the discriminator)");
     r = await runSync({ from: "a" });
     console.log(`  exit: ${r.exitCode}`);
     if (r.exitCode !== 0) {
-      console.error(r.stdout); console.error(r.stderr);
-      console.log("\n  ✘ HALT at Round 3 --from a"); return;
-    }
-
-    banner("Rounds 4-6: Bea linear commits, --from b, Mira mergeShadow each round");
-    for (let i = 2; i <= 5; i++) {
-      git("checkout main", backend.working);
-      commitFiles(backend, { [`bea${i}.txt`]: `Bea ${i}\n` }, `Bea: bea${i}`);
-      git("push origin main", backend.working);
-
-      r = await runSync({ from: "b" });
-      if (r.exitCode !== 0) { console.error(r.stderr); console.log(`✘ round ${i} b`); return; }
-
-      git("fetch origin", mono.working);
-      git("checkout main", mono.working);
-      try {
-        git(`merge --no-ff origin/shadow/backend/main -m "Mira mergeShadow r${i}"`, mono.working);
-        git("push origin main", mono.working);
-      } catch (e: any) {
-        console.log(`  round ${i} mergeShadow: ${e.message.split("\\n")[0]}`);
-      }
-      console.log(`  ✓ round ${i} completed`);
-    }
-
-    banner("Final --from a (must succeed under the discriminator)");
-    r = await runSync({ from: "a" });
-    if (r.exitCode !== 0) {
       console.error("STDOUT:", r.stdout);
       console.error("STDERR:", r.stderr);
-      console.log("\n  ✘ FAIL — engine halted; discriminator should have kept Mira_merge_n (TS-2 with same-pair echo).");
+      console.log("\n  ✘ FAIL — engine halted; discriminator should have kept Mira_merge.");
       process.exit(1);
     }
-    console.log("  ✓ PASS — --from a succeeded; Case B merges replayed correctly.");
+
+    // Assertion: backend.shadow/backend/main contains a synthetic with
+    // Shadow-replayed-<mono-remote>: <Mira_merge_sha>.
+    git("fetch origin", backend.working);
+    const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
+    const trailerRe = new RegExp(`^Shadow-replayed-[^:]+:\\s*${miraMergeSha}\\b`, "m");
+    if (trailerRe.test(shadowLog)) {
+      console.log(`  ✓ PASS — synthetic for Mira_merge (${miraMergeSha.slice(0,12)}) exists on backend.shadow/backend/main.`);
+    } else {
+      console.log(`  ✘ FAIL — no synthetic found for Mira_merge ${miraMergeSha.slice(0,12)} on shadow chain.`);
+      console.log(`    Shadow chain log:`);
+      console.log(shadowLog.split("\n").slice(0, 30).map(l => "      " + l).join("\n"));
+      process.exit(1);
+    }
 
   } finally {
     setBranchFiltersForTesting(null);

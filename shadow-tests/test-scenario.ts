@@ -611,9 +611,13 @@ function runSht5() {
     const Mc4_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc4, "Mc4'_be");
     assertParents(backend, Bc3, [Bc2, Mc4_be], "Bc3 = merge(Bc2, Mc4'_be)");
 
-    // Bc4's 2nd parent = Mc6'_be<noop> (the kept noop merge — branch tip is Mc6 → Mc6'_be).
-    const Mc6_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc6, "Mc6'_be");
-    assertParents(backend, Bc4, [Bc3, Mc6_be], "Bc4 = merge(Bc3, Mc6'_be<noop>)");
+    // Bc4's 2nd parent = Mc5'_be (the latest same-pair kept synthetic on backend's shadow).
+    // Mc6 (mono's merge of shadow/frontend/project — cross-pair only) drops under the
+    // same-pair discriminator, so backend's shadow tip after Phase 11 sync stays at Mc5'_be.
+    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mc6), null,
+      "Mc6 (cross-pair-only merge) must not appear on backend's shadow");
+    const Mc5_be_tip = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc5, "Mc5'_be");
+    assertParents(backend, Bc4, [Bc3, Mc5_be_tip], "Bc4 = merge(Bc3, Mc5'_be)");
 
     const Mr1_be = findReplayOrFail(backend, "origin/shadow/backend/core-2.0", "origin", Mr1, "Mr1'_be");
     assertParents(backend, Br2, [Bc4, Mr1_be], "Br2 = merge(Bc4, Mr1'_be)");
@@ -631,14 +635,17 @@ function runSht5() {
     assertTip(backend, "bug/core-2.0/fix",  Bf1, "backend/bug/core-2.0/fix = Bf1");
     // Phase 19 advances main → Bc5, project → Bt4, projectB → BtB2 — asserted below.
 
-    // Backend shadow: tips on main/core-2.0 are the engine's noop-merge replays.
-    assertTip(backend, "origin/shadow/backend/main",     Mc6_be, "shadow/backend/main → Mc6'_be<noop>");
+    // Backend shadow tips: shadow/backend/main → Mc5'_be (Mc6's cross-pair merge drops);
+    // shadow/backend/core-2.0 → Mr1'_be.
+    assertTip(backend, "origin/shadow/backend/main",     Mc5_be_tip, "shadow/backend/main → Mc5'_be");
     assertTip(backend, "origin/shadow/backend/core-2.0", Mr1_be, "shadow/backend/core-2.0 → Mr1'_be");
     assertRefAbsent(backend, "origin/shadow/backend/core-1.0", "no shadow/backend/core-1.0 on backend (mono never had core-1.0)");
 
-    // Backend shadow: M-merges with at least one non-TREESAME parent under be/ are kept.
+    // Backend shadow: Mc1 (same-pair merge), Mc5 (same-pair merge), Mt1 (same-pair merge) are kept.
+    // Mc2 (cross-pair-only merge) drops under the same-pair discriminator.
     findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc1, "Mc1'_be");
-    findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc2, "Mc2'_be<noop-tree>");
+    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mc2), null,
+      "Mc2 (cross-pair-only merge) must not appear on backend's shadow");
     findReplayOrFail(backend, "origin/shadow/backend/main",    "origin", Mc5, "Mc5'_be");
     findReplayOrFail(backend, "origin/shadow/backend/project", "origin", Mt1, "Mt1'_be");
 
@@ -680,11 +687,13 @@ function runSht5() {
     assertTip(frontend, "origin/shadow/frontend/core-2.0", Mr1_fe, "shadow/frontend/core-2.0 → Mr1'_fe");
     assertRefAbsent(frontend, "origin/shadow/frontend/core-1.0", "no shadow/frontend/core-1.0 on frontend");
 
-    // Frontend shadow: M-merges with at least one non-TREESAME parent under frontend/ are kept.
-    // The new Mc3 (fe-only single-parent) IS replayed here — that's the test the user asked for.
+    // Frontend shadow: same-pair merges (Mc2 = merge(Mc1, shadow/frontend/main)) and
+    // non-merge frontend commits (Mc3) are kept. Mc5 = merge(Mc4, shadow/backend/project)
+    // carries only a cross-pair (backend) trailer on its 2nd parent — drops under same-pair rule.
     findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc2, "Mc2'_fe");
     findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3, "Mc3'_fe (frontend-only Mc3 IS replayed)");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc5, "Mc5'_fe<noop-tree>");
+    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mc5), null,
+      "Mc5 (cross-pair-only merge from frontend's view) must not appear on frontend's shadow");
 
     // TREESAME-to-all-parents drops on fe: Mc1, Mt1.
     assertEqual(findReplay(frontend, "origin/shadow/frontend/main",    "origin", Mc1), null,
@@ -821,8 +830,8 @@ function runSht5() {
     const Bc3_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc3, "Bc3'_mono");
     assertTreeContents(mono, Bc3_mono, monoTree(OUTER_MC4, BE_BC3, FE_MC4),
       "Bc3'_mono (composeCrossRepoMergeTree splice: Mc4 outer + Bc3 be + Mc4 fe)");
-    assertTreeContents(mono, Bc4_mono, monoTree(OUTER_MC4, BE_BC4, FE_MC6),
-      "Bc4'_mono (Mc6 outer + Bc4 be + Mc6 fe via Mc6'_be echo)");
+    assertTreeContents(mono, Bc4_mono, monoTree(OUTER_MC4, BE_BC4, FE_MC4),
+      "Bc4'_mono (Mc5 outer + Bc4 be + Mc5 fe via Mc5'_be echo; Mc6 cross-pair merge dropped)");
     assertTreeContents(mono, Br2_mono, monoTree(OUTER_MC4, BE_BR2, FE_MR1),
       "Br2'_mono (Mr1 outer + Br2 be + Mr1 fe via Mr1'_be echo)");
     assertTreeContents(mono, Bf1_mono, monoTree(OUTER_MC4, BE_BF1, FE_FT2),
@@ -842,27 +851,24 @@ function runSht5() {
     assertTreeContents(mono, Ft2_mono, monoTree(OUTER_MC4, BE_MR1, FE_FT2), "Ft2'_mono");
 
     // ── Shadow replays on backend (b-side; trees are be content only) ─────
+    // Mc2 and Mc6 (cross-pair-only merges) drop under the same-pair discriminator.
     const Mc1_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc1, "Mc1'_be");
-    const Mc2_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc2, "Mc2'_be");
     const Mc5_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc5, "Mc5'_be");
     const Mt1_be = findReplayOrFail(backend, "origin/shadow/backend/project", "origin", Mt1, "Mt1'_be");
     assertTreeContents(backend, Mc1_be, BE_BC2,  "Mc1'_be tree (= Bc2 content via merge-tree FF)");
-    assertTreeContents(backend, Mc2_be, BE_BC2,  "Mc2'_be tree (no-op, same as Mc1'_be)");
     assertTreeContents(backend, Mc4_be, BE_MC4,  "Mc4'_be tree (Bc2 + shared)");
     assertTreeContents(backend, Mc5_be, BE_MC6,  "Mc5'_be tree (Mc4 + Bt1 = Mc6 era)");
-    assertTreeContents(backend, Mc6_be, BE_MC6,  "Mc6'_be tree (no-op, = Mc5'_be)");
     assertTreeContents(backend, Mr1_be, BE_MR1,  "Mr1'_be tree (Mc6 + release v2)");
     assertTreeContents(backend, Mt1_be, BE_BT1,  "Mt1'_be tree (Bt1 content)");
     assertTreeContents(backend, Mf1_be, BE_MF1,  "Mf1'_be tree (Mr1 + bugfix)");
 
     // ── Shadow replays on frontend ────────────────────────────────────────
+    // Mc5 (cross-pair-only merge from frontend POV) drops under the same-pair rule.
     const Mc2_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc2, "Mc2'_fe");
     const Mc3_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3, "Mc3'_fe");
-    const Mc5_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc5, "Mc5'_fe");
     assertTreeContents(frontend, Mc2_fe, FE_FC2,  "Mc2'_fe tree (Fc2 content)");
     assertTreeContents(frontend, Mc3_fe, FE_MC3,  "Mc3'_fe tree (Fc2 + feature-flag)");
     assertTreeContents(frontend, Mc4_fe, FE_MC4,  "Mc4'_fe tree (Mc3 + shared)");
-    assertTreeContents(frontend, Mc5_fe, FE_MC4,  "Mc5'_fe tree (no-op fe, = Mc4'_fe)");
     assertTreeContents(frontend, Mc6_fe, FE_MC6,  "Mc6'_fe tree (Mc4 + Ft1)");
     assertTreeContents(frontend, Mr1_fe, FE_MR1,  "Mr1'_fe tree (Mc6 + release v2)");
 
@@ -918,9 +924,13 @@ function runSht5() {
     // After --from a, leaf shadow refs for projectB.
     // Backend pair: MtB1 kept (full content, brings BtB1's backend tree); MtB2 kept as <noop-tree>.
     const MtB1_be = findReplayOrFail(backend, "origin/shadow/backend/projectB", "origin", MtB1, "MtB1'_be");
-    const MtB2_be = findReplayOrFail(backend, "origin/shadow/backend/projectB", "origin", MtB2, "MtB2'_be<noop-tree>");
-    assertTip(backend, "origin/shadow/backend/projectB", MtB2_be, "backend shadow/backend/projectB = MtB2'_be<noop-tree>");
-    assertTreeContents(backend, MtB2_be, BE_BTB1, "MtB2'_be<noop-tree> tree = BtB1's tree");
+    // MtB2 = mono's merge of shadow/frontend/projectB — cross-pair-only, drops under same-pair rule.
+    // Backend shadow/backend/projectB tip stays at MtB1'_be (the same-pair backend echo merge).
+    assertEqual(findReplay(backend, "origin/shadow/backend/projectB", "origin", MtB2), null,
+      "MtB2 (cross-pair-only merge) must not appear on backend's shadow");
+    const MtB1_be_tip = findReplayOrFail(backend, "origin/shadow/backend/projectB", "origin", MtB1, "MtB1'_be");
+    assertTip(backend, "origin/shadow/backend/projectB", MtB1_be_tip, "backend shadow/backend/projectB = MtB1'_be");
+    assertTreeContents(backend, MtB1_be_tip, BE_BTB1, "MtB1'_be tree = BtB1's tree");
 
     // Frontend pair: MtB1 dropped (all-TREESAME on fe — both Mc0 and BtB1'_mono have empty fe);
     // MtB2 kept (brings FtB1's fe content).

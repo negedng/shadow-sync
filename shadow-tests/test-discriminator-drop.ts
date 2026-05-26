@@ -1,5 +1,5 @@
 /**
- * Asserts that the §5 discriminator drops TREESAME merges whose non-first
+ * Asserts that the discriminator drops TREESAME merges whose non-first
  * parents carry NO Shadow-replayed-* trailer, so they don't produce vacuous
  * synthetics on the shadow chain.
  *
@@ -31,7 +31,7 @@
  *
  * Against current --full-history-only code: this test FAILS (the merge IS
  * replayed; trailer for it appears).
- * Against the §5 discriminator: this test PASSES.
+ * Against the discriminator: this test PASSES.
  *
  * Run: npx tsx local_tests/keep_drop_test/verify_no_vacuous_commits.ts
  */
@@ -119,7 +119,7 @@ async function main() {
     const preCount = parseInt(git("rev-list --count refs/heads/shadow/backend/main", backend.bare), 10);
     console.log(`  Pre-merge shadow tip: ${preSHA.slice(0,12)} (commit count: ${preCount})`);
 
-    banner("Case C-variant: TS-1, non-TS-2, no shadow trailer (-s ours merge)");
+    banner("Case D-variant: TS-1, non-TS-2, no shadow trailer (-s ours merge)");
     git("checkout -b stale-feature", mono.working);
     commitFiles(mono, { "backend/stale.txt": "stale branch's backend work\n" }, "Mira: stale backend work");
     git("checkout main", mono.working);
@@ -132,7 +132,7 @@ async function main() {
     console.log(`  Merge SHA: ${mergeC.slice(0,12)}`);
     console.log(`  TS-1: ${mergeCBackendTree === pC1Tree ? "✓" : "✗"}  TS-2: ${mergeCBackendTree === pC2Tree ? "✓ (unexpected)" : "✗ (expected)"}`);
 
-    banner("Case D: TS-both, no shadow trailer (frontend-only stale branch)");
+    banner("Case E: TS-both, no shadow trailer (frontend-only stale branch)");
     // Stale branch with only frontend changes. After branching, mono.main also
     // accumulates frontend changes. Merge --no-ff: both parents' backend trees
     // are unchanged from the merge base, so the merge is TS-both under backend/.
@@ -170,8 +170,8 @@ async function main() {
       console.log(`  ${label} (${sha.slice(0,12)}) appears on shadow chain: ${found ? "YES (vacuous)" : "no"}`);
       return !found;
     };
-    const okC = checkMerge("Case C-variant", mergeC);
-    const okD = checkMerge("Case D       ", mergeD);
+    const okC = checkMerge("Case D-variant", mergeC);
+    const okD = checkMerge("Case E       ", mergeD);
     if (okC && okD) {
       console.log("\n  ✓ PASS — no vacuous synthetic created for either dropped merge.");
     } else {
