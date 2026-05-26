@@ -1228,10 +1228,10 @@ Out: [TopoCommit, ...]  every commit reachable from project where either
      (so Mt2's frontend-side parent stays in the list — see fetchTrueParents)
 
 In:  source = backend repo endpoint (dir = ""), branches = ["main"]
-     autoIgnorePatterns = [/src\/evntcore\/common(\/|$)/, ...]
-     backend's main has Bcm5 which only edits src/evntcore/common/util.ts
+     autoIgnorePatterns = [/src\/common(\/|$)/, ...]
+     backend's main has Bcm5 which only edits src/common/util.ts
 Out: Bcm5 is dropped here — its effective tree (read-tree, strip
-     src/evntcore/common/**, write-tree) equals its parent's effective
+     src/common/**, write-tree) equals its parent's effective
      tree → Case F drop, no trailer-only synthetic emitted. (The sibling
      "common-backend" pair handles that subtree on its own walk.)</code></pre>
 </div>
@@ -1251,8 +1251,8 @@ In:  c = merge(main_tip, stale-feature_tip) where stale-feature has no trailer
 Out: false  (TS-1st + no same-pair trailer on non-first parents → drop, Case D)
 
 In:  c = Bcm5 (non-merge), parent = previous backend tip
-     sourceDir = "",  autoIgnorePatterns = [/src\/evntcore\/common(\/|$)/, ...]
-     Bcm5's only diff is src/evntcore/common/util.ts — entirely inside
+     sourceDir = "",  autoIgnorePatterns = [/src\/common(\/|$)/, ...]
+     Bcm5's only diff is src/common/util.ts — entirely inside
      autoIgnorePatterns, so the effective trees match.
 Out: false  (Case F: effective-TS-to-sole-parent → drop, no trailer carve-out
               for non-merges)
@@ -2405,10 +2405,10 @@ secrets/</code></pre>
 <p>
   Example: a <code>backend</code> pair maps <code>mono:backend/</code> &harr;
   <code>backend-repo:""</code>, and a <code>common-backend</code> pair maps
-  <code>mono:common/</code> &harr; <code>backend-repo:"src/evntcore/common"</code>. The
+  <code>mono:common/</code> &harr; <code>backend-repo:"src/common"</code>. The
   <code>common-backend</code> b-side is nested inside <code>backend</code>'s b-side
-  (same remote, dir <code>src/evntcore/common</code> inside <code>""</code>), so the
-  engine emits <code>src/evntcore/common</code> and <code>src/evntcore/common/**</code>
+  (same remote, dir <code>src/common</code> inside <code>""</code>), so the
+  engine emits <code>src/common</code> and <code>src/common/**</code>
   as auto-ignore patterns when replaying <code>backend</code>. The inner pair
   (<code>common-backend</code>) is unaffected and carries the nested content normally.
 </p>

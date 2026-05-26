@@ -6,8 +6,8 @@
  * non-first parent carries a `Shadow-replayed-*` trailer.
  *
  * Case G scenario: pair "backend" (source dir="") with sibling pair
- * "common-backend" overlapping at "src/evntcore/common/". The "backend" pair
- * gets autoIgnorePatterns = ["src/evntcore/common", "src/evntcore/common/**"].
+ * "common-backend" overlapping at "src/common/". The "backend" pair
+ * gets autoIgnorePatterns = ["src/common", "src/common/**"].
  * On backend, build a merge whose two parents introduce DIFFERENT
  * common/-subtree files (so the merge's raw tree differs from both parents
  * — non-TS-raw to either), but every changed path is inside the autoIgnore
@@ -21,7 +21,7 @@
  *      merge — would have been a Case G trailer-only synthetic).
  *   2. The sibling "common-backend" pair DOES carry the trailer (no
  *      autoIgnore there; the merge is a real cross-branch composition under
- *      "src/evntcore/common/").
+ *      "src/common/").
  *   3. Idempotent: a second --from b emits no `Replaying ...` log line for
  *      the merge SHA.
  *
@@ -83,7 +83,7 @@ async function main() {
     const mono    = createRepo(tmpDir, "mono",    { email: "mira@example.com", name: "Mira" });
     git(`remote add backend "${backend.bare}"`, mono.working);
 
-    commitFiles(backend, { "init.txt": "init\n", "src/evntcore/common/util.ts": "util v1\n" }, "Bc0");
+    commitFiles(backend, { "init.txt": "init\n", "src/common/util.ts": "util v1\n" }, "Bc0");
     git("push origin main", backend.working);
     commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
     git("push origin main", mono.working);
@@ -92,7 +92,7 @@ async function main() {
       repoRoot: mono.working,
       pairs: [
         { name: "backend",        a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
-        { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/evntcore/common" } },
+        { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/common" } },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -108,13 +108,13 @@ async function main() {
     banner("Construct Case-F merge on backend: feat + main both add common/ files");
     // feat branch adds common/x.ts only.
     git("checkout -b feat", backend.working);
-    commitFiles(backend, { "src/evntcore/common/x.ts": "x branch content\n" }, "feat: add common/x");
+    commitFiles(backend, { "src/common/x.ts": "x branch content\n" }, "feat: add common/x");
     // main adds common/y.ts only.
     git("checkout main", backend.working);
-    commitFiles(backend, { "src/evntcore/common/y.ts": "y main content\n" }, "main: add common/y");
+    commitFiles(backend, { "src/common/y.ts": "y main content\n" }, "main: add common/y");
     // Merge feat back. The merge tree has init.txt + util.ts + x.ts + y.ts.
     // Its raw tree differs from both parents (non-TS-raw to either), but every
-    // diff path lives inside src/evntcore/common/* — fully inside the
+    // diff path lives inside src/common/* — fully inside the
     // "backend" pair's autoIgnore.
     git(`merge --no-ff feat -m "Merge feat (Case G: all changes under autoIgnore)"`, backend.working);
     const mergeF = git("rev-parse HEAD", backend.working);

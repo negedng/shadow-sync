@@ -5,9 +5,9 @@
  * sub-tests:
  *
  *   E.1 (autoIgnore): pair "backend" maps backend (dir="") ↔ mono "backend".
- *       Sibling pair "common-backend" owns "src/evntcore/common" on the backend
- *       side, so the "backend" pair gets autoIgnorePatterns = ["src/evntcore/
- *       common", "src/evntcore/common/**"]. Backend commits a change touching
+ *       Sibling pair "common-backend" owns "src/common" on the backend
+ *       side, so the "backend" pair gets autoIgnorePatterns = ["src/common",
+ *       "src/common/**"]. Backend commits a change touching
  *       ONLY that ignored subtree. The "backend" pair must drop it; the
  *       "common-backend" pair (whose filter doesn't ignore common/) keeps it.
  *
@@ -113,7 +113,7 @@ async function runE1AutoIgnore(tmpDir: string) {
   const mono     = createRepo(tmpDir, "e1-mono",     { email: "mira@example.com", name: "Mira" });
   git(`remote add backend "${backend.bare}"`, mono.working);
 
-  commitFiles(backend, { "init.txt": "init\n", "src/evntcore/common/util.ts": "util v1\n" }, "Bc0");
+  commitFiles(backend, { "init.txt": "init\n", "src/common/util.ts": "util v1\n" }, "Bc0");
   git("push origin main", backend.working);
   commitFiles(mono, { "README.md": "monorepo\n" }, "Mc0");
   git("push origin main", mono.working);
@@ -122,10 +122,10 @@ async function runE1AutoIgnore(tmpDir: string) {
     repoRoot: mono.working,
     pairs: [
       // Sibling overlap: "backend" pair's source (dir="") contains
-      // "common-backend"'s source dir "src/evntcore/common". The "backend"
+      // "common-backend"'s source dir "src/common". The "backend"
       // pair gets autoIgnorePatterns covering that nested subtree.
       { name: "backend",        a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
-      { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/evntcore/common" } },
+      { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/common" } },
     ],
     shadowBranchPrefix: "shadow",
   });
@@ -137,9 +137,9 @@ async function runE1AutoIgnore(tmpDir: string) {
   let r = await runSync({ from: "b" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E1 bootstrap b"); }
   r = await runSync({ from: "a" }); if (r.exitCode !== 0) { console.error(r.stderr); throw new Error("E1 bootstrap a"); }
 
-  // The ignore-only commit: changes ONLY a path under src/evntcore/common/
+  // The ignore-only commit: changes ONLY a path under src/common/
   // which the "backend" pair's autoIgnore covers.
-  const bcm5 = commitFiles(backend, { "src/evntcore/common/util.ts": "util v2 (common-only edit)\n" }, "Bcm5: common-only edit");
+  const bcm5 = commitFiles(backend, { "src/common/util.ts": "util v2 (common-only edit)\n" }, "Bcm5: common-only edit");
   git("push origin main", backend.working);
   console.log(`  Bcm5 SHA: ${bcm5.slice(0, 12)}`);
 

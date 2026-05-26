@@ -130,7 +130,7 @@ CLAUDE.md
 **/*.local
 ```
 
-**Nested pairs are auto-excluded.** When two pairs in `shadow-config.json` share a remote and one pair's `dir` is nested inside the other's, the engine auto-derives ignore patterns at replay time so the outer pair never carries the inner pair's content. Example: a `backend` pair (`backend-repo` dir=``) and a `common-backend` pair (`backend-repo` dir=`src/evntcore/common`) both target the same backend repo; the engine skips `src/evntcore/common/**` when replaying the `backend` pair without any `.shadowignore` file. Manual `.shadowignore` files still work and are unioned with auto-derived patterns.
+**Nested pairs are auto-excluded.** When two pairs in `shadow-config.json` share a remote and one pair's `dir` is nested inside the other's, the engine auto-derives ignore patterns at replay time so the outer pair never carries the inner pair's content. Example: a `backend` pair (`backend-repo` dir=``) and a `common-backend` pair (`backend-repo` dir=`src/common`) both target the same backend repo; the engine skips `src/common/**` when replaying the `backend` pair without any `.shadowignore` file. Manual `.shadowignore` files still work and are unioned with auto-derived patterns.
 
 ## GitHub Actions
 

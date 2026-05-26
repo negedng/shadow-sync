@@ -1036,12 +1036,12 @@ function runSht6() {
     git(`remote add frontend "${frontend.bare}"`, mono.working);
 
     // ── Phase 0: Mature backend (Bc0) — common pre-existing at canonical path
-    // .shadowignore at root excludes src/evntcore/common/ so the parent pair
+    // .shadowignore at root excludes src/common/ so the parent pair
     // never carries it (in either direction — see scenario.md A13).
     const Bc0 = commitFiles(backend, {
       "src/init.txt": "init\n",
-      "src/evntcore/common/util.ts": "util v1\n",
-      ".shadowignore": "src/evntcore/common/**\n",
+      "src/common/util.ts": "util v1\n",
+      ".shadowignore": "src/common/**\n",
     }, "Bc0");
     git("push origin main", backend.working);
 
@@ -1058,7 +1058,7 @@ function runSht6() {
     const Mc0 = commitFiles(mono, {
       "README.md": "# Monorepo\n",
       ".claude/settings.json": "{}\n",
-      "backend/.shadowignore": "src/evntcore/common/**\n",
+      "backend/.shadowignore": "src/common/**\n",
       "frontend/.shadowignore": "src/app/common/**\n",
       "common/util.ts": "util v1\n",
     }, "Mc0");
@@ -1070,7 +1070,7 @@ function runSht6() {
       pairs: [
         { name: "backend",         a: { remote: "origin", url: mono.bare, dir: "backend"  }, b: { remote: "backend",  url: backend.bare,  dir: "" } },
         { name: "frontend",        a: { remote: "origin", url: mono.bare, dir: "frontend" }, b: { remote: "frontend", url: frontend.bare, dir: "" } },
-        { name: "common-backend",  a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "backend",  url: backend.bare,  dir: "src/evntcore/common"   } },
+        { name: "common-backend",  a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "backend",  url: backend.bare,  dir: "src/common"   } },
         { name: "common-frontend", a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "frontend", url: frontend.bare, dir: "src/app/common"        } },
       ],
       shadowBranchPrefix: "shadow",
@@ -1106,7 +1106,7 @@ function runSht6() {
     // Parent-pair shadow refs: canonical common excluded by .shadowignore.
     assertPathPresent(mono, "origin/shadow/backend/main",  "backend/src/init.txt",      "[Phase 1 backend shadow]");
     assertPathPresent(mono, "origin/shadow/backend/main",  "backend/.shadowignore",     "[Phase 1 backend shadow] .shadowignore itself flows");
-    assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/evntcore/common/util.ts", "[Phase 1 backend shadow] canonical common excluded");
+    assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/common/util.ts", "[Phase 1 backend shadow] canonical common excluded");
     assertPathPresent(mono, "origin/shadow/frontend/main", "frontend/src/init.txt",     "[Phase 1 frontend shadow]");
     assertPathAbsent(mono,  "origin/shadow/frontend/main", "frontend/src/app/common/util.ts", "[Phase 1 frontend shadow] canonical common excluded");
     // Common-pair shadow refs: canonical common content under "common/" prefix.
@@ -1134,11 +1134,11 @@ function runSht6() {
     assertContent(mono, Mcm4, "common/util.ts", "util v1\n", "[Phase 1 monorepo state]");
     assertPathPresent(mono, Mcm4, "backend/src/init.txt", "[Phase 1 monorepo state] backend/ slice");
     assertPathPresent(mono, Mcm4, "frontend/src/init.txt", "[Phase 1 monorepo state] frontend/ slice");
-    assertPathAbsent(mono, Mcm4, "backend/src/evntcore/common/util.ts", "[Phase 1 monorepo state] no nested canonical common under backend/");
+    assertPathAbsent(mono, Mcm4, "backend/src/common/util.ts", "[Phase 1 monorepo state] no nested canonical common under backend/");
     assertPathAbsent(mono, Mcm4, "frontend/src/app/common/util.ts", "[Phase 1 monorepo state] no nested canonical common under frontend/");
 
     // Leaves still hold their canonical common (sync did not touch them).
-    assertContent(backend,  "main", "src/evntcore/common/util.ts", "util v1\n", "[Phase 1] backend canonical common preserved");
+    assertContent(backend,  "main", "src/common/util.ts", "util v1\n", "[Phase 1] backend canonical common preserved");
     assertContent(frontend, "main", "src/app/common/util.ts",      "util v1\n", "[Phase 1] frontend canonical common preserved");
 
     // ── Phase 2: Monorepo-sourced common edit reaches both leaves ───────────
@@ -1160,13 +1160,12 @@ function runSht6() {
     const Fcm1 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm1");
     git("push origin main", frontend.working);
 
-    assertContent(backend,  Bcm1, "src/evntcore/common/util.ts", "util v2\n", "[Phase 2] backend canonical = v2");
+    assertContent(backend,  Bcm1, "src/common/util.ts", "util v2\n", "[Phase 2] backend canonical = v2");
     assertContent(frontend, Fcm1, "src/app/common/util.ts",      "util v2\n", "[Phase 2] frontend canonical = v2");
     // Confirm v2 did NOT land at the leaves' roots or under unexpected paths.
     assertPathAbsent(backend,  Bcm1, "common/util.ts",    "[Phase 2] backend has no root-level common/");
-    assertPathAbsent(backend,  Bcm1, "src/common/util.ts","[Phase 2] backend has no src/common/");
     assertPathAbsent(frontend, Fcm1, "common/util.ts",    "[Phase 2] frontend has no root-level common/");
-    assertPathAbsent(frontend, Fcm1, "src/common/util.ts","[Phase 2] frontend has no src/common/");
+    assertPathAbsent(frontend, Fcm1, "src/common/util.ts","[Phase 2] frontend has no src/common/ (canonical is src/app/common/)");
 
     // ── Phase 3: Cross-cutting commit — each pair carries its own slice ─────
     const Mcm6 = commitFiles(mono, {
@@ -1196,7 +1195,7 @@ function runSht6() {
 
     assertPathPresent(backend, Bcm3, "src/api.ts", "[Phase 3] backend got api.ts via parent pair");
     assertContent(backend, Bcm3, "src/api.ts", "api v1\n", "[Phase 3] backend api.ts content");
-    assertContent(backend, Bcm3, "src/evntcore/common/util.ts", "util v3\n", "[Phase 3] backend canonical common = v3");
+    assertContent(backend, Bcm3, "src/common/util.ts", "util v3\n", "[Phase 3] backend canonical common = v3");
     assertPathAbsent(backend, Bcm3, "src/component.ts", "[Phase 3] frontend slice did NOT leak to backend");
 
     assertPathPresent(frontend, Fcm3, "src/component.ts", "[Phase 3] frontend got component.ts via parent pair");
@@ -1205,11 +1204,11 @@ function runSht6() {
     assertPathAbsent(frontend, Fcm3, "src/api.ts", "[Phase 3] backend slice did NOT leak to frontend");
 
     // ── Phase 4: Variant non-interference ───────────────────────────────────
-    // A file under backend/eventus/edu-src/app/common/ is a *variant* common file.
-    // It must flow via the parent pair (because it's outside src/evntcore/common/),
+    // A file under backend/project/src/app/common/ is a *variant* common file.
+    // It must flow via the parent pair (because it's outside src/common/),
     // and it must NOT appear in the common pair's shadow chain or in monorepo/common/.
     const Mcm7 = commitFiles(mono, {
-      "backend/eventus/edu-src/app/common/variant-only.ts": "variant only\n",
+      "backend/project/src/app/common/variant-only.ts": "variant only\n",
     }, "Mcm7");
     git("push origin main", mono.working);
     void Mcm7;
@@ -1224,14 +1223,14 @@ function runSht6() {
     git("push origin main", backend.working);
 
     // Variant file landed via the parent pair, in its variant directory.
-    assertContent(backend, Bcm4, "eventus/edu-src/app/common/variant-only.ts", "variant only\n",
+    assertContent(backend, Bcm4, "project/src/app/common/variant-only.ts", "variant only\n",
       "[Phase 4] variant file landed at variant path via parent pair");
     // Canonical common is unchanged by the variant addition.
-    assertContent(backend, Bcm4, "src/evntcore/common/util.ts", "util v3\n",
+    assertContent(backend, Bcm4, "src/common/util.ts", "util v3\n",
       "[Phase 4] canonical common still at v3, variant did not leak in");
 
     // The common pair must not have picked up the variant file. On the
-    // common-backend shadow (mono-shaped), the leaf's src/evntcore/common/
+    // common-backend shadow (mono-shaped), the leaf's src/common/
     // content is spliced under "common/" — a variant-only.ts under "common/"
     // there would indicate leakage.
     git("fetch origin", mono.working);
@@ -1251,7 +1250,7 @@ function runSht6() {
     // brings the leaf change back to monorepo's shadow/common-backend, the
     // operator merges it, and --from a propagates to the frontend leaf.
     const Bcm5 = commitFiles(backend, {
-      "src/evntcore/common/util.ts": "util v3 leaf-stray\n",
+      "src/common/util.ts": "util v3 leaf-stray\n",
     }, "Bcm5");
     git("push origin main", backend.working);
     void Bcm5;
@@ -1291,7 +1290,7 @@ function runSht6() {
     }
 
     // All three sides converge on the leaf-stray content.
-    assertContent(backend,  "main", "src/evntcore/common/util.ts", "util v3 leaf-stray\n", "[Phase 5] backend (origin)");
+    assertContent(backend,  "main", "src/common/util.ts", "util v3 leaf-stray\n", "[Phase 5] backend (origin)");
     assertContent(mono,     "main", "common/util.ts",              "util v3 leaf-stray\n", "[Phase 5] monorepo");
     assertContent(frontend, Fcm4,   "src/app/common/util.ts",      "util v3 leaf-stray\n", "[Phase 5] frontend (propagated)");
 

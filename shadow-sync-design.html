@@ -257,14 +257,14 @@
     Some content belongs to multiple leaves at once: a <code>common/</code> folder that the backend
     and frontend both consume, code generated for both platforms, shared schemas. The monorepo
     holds it at a single canonical path; each leaf carries a copy at its own canonical location
-    (which may be nested, e.g. <code>backend/src/evntcore/common/</code> on the backend leaf,
+    (which may be nested, e.g. <code>backend/src/common/</code> on the backend leaf,
     <code>frontend/src/app/common/</code> on the frontend leaf). Editing it on the monorepo must
     reach both leaves; the monorepo must not end up with two copies (one per leaf) of the same
     content.
   </p>
   <p>
-    Variant copies in leaf-specific paths (e.g. <code>edu-src/app/common/</code> overlays that
-    only the education build consumes) are <em>not</em> the shared content and must keep flowing
+    Variant copies in leaf-specific paths (e.g. <code>project/src/app/common/</code> overlays that
+    only a specific build consumes) are <em>not</em> the shared content and must keep flowing
     with the rest of the leaf as ordinary pair content.
   </p>
 </div>
@@ -395,21 +395,21 @@
     canonical path is itself a synchronized directory pair &mdash; just one whose monorepo
     <code>dir</code> coincides for several pairs. We add a dedicated pair per leaf, e.g.
     <code>common-backend</code> mapping <code>main-repo:common/</code> &harr;
-    <code>backend-repo:src/evntcore/common/</code>, and <code>common-frontend</code> mapping
+    <code>backend-repo:src/common/</code>, and <code>common-frontend</code> mapping
     <code>main-repo:common/</code> &harr; <code>frontend-repo:src/app/common/</code>. The leaf side of
     each common pair carries only the canonical content; everything else on the leaf flows through
     the parent pair (<code>backend</code>, <code>frontend</code>) as before. To keep the parent
     pair from also carrying the canonical content (which would put a copy under
-    <code>backend/src/evntcore/common/</code> on the monorepo &mdash; the R7 violation), the
+    <code>backend/src/common/</code> on the monorepo &mdash; the R7 violation), the
     parent pair&rsquo;s <code>.shadowignore</code> (<a class="ref ref-r" href="#r3">R3</a> &middot;
     <a class="ref ref-c" href="#c9">C9</a>) excludes the canonical leaf path. Variant directories at non-canonical paths (e.g.
-    <code>backend-repo:eventus/edu-src/app/common/</code>) are <em>not</em> excluded and flow
+    <code>backend-repo:project/src/app/common/</code>) are <em>not</em> excluded and flow
     through the parent pair like any other content, satisfying <a class="ref ref-r" href="#r7">R7</a>&rsquo;s
     second half.
   </p>
   <p>
     The choice reuses the existing pair abstraction with no new engine concept &mdash; nested
-    <code>dir</code> values (<code>src/evntcore/common</code>) were already supported as git
+    <code>dir</code> values (<code>src/common</code>) were already supported as git
     pathspecs in <code>rev-list</code> and as prefixes in <code>read-tree</code>, just never
     exercised. The one place it forced engine change is trailer scoping
     (<a class="ref ref-c" href="#c3">C3</a>): two pairs sharing a source remote (e.g.
