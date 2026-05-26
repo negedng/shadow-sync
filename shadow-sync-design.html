@@ -550,13 +550,15 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     On top of that, <code>collectSourceCommits</code> post-filters via
     <code>isLoadBearing</code>: drop a commit iff its <em>effective</em> source tree
     (<code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s
-    <code>.shadowignore</code> stripped) is TREESAME to some parent&rsquo;s effective tree AND,
-    for merges, no non-first parent carries any <code>Shadow-replayed-*</code> trailer (any
-    pair). Same predicate at every commit shape: <code>git merge --no-ff stale-feature</code>
-    with no shadow trailer drops (Case D); a non-merge whose only changes are
-    <code>.shadowignore</code>- or <code>autoIgnore</code>-filtered also drops (Case F) without
-    emitting a trailer-only target commit. Consumer-merges (non-first parent carries an echo,
-    same- or sibling-pair) survive the filter. See
+    <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s
+    effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own
+    <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer. Same predicate at every commit shape:
+    <code>git merge --no-ff stale-feature</code> with no shadow trailer drops (Case D); a non-merge
+    whose only changes are <code>.shadowignore</code>- or <code>autoIgnore</code>-filtered also
+    drops (Case F) without emitting a trailer-only target commit. The TS-1st check (not TS-to-any)
+    is what keeps non-TS-1st content-propagation merges like the <code>common-backend</code>
+    &harr; <code>common-frontend</code> bridge: even with only a cross-pair trailer on the 2nd
+    parent, a merge that took the 2nd parent&rsquo;s in-scope tree is kept by the main rule. See
     <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a>
     for the discriminator design, the effective-TREESAME mechanism, and counterexamples it
     rejects.
