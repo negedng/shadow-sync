@@ -1035,13 +1035,13 @@ function runSht6() {
     git(`remote add backend "${backend.bare}"`, mono.working);
     git(`remote add frontend "${frontend.bare}"`, mono.working);
 
-    // ── Phase 0: Mature backend (Bc0) — common pre-existing at canonical path
-    // .shadowignore at root excludes src/common/ so the parent pair
-    // never carries it (in either direction — see scenario.md A13).
+    // ── Phase 0: Mature backend (Bc0) — common pre-existing at canonical path.
+    // autoignore (derived from the common-backend pair nested at src/common)
+    // excludes src/common/ from the backend pair in both directions; no
+    // manual .shadowignore needed on the leaf.
     const Bc0 = commitFiles(backend, {
       "src/init.txt": "init\n",
       "src/common/util.ts": "util v1\n",
-      ".shadowignore": "src/common/**\n",
     }, "Bc0");
     git("push origin main", backend.working);
 
@@ -1049,7 +1049,6 @@ function runSht6() {
     const Fc0 = commitFiles(frontend, {
       "src/init.txt": "init\n",
       "src/app/common/util.ts": "util v1\n",
-      ".shadowignore": "src/app/common/**\n",
     }, "Fc0");
     git("push origin main", frontend.working);
 
@@ -1103,9 +1102,9 @@ function runSht6() {
     git("fetch origin", mono.working);
     // Shadow refs on monorepo are monorepo-shaped: leaf content is spliced under
     // the target dir, monorepo's bootstrap tree (Mc0) provides everything else.
-    // Parent-pair shadow refs: canonical common excluded by .shadowignore.
+    // Parent-pair shadow refs: canonical common excluded via autoignore
+    // (derived from the common-* pairs nested inside the parent pairs).
     assertPathPresent(mono, "origin/shadow/backend/main",  "backend/src/init.txt",      "[Phase 1 backend shadow]");
-    assertPathPresent(mono, "origin/shadow/backend/main",  "backend/.shadowignore",     "[Phase 1 backend shadow] .shadowignore itself flows");
     assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/common/util.ts", "[Phase 1 backend shadow] canonical common excluded");
     assertPathPresent(mono, "origin/shadow/frontend/main", "frontend/src/init.txt",     "[Phase 1 frontend shadow]");
     assertPathAbsent(mono,  "origin/shadow/frontend/main", "frontend/src/app/common/util.ts", "[Phase 1 frontend shadow] canonical common excluded");
