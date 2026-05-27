@@ -914,12 +914,10 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
 }
 
 /**
- * Like resolveTargetParents, but when a source parent is in haltedSources,
- * splice in the FULL set of mapped parents the halt-causer had (from
- * haltReasons), rather than letting findEchoAnchor pick one non-deterministically.
- * This keeps the previously-pushed shadow tip (which mapBranchesToTargetTips
- * chose by the same newest-first walk) in the resulting parent set, so the
- * downstream FF push remains valid when a round-trip merge absorbs a halt.
+ * Find target side parent from source side hash:
+ * 1. parent recorded in shaMapping
+ * 2. parent is in a Halt state
+ * 3. unknown parents replaced by root
  */
 function resolveHaltAwareParents(
   commit: TopoCommit,
@@ -1243,15 +1241,9 @@ function replayCommits(opts: {
         console.log(`  Replaying ${label}...`);
       }
 
-      // Expand halted parents to their full set of mappedParents (from haltReasons).
-      // When a source parent is in haltedSources, findEchoAnchor would pick ONE of
-      // its mapped grandparents non-deterministically; the previous shadow tip we
-      // pushed (per mapBranchesToTargetTips) might be the OTHER one, and the FF
-      // check would then fail. Splicing in the full mappedParents from the halt
-      // record guarantees the previous shadow tip remains in the parent set.
+      // Resolve parent from trailers or Halt anchors for squash fix
       const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons);
 
-      // Cross-repo merge tree (see composeCrossRepoMergeTree).
       const composedParentTree = composeCrossRepoMergeTree({ commit, mappedParents, shaMapping, dc });
       let parentTree: string | null;
       if (composedParentTree) {
