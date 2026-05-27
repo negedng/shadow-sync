@@ -905,7 +905,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <code>Ft2</code> directly &mdash; <code>Mt2'_fe</code> is never referenced by any pushed ref,
     becomes a dangling commit in the orchestrator&rsquo;s object DB, and re-replays every
     subsequent sync (the next <code>loadReplayedMappings()</code> only scans pushed shadow refs,
-    so the orphan&rsquo;s trailer is invisible). <code>collectNeededCandidates()</code> runs after
+    so the orphan&rsquo;s trailer is invisible). <code>dropOrphanedCommits()</code> runs after
     <code>filterNotReplayedCommits()</code> and intersects the candidate list with two reach sets:
     (a) candidates the per-branch linear walk visits before its first mapped commit (would-be
     branch tips), and (b) candidate ancestors needed to keep the parent chain of an anchoring

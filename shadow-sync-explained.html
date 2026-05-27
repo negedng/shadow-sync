@@ -1453,7 +1453,16 @@ In:  parentHash's full ancestry has zero mapped commits
 Out: null
 
 In:  parentHash itself is in the mapping
-Out: parentHash's own mapped value (the log walk includes the starting hash)</code></pre>
+Out: parentHash's own mapped value (the log walk includes the starting hash)
+
+In:  parentHash = Ff1'_mono on shadow/common-frontend/main — a cross-pair shadow
+     commit dropped by filterNotReplayedCommits when we're syncing the
+     common-backend pair. Its ancestry walks Ff1'_mono → Fe_init'_mono → Mc0
+     (mono's root). shaMapping has Mc0 → Mc0'_be.
+Out: "Mc0'_be" — every shadow ref is anchored into mono's main lineage because
+     resolveTargetParents falls back to targetInit (= mono root) for source
+     roots during the very first --from b sync. So even cross-pair shadow
+     ancestry eventually reaches a commit that's mapped on our pair's side.</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1471,7 +1480,19 @@ In:  commit = Bc0 (root, parents = []); targetInit = monorepo's init commit
 Out: [&lt;monorepo init SHA&gt;]
 
 In:  commit has 2 parents, both fall back to targetInit (no echo anchor on either)
-Out: [&lt;monorepo init SHA&gt;]  (deduped)</code></pre>
+Out: [&lt;monorepo init SHA&gt;]  (deduped)
+
+In:  commit = Mf1 on monorepo→backend (common-backend pair), where
+     two pairs share common/ on mono and Mf1 = mono engineer's merge of
+     shadow/common-frontend/main into main.
+     Mf1.parents = [Mc0, Ff1'_mono]. Mc0 → Mc0'_be via shaMapping.
+     Ff1'_mono is cross-pair (dropped by filterNotReplayedCommits, not in
+     shaMapping); findEchoAnchor walks its ancestry through the shadow-ref
+     chain to Mc0 → returns Mc0'_be.
+Out: ["Mc0'_be"]  (both parents collapse to one via seen-dedup — Mf1'_be is
+     a single-parent commit on shadow/common-backend, even though Mf1 is a
+     two-parent merge on mono. The source merge's diff still propagates the
+     common/ delta via buildReplayedTree on top of Mc0'_be's tree.)</code></pre>
 </div>
 
 <h3 class="fn-group">Mapping &amp; deduplication</h3>
@@ -1505,24 +1526,48 @@ Out: [] — Bt2 is filtered out, stays out of the candidate list
 
 In:  Mr1' carries the trailer but Mr1 isn't present locally (e.g. monorepo wasn't fetched)
 Out: Mr1' is still dropped from output, but NOT recorded in shaMapping
-     (no usable target-side anchor to point at)</code></pre>
+     (no usable target-side anchor to point at)
+
+In:  Two pairs (common-backend, common-frontend) share common/ on mono. After a
+     frontend dev's change is integrated into mono main via Mf1 = merge(Mc0,
+     Ff1'_mono), the common-backend pair's path-filtered rev-list reaches
+     Ff1'_mono via Mf1's parent edge. Ff1'_mono carries
+     Shadow-replayed-common-frontend-frontend (the OTHER pair's trailer).
+     Direction: monorepo→backend, dc.skipTrailerKey = Shadow-replayed-common-backend-backend.
+Out: Ff1'_mono is filtered out as cross-pair (its trailer key isn't ours);
+     shaMapping unchanged for it. Mf1 stays in the candidate list — its
+     second parent Ff1'_mono is collapsed via findEchoAnchor in
+     resolveTargetParents, but the common/ delta still propagates via
+     buildReplayedTree applying Mf1's diff on top of Mc0'_be's tree.
+     (For the symmetric own-pair direction mono→frontend, Ff1'_mono matches
+     dc.skipTrailerKey instead and resolves via Walkthrough C; see
+     test-cross-pair-common.ts for both sides end-to-end.)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>collectNeededCandidates(remote, branches, shaMapping, newCommits): Set&lt;hash&gt;</code></h4>
-<p>Intersect candidates with what <code>mapBranchesToTargetTips</code> would actually reach. Stops the engine from emitting replays that orphan because a skip-trailer ancestor anchors the branch first.</p>
+<h4><code>dropOrphanedCommits(newCommits, branches, shaMapping, remote): TopoCommit[]</code></h4>
+<p>Drops candidates whose replay would orphan on the target. Pass 1 mirrors <code>mapBranchesToTargetTips</code>: per branch, walk newest-first, stop at the first mapped ancestor &mdash; candidates seen along the way anchor a tip. Pass 2 pulls in unmapped candidate parents of kept commits so <code>resolveTargetParents</code> doesn&rsquo;t fall back to <code>findEchoAnchor</code> with a different topology. Without this step, orphaned target commits aren&rsquo;t reachable from any shadow ref, so the next sync&rsquo;s <code>loadReplayedMappings</code> can&rsquo;t see them and re-replays the same source commit every cycle.</p>
 <pre><code>In:  branches = ["project"]
      newCommits = [Bt1, Bc3, Bt2], all between backend-repo/project's tip
      and the first mapped ancestor
-Out: Set { Bt1, Bc3, Bt2 }  — all reachable via the tip-walk (Set A)
+Out: [Bt1, Bc3, Bt2]  — all reachable via the tip-walk (pass 1)
 
 In:  newCommits = [Bc3, Bt2]; backend-repo/project's tip-walk hits a
      skip-trailer anchor (an echo) BEFORE reaching Bc3 and Bt2
-Out: Set {}  — both dropped; replaying them would orphan immediately
+Out: []  — both dropped; replaying them would orphan immediately
 
 In:  newCommits = [Bt2, Bc3]; Bt2 is on the tip-walk;
-     Bc3 only reachable through Bt2's parent chain (Set B)
-Out: Set { Bt2, Bc3 }  — Bc3 included so resolveTargetParents wires Bt2's parent</code></pre>
+     Bc3 only reachable through Bt2's parent chain
+Out: [Bt2, Bc3]  — Bc3 included so resolveTargetParents wires Bt2's parent (pass 2)
+
+In:  scenario.md post-M9, sync --from a on the frontend pair:
+     newCommits includes Mt2 (now load-bearing on fe/ because M9 rewrote
+     Bt2'_mono with spliced fe content). Walking origin/project newest-first,
+     Ft2'_mono carries a Shadow-replayed-frontend skip-trailer and halts
+     the walk before Mt2. No kept commit has Mt2 as an unmapped parent.
+Out: [...without Mt2]  — without this drop, Mt2'_fe replays as an orphan
+     on the frontend shadow target every cycle (test-scenario's idempotence
+     check pins this).</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1571,7 +1616,7 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
 
 <div class="card fn-card">
 <h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches }): { mirrored, branchMapping, shaMapping, upToDate, haltedBranches }</code></h4>
-<p>The replay engine&rsquo;s public entry point. Composes <code>computeAutoIgnorePatterns</code> → <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>collectNeededCandidates</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction. Projects original (non-empty-diagnostic) entries from <code>replayCommits</code>&rsquo;s halt records into <code>haltedBranches: HaltedBranch[]</code>; propagated halts on descendants stay internal. Does not throw on unresolvable merges &mdash; the caller (<code>_runSyncCore</code>) prints each <code>diagnostic</code> to stderr and increments its failed-pair counter, but other branches in the same pair still push.</p>
+<p>The replay engine&rsquo;s public entry point. Composes <code>computeAutoIgnorePatterns</code> → <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>dropOrphanedCommits</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction. Projects original (non-empty-diagnostic) entries from <code>replayCommits</code>&rsquo;s halt records into <code>haltedBranches: HaltedBranch[]</code>; propagated halts on descendants stay internal. Does not throw on unresolvable merges &mdash; the caller (<code>_runSyncCore</code>) prints each <code>diagnostic</code> to stderr and increments its failed-pair counter, but other branches in the same pair still push.</p>
 <pre><code>In:  Fresh bootstrap of the backend pair, --from b
      (backend repo has commits Bc0..Bc4, Br1..Br2, Bt1..Bt3, Bf1;
       monorepo has no shadow/backend/* refs yet)
@@ -1735,8 +1780,8 @@ Out: { exitCode: 1,
           <li><strong><code>filterNotReplayedCommits(allCommits, shaMapping, dc)</code></strong>
             &mdash; drop commits already in <code>shaMapping</code> and echoes carrying our own
             trailer.</li>
-          <li><strong><code>collectNeededCandidates(...)</code></strong> &mdash; drop commits that no
-            branch&rsquo;s tip-walk would resolve to (would replay-then-orphan).</li>
+          <li><strong><code>dropOrphanedCommits(...)</code></strong> &mdash; drop commits that no
+            branch&rsquo;s tip-walk would resolve to (would replay-then-orphan every cycle).</li>
           <li>Resolve <code>targetInit</code>:
             <ul>
               <li><code>git rev-list --max-parents=0 target.remote/main</code> &rarr; init commit

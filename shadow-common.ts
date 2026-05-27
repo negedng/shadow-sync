@@ -924,30 +924,6 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
   return null;
 }
 
-function resolveTargetParents(
-  commit: TopoCommit,
-  shaMapping: Map<string, string>,
-  targetInit: string | null,
-): string[] {
-  // Orphan parents anchor at the closest echo'd ancestor, then targetInit —
-  // never target/main's tip, which would silently revert outer files at merge.
-  if (commit.parents.length === 0) {
-    return targetInit ? [targetInit] : [];
-  }
-  const parents: string[] = [];
-  const seen = new Set<string>();
-  for (const parentHash of commit.parents) {
-    const mapped = shaMapping.get(parentHash)
-      ?? findEchoAnchor(parentHash, shaMapping)
-      ?? targetInit;
-    if (mapped && !seen.has(mapped)) {
-      parents.push(mapped);
-      seen.add(mapped);
-    }
-  }
-  return parents;
-}
-
 /**
  * Like resolveTargetParents, but when a source parent is in haltedSources,
  * splice in the FULL set of mapped parents the halt-causer had (from
@@ -987,8 +963,6 @@ function resolveHaltAwareParents(
   }
   return parents;
 }
-
-// ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
  * BFS from the commit's source-side parents through halted unmapped ancestors,
@@ -1040,26 +1014,17 @@ function loadReplayedMappings(opts: {
 }
 
 /**
- * Drop already-replayed and echoed commits. Echoes get echo→original
+ * Drop already-replayed, echoed and foreign commits. Echoes get echo→original
  * recorded in shaMapping so parent resolution reuses the real target SHA
  * rather than re-replaying or falling back to the branch tip.
+ * Cross-pair shadow commits are skipped - we don't want frontend branches on backend
+ * Their change is flattened to the next monorepo merge with diff from mono ancestor.
  */
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
 ): TopoCommit[] {
-  // Cross-pair shadow commits (e.g. shadow/frontend/<branch> on monorepo, when
-  // we're syncing the BACKEND pair) carry a Shadow-replayed-<other-pair-remote>
-  // trailer. They become reachable from this pair's working branches via the
-  // mergeMappedParentTrees splice — once a sibling pair's outer state lands in
-  // a shared shadow merge, those cross-pair commits show up in path-filtered
-  // rev-list and would otherwise be replayed onto OUR pair's shadow as foreign
-  // ancestry that doesn't fast-forward the existing tip. Drop them — the
-  // underlying source-side commit (e.g. Mr1 for Mr1'_be) is itself in our
-  // rev-list and will be replayed normally on our pair's shadow, with
-  // mergeMappedParentTrees re-doing whatever sibling-echo outer splicing the
-  // cross-pair shadow merge captured.
   const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
   const skipKey = targetTrailerKey(dc);
   const skipRe = targetTrailerRegex(dc);
@@ -1081,42 +1046,33 @@ function filterNotReplayedCommits(
 }
 
 /**
- * Candidates whose replay would actually anchor a branch tip (Step 1) or be
- * needed to keep the parent chain of an anchoring replay intact (Step 2).
- *
- * Step 1 mirrors mapBranchesToTargetTips: linear topo-order walk newest-first
- * per branch, stopping at the first commit already in shaMapping. Any
- * candidate encountered before the stop is needed. Candidates skipped here
- * (e.g. `Mt2` in scenario.md, behind `Ft2'_mono`'s skip-trailer in topo-order)
- * are exactly the ones that would otherwise replay-then-orphan.
- *
- * Step 2: replays use mapped parents in resolveTargetParents — if an
- * anchoring candidate's source parent is also a candidate but NOT in step 1's
- * set, the replay would fall back to findEchoAnchor (different topology).
- * Walk parents of each needed candidate; if a parent is itself a candidate
- * and not yet mapped, include it. Stop at mapped or non-candidate parents.
+ * Drops candidates whose replay would orphan: pass 1 walks each branch
+ * topo-order newest-first stopping at the first mapped ancestor (mirroring
+ * mapBranchesToTargetTips) — anything seen anchors a tip; pass 2 pulls in
+ * unmapped candidate parents of kept commits so resolveTargetParents won't
+ * fall back to findEchoAnchor with a different topology.
  */
-function collectNeededCandidates(
-  remote: string,
+function dropOrphanedCommits(
+  newCommits: TopoCommit[],
   branches: string[],
   shaMapping: Map<string, string>,
-  newCommits: TopoCommit[],
-): Set<string> {
+  remote: string,
+): TopoCommit[] {
   const newSet = new Set(newCommits.map(c => c.hash));
-  const needed = new Set<string>();
+  const kept = new Set<string>();
 
   for (const branch of branches) {
     const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while collecting needed candidates: ${log.stderr}`);
+    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
     for (const line of log.stdout.split("\n")) {
       const hash = line.trim();
       if (!hash) continue;
       if (shaMapping.has(hash)) break;
-      if (newSet.has(hash)) needed.add(hash);
+      if (newSet.has(hash)) kept.add(hash);
     }
   }
 
-  const stack = Array.from(needed);
+  const stack = Array.from(kept);
   while (stack.length) {
     const hash = stack.pop()!;
     const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
@@ -1124,14 +1080,14 @@ function collectNeededCandidates(
     if (!parentsRes.stdout) continue; // root commit — no parents to chase
     for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
       if (shaMapping.has(p)) continue;
-      if (newSet.has(p) && !needed.has(p)) {
-        needed.add(p);
+      if (newSet.has(p) && !kept.has(p)) {
+        kept.add(p);
         stack.push(p);
       }
     }
   }
 
-  return needed;
+  return newCommits.filter(c => kept.has(c.hash));
 }
 
 /**
@@ -1162,6 +1118,8 @@ function mapBranchesToTargetTips(
   }
   return branchMapping;
 }
+
+// ── Halt branches ──────────────────────────────────────────────────────
 
 /** Per-source-commit halt reason — surfaced to the CLI via mirrorHistory. */
 export interface HaltedBranch {
@@ -1223,6 +1181,9 @@ function markPropagatedHalt(
   }
   console.log(`  Skipping ${meta.short} (descended from halted ancestor).`);
 }
+
+
+// ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
  * Replay newCommits in topo order, mutating `shaMapping` so each replayed
@@ -1396,15 +1357,7 @@ export function mirrorHistory(opts: {
   const sourceCommits = collectSourceCommits(dc.source, branches);
   const relevantCommits = filterLoadBearingCommits(sourceCommits, autoIgnorePatterns, dc);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
-
-  // Drop candidates that no branch's tip-walk would resolve to (and aren't
-  // chain-needed by one that would). mapBranchesToTargetTips walks each branch
-  // newest-first and stops at the first mapped ancestor, so a candidate
-  // strictly older than every branch's anchor — and not on the parent chain
-  // of an anchoring candidate — would replay-then-orphan (e.g. Mt2'_fe in the
-  // scenario, where Ft2'_mono's skip-trailer halts the walk before Mt2).
-  const needed = collectNeededCandidates(dc.source.remote, branches, shaMapping, newCommits);
-  const usefulNewCommits = newCommits.filter(c => needed.has(c.hash));
+  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote);
 
   if (usefulNewCommits.length === 0) {
     return {
