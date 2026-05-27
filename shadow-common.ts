@@ -943,8 +943,8 @@ function resolveHaltAwareParents(
     }
     if (haltedSources.has(parentHash)) {
       const reason = haltReasons.get(parentHash);
-      if (reason && reason.mappedParents.length > 0) {
-        for (const mp of reason.mappedParents) pushUnique(mp);
+      if (reason && reason.anchorCommits.length > 0) {
+        for (const ac of reason.anchorCommits) pushUnique(ac);
         continue;
       }
     }
@@ -1140,7 +1140,7 @@ export interface HaltedBranch {
 }
 
 interface HaltReason {
-  mappedParents: string[];
+  anchorCommits: string[];
   diagnostic: string;
   commitShort: string;
 }
@@ -1162,11 +1162,7 @@ function isHaltPropagated(
 }
 
 /**
- * Record the commit as halted and inherit its halted ancestors' mappedParents.
- * A later descendant that escapes the halt (via a non-halted parent) can then
- * splice ALL the original halt-causer's mapped parents into its replay —
- * preventing findEchoAnchor non-determinism and keeping the previous shadow tip
- * in the parent set for FF push.
+ * Record the commit as halted and inherit its halted ancestors' halt reason.
  */
 function markPropagatedHalt(
   commit: TopoCommit,
@@ -1175,17 +1171,17 @@ function markPropagatedHalt(
   haltReasons: Map<string, HaltReason>,
 ): void {
   haltedSources.add(commit.hash);
-  const inheritedMP: string[] = [];
-  const seenMP = new Set<string>();
+  const inheritedAnchorCommits: string[] = [];
+  const seenAnchorCommits = new Set<string>();
   for (const p of commit.parents) {
     const reason = haltReasons.get(p);
     if (!reason) continue;
-    for (const mp of reason.mappedParents) {
-      if (!seenMP.has(mp)) { inheritedMP.push(mp); seenMP.add(mp); }
+    for (const ac of reason.anchorCommits) {
+      if (!seenAnchorCommits.has(ac)) { inheritedAnchorCommits.push(ac); seenAnchorCommits.add(ac); }
     }
   }
-  if (inheritedMP.length > 0) {
-    haltReasons.set(commit.hash, { mappedParents: inheritedMP, diagnostic: "", commitShort: meta.short });
+  if (inheritedAnchorCommits.length > 0) {
+    haltReasons.set(commit.hash, { anchorCommits: inheritedAnchorCommits, diagnostic: "", commitShort: meta.short });
   }
   console.log(`  Skipping ${meta.short} (descended from halted ancestor).`);
 }
@@ -1268,7 +1264,7 @@ function replayCommits(opts: {
           // this same call keep flowing.
           haltedSources.add(commit.hash);
           haltReasons.set(commit.hash, {
-            mappedParents,
+            anchorCommits: mappedParents,
             diagnostic: formatUnresolvableMergeError({ commit, meta, mappedParents, dc }),
             commitShort: meta.short,
           });
@@ -1402,7 +1398,7 @@ export function mirrorHistory(opts: {
       branch: inferSourceBranch(sha, dc.source.remote),
       commitSha: sha,
       commitShort: reason.commitShort,
-      mappedParents: reason.mappedParents,
+      mappedParents: reason.anchorCommits,
       diagnostic: reason.diagnostic,
     });
   }
