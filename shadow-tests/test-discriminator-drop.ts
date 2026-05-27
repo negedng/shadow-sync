@@ -1,39 +1,33 @@
 /**
  * Asserts that the discriminator drops TREESAME merges whose non-first
- * parents carry NO Shadow-replayed-* trailer, so they don't produce vacuous
- * synthetics on the shadow chain.
+ * parents contribute nothing kept in scope above their merge-base with the
+ * 1st parent — i.e. vacuous merges with no load-bearing side content.
  *
- * Note on rev-list: `--full-history` already drops merges TREESAME to
- * ALL parents (no "interesting" parent under the path filter). The cases
- * the discriminator removes ON TOP of --full-history are merges that are
- * TREESAME to SOME but not all parents AND lack a shadow trailer on any
- * non-first parent. The simplest such shape is a `-s ours` merge of a
- * feature branch that touched the path's slice: 1st parent wins the slice
- * (TS-1), 2nd parent has different content (non-TS-2), no trailer anywhere.
+ * Under the ancestry-based rule, a merge is droppable iff every non-first
+ * parent's `git rev-list Pi ^P1` set is empty of kept commits. The "kept"
+ * universe is itself path-filtered: commits whose effective tree at the
+ * synced path matches their 1st parent's drop out (and a side branch built
+ * entirely of such commits leaves no kept exclusive ancestor).
  *
- * Scenario:
- *   Bootstrap → Round 1 → --from b + --from a.
- *   Capture pre-SHA of backend.shadow/backend/main, the set of merge SHAs
- *   on mono.main BEFORE the operator merges.
+ * Two sub-cases here exercise that property:
  *
- *   Case "ours": mono creates `stale-feature` off main, adds +backend/stale.txt
- *     (modifies backend slice), switches back to main, runs
- *     `git merge --no-ff -s ours stale-feature` — takes main's backend slice.
- *     Result: TS-1 merge whose 2nd parent has its own backend content but no
- *     shadow trailer.
+ *   "did-then-undid" (was Case D-variant in older builds): mono creates
+ *     `stale-feature` off main, adds `+backend/stale.txt` (touches the
+ *     backend slice → kept), then merges with `-s ours` discarding the
+ *     change. The side branch holds a KEPT commit, so the merge is
+ *     load-bearing and IS replayed — even though the merge's tree at
+ *     backend/ equals the 1st parent's. The synthetic on the shadow chain
+ *     records "merged then discarded" and keeps the side-branch commit's
+ *     synthetic anchored.
  *
- *   Run --from a.
+ *   "frontend-only stale": mono creates `frontend-stale`, modifies only
+ *     `frontend/stale.txt`, switches back, adds another frontend change to
+ *     main, then `git merge --no-ff frontend-stale`. From the backend
+ *     pair's perspective, the side branch contributed nothing in scope —
+ *     all its commits drop on path filtering — so the merge is vacuous and
+ *     IS DROPPED.
  *
- * Assertion: NO commit on backend.shadow/backend/main carries
- * `Shadow-replayed-<monorepo>: <merge_sha>` for the -s ours merge. The
- * linear stale-feature commit (+backend/stale.txt) IS expected to be replayed
- * since it's non-TS; we just don't want the vacuous merge synthetic.
- *
- * Against current --full-history-only code: this test FAILS (the merge IS
- * replayed; trailer for it appears).
- * Against the discriminator: this test PASSES.
- *
- * Run: npx tsx local_tests/keep_drop_test/verify_no_vacuous_commits.ts
+ * Run: npx tsx shadow-tests/test-discriminator-drop.ts
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -119,7 +113,7 @@ async function main() {
     const preCount = parseInt(git("rev-list --count refs/heads/shadow/backend/main", backend.bare), 10);
     console.log(`  Pre-merge shadow tip: ${preSHA.slice(0,12)} (commit count: ${preCount})`);
 
-    banner("Case D-variant: TS-1, non-TS-2, no shadow trailer (-s ours merge)");
+    banner("did-then-undid: TS-1 -s ours merge, side branch HAS a kept commit (load-bearing)");
     git("checkout -b stale-feature", mono.working);
     commitFiles(mono, { "backend/stale.txt": "stale branch's backend work\n" }, "Mira: stale backend work");
     git("checkout main", mono.working);
@@ -158,24 +152,27 @@ async function main() {
       throw new Error("--from a halted unexpectedly");
     }
 
-    // Assertion: NEITHER merge appears as a Shadow-replayed-<monorepo>: trailer
-    // on the backend shadow chain.
+    // Assertions:
+    //   did-then-undid (mergeC): side branch had a backend-touching commit, so
+    //     the merge is load-bearing and SHOULD appear on the shadow chain.
+    //   frontend-only stale (mergeD): side branch contributed nothing in scope,
+    //     so the merge is vacuous and SHOULD NOT appear.
     const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
     const shadowCount = parseInt(git("rev-list --count refs/heads/shadow/backend/main", backend.bare), 10);
     console.log(`  Shadow chain commit count: ${shadowCount} (was ${preCount})`);
 
-    const checkMerge = (label: string, sha: string): boolean => {
+    const mergeHasSynthetic = (sha: string): boolean => {
       const re = new RegExp(`^Shadow-replayed-[^:]+:\\s*${sha}\\b`, "m");
-      const found = re.test(shadowLog);
-      console.log(`  ${label} (${sha.slice(0,12)}) appears on shadow chain: ${found ? "YES (vacuous)" : "no"}`);
-      return !found;
+      return re.test(shadowLog);
     };
-    const okC = checkMerge("Case D-variant", mergeC);
-    const okD = checkMerge("Case E       ", mergeD);
-    if (okC && okD) {
-      console.log("\n  ✓ PASS — no vacuous synthetic created for either dropped merge.");
+    const undidPresent = mergeHasSynthetic(mergeC);
+    const stalePresent = mergeHasSynthetic(mergeD);
+    console.log(`  did-then-undid (${mergeC.slice(0,12)}) appears on shadow chain: ${undidPresent ? "YES (expected — kept)" : "NO (regression)"}`);
+    console.log(`  frontend-only stale (${mergeD.slice(0,12)}) appears on shadow chain: ${stalePresent ? "YES (regression)" : "NO (expected — dropped)"}`);
+    if (undidPresent && !stalePresent) {
+      console.log("\n  ✓ PASS — did-then-undid kept; vacuous frontend-only merge dropped.");
     } else {
-      console.log("\n  ✘ FAIL — vacuous synthetic(s) created. Discriminator should drop both.");
+      console.log("\n  ✘ FAIL — assertion mismatch (see line above).");
       process.exit(1);
     }
   } finally {

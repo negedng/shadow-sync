@@ -226,13 +226,6 @@ function targetTrailerRegex(dc: DirectionConfig): RegExp {
 }
 
 
-// Direction-agnostic: matches replay trailers for this pair on either remote.
-function samePairTrailerRegex(pairName: string): RegExp {
-  return new RegExp(
-    `^${escapeRegex(REPLAYED_TRAILER)}-${escapeRegex(sanitizeTrailerToken(pairName))}-`, "m",
-  );
-}
-
 export function appendTrailer(message: string, trailer: string): string {
   const result = git(["interpret-trailers", "--trailer", trailer],
     { safe: true, input: message, raw: true });
@@ -415,19 +408,30 @@ function filterLoadBearingCommits(
   autoIgnorePatterns: RegExp[],
   dc: DirectionConfig,
 ): TopoCommit[] {
-  const samePairTrailerRe = samePairTrailerRegex(dc.pair.name);
-  return commits.filter(c => isLoadBearing(c, dc.source.dir, autoIgnorePatterns, samePairTrailerRe));
+  // commits arrive --topo-order --reverse (oldest first), so by the time we
+  // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
+  const keptSet = new Set<string>();
+  const kept: TopoCommit[] = [];
+  for (const c of commits) {
+    if (isLoadBearing(c, dc.source.dir, autoIgnorePatterns, keptSet)) {
+      keptSet.add(c.hash);
+      kept.push(c);
+    }
+  }
+  return kept;
 }
 
 /**
- * Source-side discriminator: drop iff effective tree at sourceDir/ matches
- * the 1st parent's AND no non-first parent carries this pair's trailer.
+ * Drop iff the commit's effective tree at sourceDir/ matches the 1st parent's
+ * AND (for merges) every non-first parent's exclusive ancestry above its
+ * merge-base with the 1st parent is empty of kept commits. P1 is the trunk;
+ * any Pi (i>=1) contributing a kept commit anchors the merge.
  */
 function isLoadBearing(
   c: TopoCommit,
   sourceDir: string,
   autoIgnorePatterns: RegExp[],
-  samePairTrailerRe: RegExp,
+  keptSet: Set<string>,
 ): boolean {
   if (c.parents.length === 0) return true;
 
@@ -440,9 +444,24 @@ function isLoadBearing(
   const tree1st = effectiveSourceTree(c.parents[0], sourceDir, effectiveIgnore);
   if (tree1st !== commitTree) return true;
 
+  if (c.parents.length === 1) return false;
+
+  const p1 = c.parents[0];
   for (let i = 1; i < c.parents.length; i++) {
-    const meta = getCommitMeta(c.parents[i]);
-    if (samePairTrailerRe.test(meta.trailers)) return true;
+    if (hasKeptExclusiveAncestor(c.parents[i], p1, keptSet)) return true;
+  }
+  return false;
+}
+
+// Returns true iff `git rev-list pi ^p1` contains any commit in keptSet —
+// i.e., Pi contributes at least one kept commit not already reachable from P1.
+function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>): boolean {
+  if (keptSet.size === 0) return false;
+  const result = git(["rev-list", pi, `^${p1}`], { safe: true });
+  if (!result.ok) return false;
+  for (const line of result.stdout.split("\n")) {
+    const h = line.trim();
+    if (h && keptSet.has(h)) return true;
   }
   return false;
 }

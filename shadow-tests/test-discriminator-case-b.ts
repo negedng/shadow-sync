@@ -1,25 +1,25 @@
 /**
- * Regression test for the Case B (§3.2) in full_history_explained.html:
- * confirms the discriminator keeps a TS-1st merge whose 2nd parent is on
- * this pair's echo chain (Shadow-replayed-<backend> trailer).
+ * Regression test for Case B (§3 in full_history_explained.html): confirms
+ * the discriminator keeps a TS-1st merge whose 2nd parent lives on this
+ * pair's own shadow chain and contributes a kept commit above the
+ * merge-base with the 1st parent.
  *
- * Mirror image of verify_mp_c6.ts: same shape (mono operator merges
- * shadow/backend/main), but Mira resolves the conflict by KEEPING MONO'S
- * version (-X ours). The resulting Mira_merge is TREESAME-1st but its 2nd
- * parent carries a same-pair Shadow-replayed-* trailer — the property the
- * discriminator uses to identify load-bearing merges.
+ * Mirror image of test-discriminator-case-a.ts: same shape (mono operator
+ * merges shadow/backend/main), but Mira resolves the conflict by KEEPING
+ * MONO'S version (-X ours). The resulting Mira_merge is TREESAME under
+ * backend/ to its 1st parent — and yet must be kept, because the 2nd
+ * parent (B1'_mono on the shadow chain) is a kept exclusive ancestor that
+ * anchors cross-repo state into the target chain.
  *
- * Historical note: this scenario was originally constructed to demonstrate
- * the §3.2 counterexample to "drop iff TREESAME-to-1st-parent." Under the
- * implemented discriminator (which keys on trailer presence rather than
- * parent position), the merge is correctly kept, the follow-up
- * +backend/foo.txt commit replays onto a proper shadow synthetic, and no
- * halt occurs.
+ * Why the ancestry rule keeps it: with parents (mira1, B1'_mono),
+ * `git rev-list B1'_mono ^mira1` contains B1'_mono itself — a kept commit
+ * (the bea1.txt copy under backend/). One kept non-first-parent-exclusive
+ * commit is enough; the merge stays.
  *
  * Expected: --from a exits 0; backend.shadow/backend/main contains a
  * synthetic carrying Shadow-replayed-<mono-remote>: <Mira_merge_sha>.
  *
- * Run: npx tsx local_tests/keep_drop_test/verify_ts1_variant.ts
+ * Run: npx tsx shadow-tests/test-discriminator-case-b.ts
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
