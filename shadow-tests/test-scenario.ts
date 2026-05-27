@@ -1819,12 +1819,158 @@ async function runSht7(): Promise<void> {
     }
   }
 
+  // Bm is an octopus that directly merges two shadow refs (shadow/backend/core-dev
+  // + shadow/backend/project) into core-dev. Both shadow-tip parents carry the
+  // target-side echo trailer. Their mapped M-side targets (Mc and Mp) have
+  // divergent outer state (frontend.txt). Engine must halt rather than silently
+  // pick one echo's outer.
+  function setupMultiEchoHalt(envName: string): { env: TestEnv; bm: string; mc: string; mp: string } {
+    const env = createTestEnv(envName, "backend");
+    git("branch -m main core-dev", env.localRepo);
+    git("branch -m main core-dev", env.remoteWorking);
+
+    setBranchFiltersForTesting(new Map([
+      ["origin", [compileIgnorePattern("core-dev"), compileIgnorePattern("project")]],
+      ["team",   [compileIgnorePattern("core-dev"), compileIgnorePattern("project")]],
+    ]));
+
+    // BE: Bc1 on core-dev; Bp1 on project (off the same Bc1 root).
+    writeFile(env.remoteWorking, "api.ts", "v_be_initial\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bc1"', env.remoteWorking);
+    git("push origin core-dev", env.remoteWorking);
+
+    git("checkout -b project core-dev", env.remoteWorking);
+    writeFile(env.remoteWorking, "extra.ts", "v_be_project\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bp1"', env.remoteWorking);
+    git("push origin project", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+
+    const r1 = runCiSync(env);
+    if (r1.status !== 0) throw new Error(`bootstrap --from b failed: ${r1.stderr}`);
+
+    // Mc on core-dev, Mp on project. Disjoint inner files so the BE-side
+    // octopus auto-resolves; divergent outer (frontend.txt) so the M-side
+    // mapped echo targets disagree.
+    git("checkout core-dev", env.localRepo);
+    writeFile(env.localRepo, "backend/notes.txt", "Mc notes\n");
+    writeFile(env.localRepo, "frontend.txt", "v_fe_core\n");
+    git("add -A", env.localRepo);
+    git('commit -m "Mc"', env.localRepo);
+    const mc = gitOut("rev-parse HEAD", env.localRepo);
+
+    git("checkout -b project core-dev~1", env.localRepo);
+    writeFile(env.localRepo, "backend/feat.ts", "Mp feat\n");
+    writeFile(env.localRepo, "frontend.txt", "v_fe_project\n");
+    git("add -A", env.localRepo);
+    git('commit -m "Mp"', env.localRepo);
+    const mp = gitOut("rev-parse HEAD", env.localRepo);
+    git("checkout core-dev", env.localRepo);
+
+    const r2 = runPush(env);
+    if (r2.status !== 0) throw new Error(`--from a failed: ${r2.stderr}`);
+
+    git("checkout core-dev", env.remoteWorking);
+    git("fetch origin --prune", env.remoteWorking);
+    git('merge --no-ff origin/shadow/backend/core-dev origin/shadow/backend/project -m "Bm (multi-echo octopus)"', env.remoteWorking);
+    const bm = gitOut("rev-parse HEAD", env.remoteWorking);
+    git("push origin core-dev", env.remoteWorking);
+
+    const r3 = runCiSync(env);
+    if (r3.status === 0) throw new Error("expected --from b to halt on multi-echo octopus; it succeeded");
+
+    return { env, bm, mc, mp };
+  }
+
+  function runMultiEchoOctopusHalts(): void {
+    const { env, bm } = setupMultiEchoHalt("multi-echo-halts");
+    try {
+      // Precondition: Bm is a 3-parent octopus whose parents 2 and 3 carry the echo trailer.
+      const bmParents = gitOut(`log -1 --format=%P ${bm}`, env.remoteWorking).split(/\s+/).filter(Boolean);
+      assertEqual(bmParents.length, 3, `Bm should be a 3-parent octopus; got ${bmParents.length}`);
+      for (const p of [bmParents[1], bmParents[2]]) {
+        const trailers = gitOut(`log -1 --format=%(trailers:only) ${p}`, env.remoteWorking);
+        assert(trailers.includes("Shadow-replayed-backend-origin:"),
+          `parent ${p.slice(0, 7)} missing echo trailer:\n${trailers}`);
+      }
+
+      // Re-run --from b: halt must persist with a diagnostic that names the source merge.
+      const r = runCiSync(env);
+      assert(r.status !== 0, "halt must persist on re-run");
+      const out = r.stdout + r.stderr;
+      assert(/cannot auto-resolve replay parent tree/.test(out),
+        `expected halt diagnostic, got:\n${out}`);
+      assert(out.includes(bm), `diagnostic should name source octopus ${bm}`);
+    } finally {
+      env.cleanup();
+    }
+  }
+
+  function runMultiEchoOctopusRecovery(): void {
+    const { env, bm } = setupMultiEchoHalt("multi-echo-recovery");
+    try {
+      // Operator: merge project into core-dev on mono, resolving the frontend.txt conflict.
+      git("checkout core-dev", env.localRepo);
+      try {
+        git('merge --no-ff project -m "Mm (resolve multi-echo)"', env.localRepo);
+      } catch {
+        writeFile(env.localRepo, "frontend.txt", "v_fe_merged\n");
+        git("add -A", env.localRepo);
+        git('commit --no-edit', env.localRepo);
+      }
+      git("push origin core-dev", env.localRepo);
+
+      // --from a propagates Mm onto team's shadow/backend/core-dev.
+      const rA = runPush(env);
+      assertEqual(rA.status, 0, `--from a propagation: ${rA.stderr}`);
+
+      // Backend operator merges shadow back into core-dev → R_be.
+      git("fetch origin --prune", env.remoteWorking);
+      git("checkout core-dev", env.remoteWorking);
+      try {
+        git('merge --no-ff origin/shadow/backend/core-dev -m "R_be (catch-up after multi-echo)"', env.remoteWorking);
+      } catch {
+        git("add -A", env.remoteWorking);
+        git('commit --no-edit', env.remoteWorking);
+      }
+      git("push origin core-dev", env.remoteWorking);
+      const rbe = gitOut("rev-parse HEAD", env.remoteWorking);
+
+      // --from b: succeeds, absorbing the halted Bm into the new shadow commit.
+      const rB = runCiSync(env);
+      assertEqual(rB.status, 0, `--from b after multi-echo recovery: ${rB.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
+
+      // Squashed shadow commit must carry trailers for BOTH R_be (its own) and Bm (absorbed halt).
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
+        `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
+      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${bm}`),
+        `sq missing absorbed Bm trailer for ${bm}\n${sqMsg}`);
+
+      // Tree content: api.ts (from Bc1) + notes.txt (from Mc) + feat.ts (from Mp).
+      assertEqual(gitOut(`show ${sqHash}:backend/api.ts`, env.localRepo), "v_be_initial",
+        "api.ts present in absorbed shadow tip");
+      assertEqual(gitOut(`show ${sqHash}:backend/notes.txt`, env.localRepo), "Mc notes",
+        "notes.txt (Mc inner) present in absorbed shadow tip");
+      assertEqual(gitOut(`show ${sqHash}:backend/feat.ts`, env.localRepo), "Mp feat",
+        "feat.ts (Mp inner) present in absorbed shadow tip");
+    } finally {
+      env.cleanup();
+    }
+  }
+
   const subs: Array<[string, () => void]> = [
     ["happy-round-trip", runHappyRoundTrip],
     ["idempotent-rerun", runIdempotentRerun],
     ["halt-persistence", runHaltPersistence],
     ["approach-a-still-works", runApproachAStillWorks],
     ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
+    ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
+    ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
   ];
   let failed = 0;
   try {

@@ -785,7 +785,9 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
  * Cross-repo merge: splice the shadow chain's target.dir/ over the echo'd
  * parent's outer files, so checking out an old shadow commit reflects the
  * target's outer state then — not a frozen bootstrap snapshot. Returns null
- * to fall back to the plain first-parent tree.
+ * when there's no clean composition (no echo'd parents, or multi-echo with
+ * divergent outer slices) — caller falls through to mergeMappedParentTrees,
+ * which halts on divergence.
  *
  * Round-trip exception: if the echo target is itself in mappedParents (the
  * operator's resolution merge `Mm` was spliced in via resolveHaltAwareParents
@@ -793,6 +795,11 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
  * is the CURRENT commit's source-side tree — that's the operator's resolved
  * inner including any backend-only intermediate work (e.g. files added between
  * the halt and the round-trip). Splice that into Mm's outer.
+ *
+ * Multi-echo case: source merge whose multiple direct parents are echoes
+ * (e.g. octopus that merges two shadow refs at once). If their outers agree,
+ * fall through to the single-echo logic; otherwise bail so the downstream
+ * halt fires.
  */
 function composeCrossRepoMergeTree(opts: {
   commit: TopoCommit;
@@ -804,19 +811,23 @@ function composeCrossRepoMergeTree(opts: {
   if (!dc.target.dir || mappedParents.length === 0) return null;
 
   const skipKey = targetTrailerKey(dc);
-  let echoTargetSHA: string | null = null;
+  const echoTargets: string[] = [];
   for (const sourceParent of commit.parents) {
     const parentMeta = getCommitMeta(sourceParent);
     if (hasTrailer(parentMeta.trailers, skipKey)) {
       const mapped = shaMapping.get(sourceParent);
-      if (mapped) {
-        echoTargetSHA = mapped;
-        break;
-      }
+      if (mapped) echoTargets.push(mapped);
     }
   }
-  if (!echoTargetSHA) return null;
+  if (echoTargets.length === 0) return null;
 
+  if (echoTargets.length > 1) {
+    const outers = echoTargets.map(t => outerOnlyTree(t, dc.target.dir));
+    if (!outers.every(o => o === outers[0])) return null;
+    // Outers agree — fall through to the single-echo logic with echoTargets[0].
+  }
+
+  const echoTargetSHA = echoTargets[0];
   const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
   if (!echoTreeRes.ok) return null;
 
