@@ -516,7 +516,7 @@ function dropOrphanedCommits(
   const kept = new Set<string>();
 
   for (const branch of branches) {
-    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
+    const log = git(["rev-list", "--first-parent", `${remote}/${branch}`], { safe: true });
     if (!log.ok) fail(`rev-list ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
     for (const line of log.stdout.split("\n")) {
       const hash = line.trim();
@@ -1026,7 +1026,7 @@ function mapBranchesToTargetTips(
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
-    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
+    const log = git(["rev-list", "--first-parent", `${remote}/${branch}`], { safe: true });
     if (!log.ok) {
       fail(`Failed to list commits for ${remote}/${branch}: ${log.stderr}`);
     }

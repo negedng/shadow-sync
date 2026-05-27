@@ -2074,12 +2074,7 @@ async function runSht7(): Promise<void> {
     ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
     ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
     ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
-    // ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
-    // ^ disabled: reproduces a known bug where mapBranchesToTargetTips picks
-    // the wrong-branch ancestor after a halt because `--topo-order` enumeration
-    // is non-deterministic on sibling ordering. The principled fix is upstream
-    // in isLoadBearing (so the right commit lives on first-parent line) —
-    // tracked in memory: project_map_branches_to_target_tips_topo_brittle.
+    ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
   ];
   let failed = 0;
   try {
