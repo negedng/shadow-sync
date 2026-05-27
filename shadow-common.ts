@@ -582,18 +582,22 @@ function dropOrphanedCommits(
     }
   }
 
+  const visited = new Set<string>();
   const stack = Array.from(kept);
   while (stack.length) {
     const hash = stack.pop()!;
+    if (visited.has(hash)) continue;
+    visited.add(hash);
     const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
     if (!parentsRes.ok) fail(`log -1 --format=%P ${hash} failed: ${parentsRes.stderr}`);
     if (!parentsRes.stdout) continue; // root commit — no parents to chase
     for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
-      if (shaMapping.has(p)) continue;
-      if (newSet.has(p) && !kept.has(p)) {
-        kept.add(p);
-        stack.push(p);
-      }
+      if (shaMapping.has(p) || visited.has(p)) continue;
+      if (newSet.has(p) && !kept.has(p)) kept.add(p);
+      // Walk through even when p isn't in newSet — passthrough commits
+      // (non-mapped, non-path-touching) can sit between a kept merge and
+      // a deeper kept ancestor on a non-first-parent edge.
+      stack.push(p);
     }
   }
 
