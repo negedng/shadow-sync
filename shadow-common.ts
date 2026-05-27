@@ -29,6 +29,18 @@ interface ShadowSyncConfig {
   shadowBranchPrefix: string;
 }
 
+interface DirectionConfig {
+  pair: SyncPair;
+  source: RepoEndpoint;
+  target: RepoEndpoint;
+}
+
+function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig {
+  const source = from === "a" ? pair.a : pair.b;
+  const target = from === "a" ? pair.b : pair.a;
+  return { pair, source, target };
+}
+
 const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-config.json");
 
 function loadConfig(): ShadowSyncConfig {
@@ -41,6 +53,7 @@ function loadConfig(): ShadowSyncConfig {
       shadowBranchPrefix: "shadow",
     };
   }
+
   const raw = fs.readFileSync(CONFIG_PATH, "utf8");
   const doc = JSON.parse(raw) as Record<string, unknown>;
 
@@ -123,7 +136,7 @@ export function git(args: string[], opts?: GitOpts & { safe?: boolean }): string
       stdout: trim(r.stdout ?? ""),
       stderr: (r.stderr ?? "").trim(),
       status: r.status ?? 1,
-      ok:     r.status === 0,
+      ok: r.status === 0,
     };
   }
 
@@ -192,10 +205,26 @@ function replayedTrailerKey(pairName: string, remote: string): string {
   return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(`${pairName}-${remote}`)}`;
 }
 
+// This direction WRITES this trailer onto target commits: source→target SHA mapping.
+function sourceTrailerKey(dc: DirectionConfig): string {
+  return replayedTrailerKey(dc.pair.name, dc.source.remote);
+}
+
+// The opposite direction's trailer. Encountering it on a source commit means it's
+// an echo of something this pair already replayed back from the target side.
+function targetTrailerKey(dc: DirectionConfig): string {
+  return replayedTrailerKey(dc.pair.name, dc.target.remote);
+}
+
 /** Build a regex to match replay trailers: Shadow-replayed-{pair}-{remote}: {hash} */
 function replayedTrailerRegex(pairName: string, remote: string): RegExp {
   return new RegExp(`^${escapeRegex(replayedTrailerKey(pairName, remote))}:\\s*([0-9a-f]{7,40})`);
 }
+
+function targetTrailerRegex(dc: DirectionConfig): RegExp {
+  return replayedTrailerRegex(dc.pair.name, dc.target.remote);
+}
+
 
 // Direction-agnostic: matches replay trailers for this pair on either remote.
 function samePairTrailerRegex(pairName: string): RegExp {
@@ -245,34 +274,6 @@ function extractTrailerMapping(logArgs: string[], trailerKey: string): Map<strin
     }
   }
   return mapping;
-}
-
-/** Trailer keys/regexes resolved for one replay direction. */
-interface DirectionConfig {
-  pair: SyncPair;
-  source: RepoEndpoint;
-  target: RepoEndpoint;
-}
-
-function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig {
-  const source = from === "a" ? pair.a : pair.b;
-  const target = from === "a" ? pair.b : pair.a;
-  return { pair, source, target };
-}
-
-// This direction WRITES this trailer onto target commits: source→target SHA mapping.
-function sourceTrailerKey(dc: DirectionConfig): string {
-  return replayedTrailerKey(dc.pair.name, dc.source.remote);
-}
-
-// The opposite direction's trailer. Encountering it on a source commit means it's
-// an echo of something this pair already replayed back from the target side.
-function targetTrailerKey(dc: DirectionConfig): string {
-  return replayedTrailerKey(dc.pair.name, dc.target.remote);
-}
-
-function targetTrailerRegex(dc: DirectionConfig): RegExp {
-  return replayedTrailerRegex(dc.pair.name, dc.target.remote);
 }
 
 // ── Preflight checks ──────────────────────────────────────────────────────────
@@ -337,6 +338,11 @@ interface CommitMeta {
   short: string;
 }
 
+interface TopoCommit {
+  hash: string;
+  parents: string[];
+}
+
 function getCommitMeta(hash: string): CommitMeta {
   // NUL-separated; %B last so its newlines can't shift fields.
   const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%h: %s", "%(trailers:only,unfold=true)", "%B"]
@@ -368,11 +374,6 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
   };
 }
 
-interface TopoCommit {
-  hash: string;
-  parents: string[];
-}
-
 /**
  * `--no-walk` bypasses path-filter simplification, which would silently drop
  * merge parents TREESAME at the path. Chunked for argv limits.
@@ -395,46 +396,27 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-// Build a tree SHA for `hash`'s source-side content under `sourceDir/`, with
-// paths matching `ignorePatterns` stripped out. The result is the tree that
-// would actually flow to the target if this commit's diff were replayed —
-// without it, a commit whose only changes are ignored produces a "ghost" tree
-// that differs at the source but is identical post-filter.
-function effectiveSourceTree(
-  hash: string,
-  sourceDir: string,
-  ignorePatterns: RegExp[],
-): string {
-  const treeRef = sourceDir ? `${hash}:${sourceDir}` : `${hash}^{tree}`;
-  return withTmpIndex("effective", idxEnv => {
-    const readRes = git(["read-tree", treeRef], { env: idxEnv, safe: true });
-    if (!readRes.ok) return "";
-    if (ignorePatterns.length === 0) return git(["write-tree"], { env: idxEnv });
-    const ls = git(["ls-files"], { env: idxEnv, safe: true });
-    if (ls.ok && ls.stdout) {
-      const toRemove = ls.stdout.split("\n").filter(Boolean)
-        .filter(p => ignorePatterns.some(re => re.test(p)));
-      if (toRemove.length > 0) {
-        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
-      }
-    }
-    return git(["write-tree"], { env: idxEnv });
-  });
+function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+  // --full-history surfaces all merges in the path-filtered reachable set;
+  // filterLoadBearingCommits drops the non-load-bearing ones afterward.
+  const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
+    ...branches.map(b => `${source.remote}/${b}`)];
+  if (source.dir) args.push("--", `${source.dir}/`);
+  const result = git(args, { safe: true });
+  if (!result.ok) fail(`rev-list failed (${args.join(" ")}): ${result.stderr}`);
+  if (!result.stdout) return [];
+  const hashes = result.stdout.split("\n").filter(Boolean);
+  const parentsMap = fetchTrueParents(hashes);
+  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
-// Merge auto-ignore patterns with the .shadowignore file read at this commit's
-// snapshot (file content can change as source history evolves).
-function readShadowIgnorePatterns(
-  commitHash: string,
-  sourceDir: string,
+function filterLoadBearingCommits(
+  commits: TopoCommit[],
   autoIgnorePatterns: RegExp[],
-): RegExp[] {
-  const ignorePath = sourceDir ? `${sourceDir}/.shadowignore` : ".shadowignore";
-  const ignoreContent = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
-  const filePatterns = ignoreContent.ok && ignoreContent.stdout
-    ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
-    : [];
-  return [...autoIgnorePatterns, ...filePatterns];
+  dc: DirectionConfig,
+): TopoCommit[] {
+  const samePairTrailerRe = samePairTrailerRegex(dc.pair.name);
+  return commits.filter(c => isLoadBearing(c, dc.source.dir, autoIgnorePatterns, samePairTrailerRe));
 }
 
 /**
@@ -465,30 +447,112 @@ function isLoadBearing(
   return false;
 }
 
-function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
-  // --full-history surfaces all merges in the path-filtered reachable set;
-  // filterLoadBearingCommits drops the non-load-bearing ones afterward.
-  const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
-    ...branches.map(b => `${source.remote}/${b}`)];
-  if (source.dir) args.push("--", `${source.dir}/`);
-  const result = git(args, { safe: true });
-  if (!result.ok) fail(`rev-list failed (${args.join(" ")}): ${result.stderr}`);
-  if (!result.stdout) return [];
-  const hashes = result.stdout.split("\n").filter(Boolean);
-  const parentsMap = fetchTrueParents(hashes);
-  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
-}
 
-function filterLoadBearingCommits(
-  commits: TopoCommit[],
-  autoIgnorePatterns: RegExp[],
+/**
+ * Drop already-replayed, echoed and foreign commits. Echoes get echo→original
+ * recorded in shaMapping so parent resolution reuses the real target SHA
+ * rather than re-replaying or falling back to the branch tip.
+ * Cross-pair shadow commits are skipped - we don't want frontend branches on backend
+ * Their change is flattened to the next monorepo merge with diff from mono ancestor.
+ */
+function filterNotReplayedCommits(
+  allCommits: TopoCommit[],
+  shaMapping: Map<string, string>,
   dc: DirectionConfig,
 ): TopoCommit[] {
-  const samePairTrailerRe = samePairTrailerRegex(dc.pair.name);
-  return commits.filter(c => isLoadBearing(c, dc.source.dir, autoIgnorePatterns, samePairTrailerRe));
+  const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
+  const skipKey = targetTrailerKey(dc);
+  const skipRe = targetTrailerRegex(dc);
+  return allCommits.filter(c => {
+    if (shaMapping.has(c.hash)) return false;
+    const meta = getCommitMeta(c.hash);
+    if (hasTrailer(meta.trailers, skipKey)) {
+      const match = meta.trailers.split("\n")
+        .map(l => l.match(skipRe))
+        .find(m => m);
+      if (match && refExists(match[1])) {
+        shaMapping.set(c.hash, match[1]);
+      }
+      return false;
+    }
+    if (crossPairTrailerRe.test(meta.trailers)) return false;
+    return true;
+  });
 }
 
-// ── Tree composition & parent resolution ──────────────────────────────────────
+/**
+ * Drops candidates whose replay would orphan: pass 1 walks each branch
+ * topo-order newest-first stopping at the first mapped ancestor (mirroring
+ * mapBranchesToTargetTips) — anything seen anchors a tip; pass 2 pulls in
+ * unmapped candidate parents of kept commits so resolveTargetParents won't
+ * fall back to findEchoAnchor with a different topology.
+ */
+function dropOrphanedCommits(
+  newCommits: TopoCommit[],
+  branches: string[],
+  shaMapping: Map<string, string>,
+  remote: string,
+): TopoCommit[] {
+  const newSet = new Set(newCommits.map(c => c.hash));
+  const kept = new Set<string>();
+
+  for (const branch of branches) {
+    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
+    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
+    for (const line of log.stdout.split("\n")) {
+      const hash = line.trim();
+      if (!hash) continue;
+      if (shaMapping.has(hash)) break;
+      if (newSet.has(hash)) kept.add(hash);
+    }
+  }
+
+  const stack = Array.from(kept);
+  while (stack.length) {
+    const hash = stack.pop()!;
+    const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
+    if (!parentsRes.ok) fail(`log -1 --format=%P ${hash} failed: ${parentsRes.stderr}`);
+    if (!parentsRes.stdout) continue; // root commit — no parents to chase
+    for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
+      if (shaMapping.has(p)) continue;
+      if (newSet.has(p) && !kept.has(p)) {
+        kept.add(p);
+        stack.push(p);
+      }
+    }
+  }
+
+  return newCommits.filter(c => kept.has(c.hash));
+}
+
+// ── Ignore patterns ──────────────────────────────────────────────
+
+// Merge auto-ignore patterns with the .shadowignore file read at this commit's
+// snapshot (file content can change as source history evolves).
+function readShadowIgnorePatterns(
+  commitHash: string,
+  sourceDir: string,
+  autoIgnorePatterns: RegExp[],
+): RegExp[] {
+  const ignorePath = sourceDir ? `${sourceDir}/.shadowignore` : ".shadowignore";
+  const ignoreContent = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
+  const filePatterns = ignoreContent.ok && ignoreContent.stdout
+    ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
+    : [];
+  return [...autoIgnorePatterns, ...filePatterns];
+}
+
+/** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
+export function compileIgnorePattern(pattern: string): RegExp {
+  const regex = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
+    .replace(/\*\*/g, "<<GLOBSTAR>>")
+    .replace(/\*/g, "[^/]*")
+    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
+    .replace(/<<GLOBSTAR>>/g, ".*");
+  return new RegExp(`^${regex}$`);
+}
 
 /**
  * Derive ignore patterns for paths owned by another pair nested inside this
@@ -531,18 +595,6 @@ function computeAutoIgnorePatterns(
   return { patterns, reasons };
 }
 
-/** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
-export function compileIgnorePattern(pattern: string): RegExp {
-  const regex = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
-    .replace(/\*\*/g, "<<GLOBSTAR>>")
-    .replace(/\*/g, "[^/]*")
-    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
-    .replace(/<<GLOBSTAR>>/g, ".*");
-  return new RegExp(`^${regex}$`);
-}
-
 // ── Branch filters ────────────────────────────────────────────────────────────
 
 interface BranchFilterDoc { filters?: Record<string, string[]>; }
@@ -579,6 +631,35 @@ export function filterBranchesForRemote(remote: string, branches: string[]): str
 /** Test hook — installs an in-memory filter map. `null` resets to empty (zero branches). */
 export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): void {
   _branchFilters = map ?? new Map();
+}
+
+// ── Tree composition ──────────────────────────────────────────────
+
+// Build a tree SHA for `hash`'s source-side content under `sourceDir/`, with
+// paths matching `ignorePatterns` stripped out. The result is the tree that
+// would actually flow to the target if this commit's diff were replayed —
+// without it, a commit whose only changes are ignored produces a "ghost" tree
+// that differs at the source but is identical post-filter.
+function effectiveSourceTree(
+  hash: string,
+  sourceDir: string,
+  ignorePatterns: RegExp[],
+): string {
+  const treeRef = sourceDir ? `${hash}:${sourceDir}` : `${hash}^{tree}`;
+  return withTmpIndex("effective", idxEnv => {
+    const readRes = git(["read-tree", treeRef], { env: idxEnv, safe: true });
+    if (!readRes.ok) return "";
+    if (ignorePatterns.length === 0) return git(["write-tree"], { env: idxEnv });
+    const ls = git(["ls-files"], { env: idxEnv, safe: true });
+    if (ls.ok && ls.stdout) {
+      const toRemove = ls.stdout.split("\n").filter(Boolean)
+        .filter(p => ignorePatterns.some(re => re.test(p)));
+      if (toRemove.length > 0) {
+        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
+      }
+    }
+    return git(["write-tree"], { env: idxEnv });
+  });
 }
 
 /**
@@ -816,100 +897,8 @@ function mergeMappedParentTrees(opts: {
   return null;
 }
 
-/**
- * Return the bare branch name on `sourceRemote` containing `commitHash` if
- * unambiguous, else null. Used to point error messages at the right shadow ref.
- */
-function inferSourceBranch(commitHash: string, sourceRemote: string): string | null {
-  const res = git(
-    ["for-each-ref", "--format=%(refname:short)", "--contains", commitHash, `refs/remotes/${sourceRemote}/`],
-    { safe: true },
-  );
-  if (!res.ok || !res.stdout) return null;
-  const matches = res.stdout.split("\n")
-    .map(l => l.trim())
-    .filter(Boolean)
-    .map(r => r.startsWith(`${sourceRemote}/`) ? r.slice(sourceRemote.length + 1) : r)
-    .filter(b => b && b !== "HEAD");
-  return matches.length === 1 ? matches[0] : null;
-}
+// ── Ancestry resolution ──────────────────────────────────────────────────────
 
-/**
- * Build the actionable error printed when mergeMappedParentTrees gives up.
- * The operator's escape: hand-write a target-side commit whose parents are the
- * divergent mapped parents and whose message carries the source→target trailer.
- * `loadReplayedMappings` will pick that up on the next run and treat the source
- * merge as already replayed, so the sync proceeds without re-attempting this.
- */
-function formatUnresolvableMergeError(opts: {
-  commit: TopoCommit;
-  meta: CommitMeta;
-  mappedParents: string[];
-  dc: DirectionConfig;
-}): string {
-  const { commit, meta, mappedParents, dc } = opts;
-  const { source, target, pair } = dc;
-  const branchHint = inferSourceBranch(commit.hash, source.remote);
-  const reason = mappedParents.length === 2
-    ? `merge-tree conflict between mapped parents on ${target.remote}`
-    : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`;
-  const outerNote =
-    `Mapped parents disagree on outer state (files outside ${target.dir}/). ` +
-    `The source commit cannot have resolved this — outer files don't exist on ${source.remote}.`;
-  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
-  const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
-  const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
-  const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
-
-  const shortHash = commit.hash.slice(0, 7);
-  const branchLabel = branchHint ?? "<source-branch>";
-  return [
-    `${meta.short}: cannot auto-resolve replay parent tree — branch halted.`,
-    ``,
-    `  Source merge:   ${commit.hash}  (${meta.short})`,
-    `  Failure:        ${reason}`,
-    `  Mapped parents on ${target.remote}:`,
-    ppLines,
-    ``,
-    `  ${outerNote}`,
-    ``,
-    `Recovery — choose ONE:`,
-    ``,
-    `  (Recommended) Round-trip + squash.`,
-    `    1. Resolve the merge on ${target.remote}'s working branch as you would`,
-    `       normally — e.g. \`git checkout ${branchLabel} && git merge --no-ff <from-branch>\`,`,
-    `       resolve conflicts, commit (call this Mm), and push.`,
-    `    2. Run shadow-sync in the other direction so Mm is replayed onto`,
-    `       ${source.remote}'s shadow ref (\`shadow/${pair.name}/${branchLabel}\`).`,
-    `    3. On ${source.remote}, merge that shadow ref into the working branch`,
-    `       (\`git merge origin/shadow/${pair.name}/${branchLabel}\`) and push.`,
-    `    4. Re-run this sync. The engine absorbs ${meta.short} (and any`,
-    `       descendants halted with it) into the resulting merge's replay`,
-    `       automatically — no flags needed.`,
-    ``,
-    `  (Alternative) Hand-built resolution on the shadow ref. Create a commit`,
-    `  on ${shadowRef} that`,
-    `    - has the divergent mapped parents above as its git parents`,
-    `    - has a tree you choose (the resolved outer state + the merged inner state)`,
-    `    - includes this trailer in its message body (exact text):`,
-    ``,
-    `        ${trailer}`,
-    ``,
-    `  On the next sync run, ${meta.short} will be picked up via that trailer and skipped.`,
-    ``,
-    `  Suggested commands (run in this repo, with ${target.remote} fetched):`,
-    `    git checkout -b manual-resolve-${shortHash} ${mappedParents[0]}`,
-    `    git merge --no-ff ${mappedParents.slice(1).join(" ")}`,
-    `    # resolve conflicts, stage the result, then:`,
-    `    tree=$(git write-tree)`,
-    `    new=$(git commit-tree $tree ${parentArgs} \\`,
-    `        -m "Manual resolution of ${shortHash}" \\`,
-    `        -m "${trailer}")`,
-    `    git update-ref ${shadowRef} $new`,
-    `    git push ${target.remote} ${shadowRef.replace(/^refs\/heads\//, "")}`,
-    `  Then re-run shadow-sync.`,
-  ].join("\n");
-}
 
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
 function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
@@ -1014,83 +1003,6 @@ function loadReplayedMappings(opts: {
 }
 
 /**
- * Drop already-replayed, echoed and foreign commits. Echoes get echo→original
- * recorded in shaMapping so parent resolution reuses the real target SHA
- * rather than re-replaying or falling back to the branch tip.
- * Cross-pair shadow commits are skipped - we don't want frontend branches on backend
- * Their change is flattened to the next monorepo merge with diff from mono ancestor.
- */
-function filterNotReplayedCommits(
-  allCommits: TopoCommit[],
-  shaMapping: Map<string, string>,
-  dc: DirectionConfig,
-): TopoCommit[] {
-  const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
-  const skipKey = targetTrailerKey(dc);
-  const skipRe = targetTrailerRegex(dc);
-  return allCommits.filter(c => {
-    if (shaMapping.has(c.hash)) return false;
-    const meta = getCommitMeta(c.hash);
-    if (hasTrailer(meta.trailers, skipKey)) {
-      const match = meta.trailers.split("\n")
-        .map(l => l.match(skipRe))
-        .find(m => m);
-      if (match && refExists(match[1])) {
-        shaMapping.set(c.hash, match[1]);
-      }
-      return false;
-    }
-    if (crossPairTrailerRe.test(meta.trailers)) return false;
-    return true;
-  });
-}
-
-/**
- * Drops candidates whose replay would orphan: pass 1 walks each branch
- * topo-order newest-first stopping at the first mapped ancestor (mirroring
- * mapBranchesToTargetTips) — anything seen anchors a tip; pass 2 pulls in
- * unmapped candidate parents of kept commits so resolveTargetParents won't
- * fall back to findEchoAnchor with a different topology.
- */
-function dropOrphanedCommits(
-  newCommits: TopoCommit[],
-  branches: string[],
-  shaMapping: Map<string, string>,
-  remote: string,
-): TopoCommit[] {
-  const newSet = new Set(newCommits.map(c => c.hash));
-  const kept = new Set<string>();
-
-  for (const branch of branches) {
-    const log = git(["rev-list", "--topo-order", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
-    for (const line of log.stdout.split("\n")) {
-      const hash = line.trim();
-      if (!hash) continue;
-      if (shaMapping.has(hash)) break;
-      if (newSet.has(hash)) kept.add(hash);
-    }
-  }
-
-  const stack = Array.from(kept);
-  while (stack.length) {
-    const hash = stack.pop()!;
-    const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
-    if (!parentsRes.ok) fail(`log -1 --format=%P ${hash} failed: ${parentsRes.stderr}`);
-    if (!parentsRes.stdout) continue; // root commit — no parents to chase
-    for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
-      if (shaMapping.has(p)) continue;
-      if (newSet.has(p) && !kept.has(p)) {
-        kept.add(p);
-        stack.push(p);
-      }
-    }
-  }
-
-  return newCommits.filter(c => kept.has(c.hash));
-}
-
-/**
  * Newest-first walk to each branch's most recent mapped ancestor. The branch
  * HEAD may be outer-only (didn't touch source.dir/), so we still advance the
  * shadow tip to the most recent commit inside the synced subdir.
@@ -1118,6 +1030,102 @@ function mapBranchesToTargetTips(
   }
   return branchMapping;
 }
+
+/**
+ * Return the bare branch name on `sourceRemote` containing `commitHash` if
+ * unambiguous, else null. Used to point error messages at the right shadow ref.
+ */
+function inferSourceBranch(commitHash: string, sourceRemote: string): string | null {
+  const res = git(
+    ["for-each-ref", "--format=%(refname:short)", "--contains", commitHash, `refs/remotes/${sourceRemote}/`],
+    { safe: true },
+  );
+  if (!res.ok || !res.stdout) return null;
+  const matches = res.stdout.split("\n")
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(r => r.startsWith(`${sourceRemote}/`) ? r.slice(sourceRemote.length + 1) : r)
+    .filter(b => b && b !== "HEAD");
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Build the actionable error printed when mergeMappedParentTrees gives up.
+ * The operator's escape: hand-write a target-side commit whose parents are the
+ * divergent mapped parents and whose message carries the source→target trailer.
+ * `loadReplayedMappings` will pick that up on the next run and treat the source
+ * merge as already replayed, so the sync proceeds without re-attempting this.
+ */
+function formatUnresolvableMergeError(opts: {
+  commit: TopoCommit;
+  meta: CommitMeta;
+  mappedParents: string[];
+  dc: DirectionConfig;
+}): string {
+  const { commit, meta, mappedParents, dc } = opts;
+  const { source, target, pair } = dc;
+  const branchHint = inferSourceBranch(commit.hash, source.remote);
+  const reason = mappedParents.length === 2
+    ? `merge-tree conflict between mapped parents on ${target.remote}`
+    : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`;
+  const outerNote =
+    `Mapped parents disagree on outer state (files outside ${target.dir}/). ` +
+    `The source commit cannot have resolved this — outer files don't exist on ${source.remote}.`;
+  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
+  const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
+  const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
+  const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
+
+  const shortHash = commit.hash.slice(0, 7);
+  const branchLabel = branchHint ?? "<source-branch>";
+  return [
+    `${meta.short}: cannot auto-resolve replay parent tree — branch halted.`,
+    ``,
+    `  Source merge:   ${commit.hash}  (${meta.short})`,
+    `  Failure:        ${reason}`,
+    `  Mapped parents on ${target.remote}:`,
+    ppLines,
+    ``,
+    `  ${outerNote}`,
+    ``,
+    `Recovery — choose ONE:`,
+    ``,
+    `  (Recommended) Round-trip + squash.`,
+    `    1. Resolve the merge on ${target.remote}'s working branch as you would`,
+    `       normally — e.g. \`git checkout ${branchLabel} && git merge --no-ff <from-branch>\`,`,
+    `       resolve conflicts, commit (call this Mm), and push.`,
+    `    2. Run shadow-sync in the other direction so Mm is replayed onto`,
+    `       ${source.remote}'s shadow ref (\`shadow/${pair.name}/${branchLabel}\`).`,
+    `    3. On ${source.remote}, merge that shadow ref into the working branch`,
+    `       (\`git merge origin/shadow/${pair.name}/${branchLabel}\`) and push.`,
+    `    4. Re-run this sync. The engine absorbs ${meta.short} (and any`,
+    `       descendants halted with it) into the resulting merge's replay`,
+    `       automatically — no flags needed.`,
+    ``,
+    `  (Alternative) Hand-built resolution on the shadow ref. Create a commit`,
+    `  on ${shadowRef} that`,
+    `    - has the divergent mapped parents above as its git parents`,
+    `    - has a tree you choose (the resolved outer state + the merged inner state)`,
+    `    - includes this trailer in its message body (exact text):`,
+    ``,
+    `        ${trailer}`,
+    ``,
+    `  On the next sync run, ${meta.short} will be picked up via that trailer and skipped.`,
+    ``,
+    `  Suggested commands (run in this repo, with ${target.remote} fetched):`,
+    `    git checkout -b manual-resolve-${shortHash} ${mappedParents[0]}`,
+    `    git merge --no-ff ${mappedParents.slice(1).join(" ")}`,
+    `    # resolve conflicts, stage the result, then:`,
+    `    tree=$(git write-tree)`,
+    `    new=$(git commit-tree $tree ${parentArgs} \\`,
+    `        -m "Manual resolution of ${shortHash}" \\`,
+    `        -m "${trailer}")`,
+    `    git update-ref ${shadowRef} $new`,
+    `    git push ${target.remote} ${shadowRef.replace(/^refs\/heads\//, "")}`,
+    `  Then re-run shadow-sync.`,
+  ].join("\n");
+}
+
 
 // ── Halt branches ──────────────────────────────────────────────────────
 
