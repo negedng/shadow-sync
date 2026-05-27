@@ -1052,13 +1052,12 @@ function runSht6() {
     }, "Fc0");
     git("push origin main", frontend.working);
 
-    // ── Phase 0: Init monorepo (Mc0) — parent shadowignores AND common/ pre-populated
-    // byte-identical to leaves (see scenario.md A15).
+    // ── Phase 0: Init monorepo (Mc0) — common/ pre-populated byte-identical
+    // to leaves (see scenario.md A15). The nested-pair exclusion is handled
+    // by autoIgnorePatterns; no manual .shadowignore needed.
     const Mc0 = commitFiles(mono, {
       "README.md": "# Monorepo\n",
       ".claude/settings.json": "{}\n",
-      "backend/.shadowignore": "src/common/**\n",
-      "frontend/.shadowignore": "src/app/common/**\n",
       "common/util.ts": "util v1\n",
     }, "Mc0");
     git("push origin main", mono.working);

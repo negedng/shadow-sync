@@ -478,6 +478,45 @@ function runAutoIgnoreNestedPair(): void {
   }
 }
 
+// ── F. multi-level .shadowignore + implicit self-strip ─────────────────────
+// .shadowignore at the source repo root cascades into the pair's sourceDir.
+// .shadowignore files themselves are never replayed onto the target.
+function runShadowignoreMultiLevel(): void {
+  const env = createTestEnv("shadowignore-multilevel", "backend");
+  try {
+    // Mono root .shadowignore: basename-anywhere → strips *.tmp at any depth.
+    // Pair-level .shadowignore (under "backend/"): "build/" → strips that dir.
+    // app.ts, sub/keep.ts are kept; the .tmp + build/ files are dropped.
+    const writeAt = (rel: string, content: string) => {
+      const full = path.join(env.localRepo, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, content);
+    };
+    writeAt(".shadowignore",          "*.tmp\n");
+    writeAt("backend/.shadowignore",  "build/\n");
+    writeAt("backend/app.ts",         "app v1\n");
+    writeAt("backend/temp.tmp",       "tmp at root\n");
+    writeAt("backend/sub/inner.tmp",  "tmp deep\n");
+    writeAt("backend/sub/keep.ts",    "kept\n");
+    writeAt("backend/build/output.o", "binary\n");
+    git("add -A", env.localRepo);
+    git('commit -m "multi-level shadowignore setup"', env.localRepo);
+
+    const r = runPush(env, "multi-level push");
+    assertEqual(r.status, 0, "[shadowignore multi-level] push should succeed");
+
+    assertEqual(readExternalShadowFile(env, "app.ts"),     "app v1\n", "[multi-level] app.ts kept");
+    assertEqual(readExternalShadowFile(env, "sub/keep.ts"), "kept\n",  "[multi-level] sub/keep.ts kept");
+    assertEqual(readExternalShadowFile(env, "temp.tmp"),       null, "[multi-level] *.tmp at root dropped via mono-root .shadowignore");
+    assertEqual(readExternalShadowFile(env, "sub/inner.tmp"),  null, "[multi-level] *.tmp deep dropped (basename-anywhere)");
+    assertEqual(readExternalShadowFile(env, "build/output.o"), null, "[multi-level] build/ dropped via pair-level .shadowignore");
+    // Implicit self-strip: neither root nor pair-level .shadowignore reaches target.
+    assertEqual(readExternalShadowFile(env, ".shadowignore"),  null, "[multi-level] .shadowignore file itself NOT replayed");
+  } finally {
+    env.cleanup();
+  }
+}
+
 export default function run(): void {
   // Not a filter test — wildcard.
   setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
@@ -500,6 +539,7 @@ export default function run(): void {
   runBranchesCustomPrefix();
   runShadowignoreNeverInTree();
   runAutoIgnoreNestedPair();
+  runShadowignoreMultiLevel();
 
   } finally {
     setTestBranchAllowlist();

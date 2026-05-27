@@ -546,19 +546,90 @@ function dropOrphanedCommits(
 
 // ── Ignore patterns ──────────────────────────────────────────────
 
-// Merge auto-ignore patterns with the .shadowignore file read at this commit's
-// snapshot (file content can change as source history evolves).
+// Always strip .shadowignore files themselves from the synced tree — they're
+// source-side metadata for shadow-sync, never replayed onto the target.
+const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
+
+// Merge auto-ignore patterns with .shadowignore files at every level from
+// sourceDir up to the repo root (gitignore-style: deeper files layer on top
+// of root-level files). File contents are read at the commit's snapshot so
+// patterns can evolve through history.
 function readShadowIgnorePatterns(
   commitHash: string,
   sourceDir: string,
   autoIgnorePatterns: RegExp[],
 ): RegExp[] {
-  const ignorePath = sourceDir ? `${sourceDir}/.shadowignore` : ".shadowignore";
-  const ignoreContent = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
-  const filePatterns = ignoreContent.ok && ignoreContent.stdout
-    ? ignoreContent.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(compileIgnorePattern)
-    : [];
-  return [...autoIgnorePatterns, ...filePatterns];
+  const patterns: RegExp[] = [...autoIgnorePatterns, SHADOWIGNORE_SELF_RE];
+
+  const dirs: string[] = [];
+  if (sourceDir) {
+    const parts = sourceDir.split("/");
+    for (let i = parts.length; i > 0; i--) dirs.push(parts.slice(0, i).join("/"));
+  }
+  dirs.push("");
+
+  for (const dir of dirs) {
+    const ignorePath = dir ? `${dir}/.shadowignore` : ".shadowignore";
+    const res = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
+    if (!res.ok || !res.stdout) continue;
+    for (const raw of res.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"))) {
+      const compiled = compileShadowIgnoreLine(raw, dir, sourceDir);
+      if (compiled) patterns.push(compiled);
+    }
+  }
+  return patterns;
+}
+
+// Compile a single .shadowignore line per gitignore semantics, translated
+// from `ignoreDir`-relative paths into `sourceDir`-relative paths (the space
+// matched by effectiveSourceTree / buildReplayedTree).
+//
+// Returns null if the pattern targets a sibling subtree outside sourceDir.
+// Negation (`!pattern`) is not supported and silently dropped.
+function compileShadowIgnoreLine(rawPattern: string, ignoreDir: string, sourceDir: string): RegExp | null {
+  if (rawPattern.startsWith("!")) return null;
+
+  let pattern = rawPattern;
+  const isDirOnly = pattern.endsWith("/");
+  if (isDirOnly) pattern = pattern.slice(0, -1);
+
+  const anchoredToIgnoreDir = pattern.startsWith("/");
+  if (anchoredToIgnoreDir) pattern = pattern.slice(1);
+
+  const hasInternalSlash = pattern.includes("/");
+  const isAnchored = anchoredToIgnoreDir || hasInternalSlash;
+
+  let translated: string;
+  if (!isAnchored) {
+    // No slash: gitignore matches basename at any depth → works in any space.
+    translated = pattern;
+  } else if (sourceDir === ignoreDir) {
+    translated = pattern;
+  } else {
+    // ignoreDir is a strict prefix of sourceDir (we walk up from sourceDir).
+    const relDir = ignoreDir ? sourceDir.slice(ignoreDir.length + 1) : sourceDir;
+    if (pattern === relDir) {
+      // Pattern points at sourceDir itself; dir-match means everything inside.
+      if (!isDirOnly) return null;
+      translated = "**";
+    } else if (pattern.startsWith(`${relDir}/`)) {
+      translated = pattern.slice(relDir.length + 1);
+    } else {
+      return null;
+    }
+  }
+
+  const regex = translated
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
+    .replace(/\*\*/g, "<<GLOBSTAR>>")
+    .replace(/\*/g, "[^/]*")
+    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
+    .replace(/<<GLOBSTAR>>/g, ".*");
+
+  const prefix = isAnchored ? "^" : "(^|.*/)";
+  const suffix = isDirOnly ? "/.*$" : "$";
+  return new RegExp(`${prefix}${regex}${suffix}`);
 }
 
 /** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
