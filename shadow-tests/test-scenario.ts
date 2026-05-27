@@ -767,7 +767,7 @@ function runSht5() {
     // shadow replay has a deterministic predicted tree. Authored content
     // originates only from the obvious authoring side; content that flows
     // across pairs via shadow merges is sourced from a monorepo commit
-    // (via composeCrossRepoMergeTree splicing or mergeMappedParentTrees).
+    // (via composeCrossRepoMergeTree splicing or composeSameRepoMergeTree).
     // ──────────────────────────────────────────────────────────────────────
 
     // ── Backend named commits ──────────────────────────────────────────────
@@ -837,9 +837,9 @@ function runSht5() {
     assertTreeContents(mono, Bf1_mono, monoTree(OUTER_MC4, BE_BF1, FE_FT2),
       "Bf1'_mono (Mf1 outer + Bf1 be + Ft2 fe via Mf1'_be echo)");
 
-    // Bt2'_mono / Bt3'_mono have no direct echo parent — mergeMappedParentTrees does the FF.
+    // Bt2'_mono / Bt3'_mono have no direct echo parent — composeSameRepoMergeTree does the FF.
     assertTreeContents(mono, Bt2_mono, monoTree(OUTER_MC4, BE_BT2, FE_MR1),
-      "Bt2'_mono (mergeMappedParentTrees FF to Br2'_mono → preserves outer + fe slice)");
+      "Bt2'_mono (composeSameRepoMergeTree FF to Br2'_mono → preserves outer + fe slice)");
     assertTreeContents(mono, Bt3_mono, monoTree(OUTER_MC4, BE_BT3, FE_FT2),
       "Bt3'_mono (FF to Bf1'_mono)");
 

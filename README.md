@@ -77,7 +77,7 @@ git merge origin/shadow/backend/main
 
 ### When merge replay halts
 
-In rare cases the engine can't auto-resolve a source-side merge because the mapped target-side parents disagree on **outer state** — files outside the synced subdirectory that don't exist on the source repo. This happens when both sides committed to the same branch concurrently and merged each other's work back at different times. The engine halts the affected branch (other branches keep syncing) with a recipe and a non-zero exit, rather than guessing.
+In rare cases the engine can't auto-resolve a source-side merge because the mapped target-side parents disagree on **outer state** — files outside the synced subdirectory, which the source commit's scope can't have authored. This happens when both sides committed to the same branch concurrently and merged each other's work back at different times (no-echo case), or when a source octopus directly merges multiple shadow refs whose target-side counterparts diverged on outer (multi-echo case). The engine halts the affected branch (other branches keep syncing) with a recipe and a non-zero exit, rather than guessing.
 
 Two recovery flows:
 

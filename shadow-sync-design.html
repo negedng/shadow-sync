@@ -456,7 +456,7 @@
   <h3><span class="ref ref-c">C12</span> Merge-replay conflicts halt the branch; operator resolves on monorepo&rsquo;s working branch</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> force-resolve via <code>-X ours</code>/<code>-X theirs</code> merge strategy; skip the conflicting commit; pre-resolve via engine-authored tree composition; throw and abort the whole sync.</p>
   <p>
-    When <code>mergeMappedParentTrees</code> returns <code>null</code> (mapped parents disagree on outer state outside the path filter, beyond what <code>git merge-tree</code> can FF), the engine halts <em>that branch only</em> (other branches in the same pair keep flowing) and emits a diagnostic naming the source commit and pointing the operator at the resolution recipe. The operator resolves on monorepo&rsquo;s working branch (call it <code>Mm</code>) by re-merging the relevant shadow ref into <code>main</code> with their chosen resolution. The next <code>--from a</code> propagates <code>Mm</code> onto the target&rsquo;s shadow ref; the target operator merges that shadow ref into their working branch (<code>R_be</code>); the next <code>--from b</code> sees <code>R_be</code>, identifies it via the round-trip branch of <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice, and absorbs the halted source commits (the original failing merge plus any descendants halted with it) into one squashed synthetic via multiple <code>Shadow-replayed</code> trailers.
+    When <code>composeSameRepoMergeTree</code> returns <code>null</code> (mapped parents disagree on outer state outside the path filter, beyond what <code>git merge-tree</code> can FF), the engine halts <em>that branch only</em> (other branches in the same pair keep flowing) and emits a diagnostic naming the source commit and pointing the operator at the resolution recipe. The operator resolves on monorepo&rsquo;s working branch (call it <code>Mm</code>) by re-merging the relevant shadow ref into <code>main</code> with their chosen resolution. The next <code>--from a</code> propagates <code>Mm</code> onto the target&rsquo;s shadow ref; the target operator merges that shadow ref into their working branch (<code>R_be</code>); the next <code>--from b</code> sees <code>R_be</code>, identifies it via the round-trip branch of <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice, and absorbs the halted source commits (the original failing merge plus any descendants halted with it) into one squashed synthetic via multiple <code>Shadow-replayed</code> trailers.
   </p>
   <p>
     Auto-resolving the conflict (always-ours, always-theirs, or any engine-authored heuristic) would violate <a class="ref ref-r" href="#r5">R5</a>: the operator&rsquo;s actual intent for the conflicting paths is unrecoverable from the available trees, so the engine&rsquo;s "resolution" would be a phantom one made without human input. Halting puts the decision in the operator&rsquo;s hands while the rest of the sync continues, and the round-trip absorb path ensures the resolution is recorded once and propagated symmetrically to both sides.
@@ -523,6 +523,16 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     is a chain of replays from the other side and carries our trailer, so it&rsquo;s an echo from
     the target&rsquo;s perspective. That makes the consumer-merge a textbook cross-repo merge for
     the next sync, and M1&rsquo;s splice fires on it.
+  </p>
+  <p>
+    <strong>Multi-echo octopus.</strong> A source octopus that directly merges multiple shadow
+    refs (e.g. <code>git merge --no-ff shadow/&lt;pair&gt;/core-dev shadow/&lt;pair&gt;/project</code>)
+    has ≥2 echo&rsquo;d parents. M1 collects all of them and requires their outer slices to agree
+    before splicing &mdash; agreement falls through to the single-echo splice (any echo&rsquo;s outer
+    is then authoritative); divergence returns <code>null</code>, falling through to
+    <a class="ref ref-c" href="#c12">C12</a>&rsquo;s halt with the same round-trip recovery as
+    the no-echo divergent-outer case. The agreement check is one <code>outerOnlyTree</code> per
+    echo plus a hash compare.
   </p>
   <p>
     <strong>Identical-merge concurrency &amp; sibling creation.</strong> If both sides do this

@@ -1312,7 +1312,7 @@ Out: returns parentTree unchanged (diff was filtered to zero changes)</code></pr
 
 <div class="card fn-card">
 <h4><code>outerOnlyTree(refOrTree, subdir): string</code></h4>
-<p>Build a tree containing everything from <code>refOrTree</code> <em>except</em> what lives under <code>subdir/</code>. Building block for the outer-agreement check in <code>mergeMappedParentTrees</code>.</p>
+<p>Build a tree containing everything from <code>refOrTree</code> <em>except</em> what lives under <code>subdir/</code>. Building block for the outer-agreement check in <code>composeSameRepoMergeTree</code>.</p>
 <pre><code>In:  refOrTree = Mt2's tree (monorepo has README.md + backend/ + frontend/)
      subdir = "backend"
 Out: tree-SHA containing README.md + frontend/ (no backend/)
@@ -1337,7 +1337,7 @@ Out: tree-SHA = baseTree's files + a new backend/ populated from subtreeContent<
 
 <div class="card fn-card">
 <h4><code>composeCrossRepoMergeTree({ commit, mappedParents, target, shaMapping, dc }): string | null</code></h4>
-<p>For a source merge that pulls in an echo&rsquo;d target-side parent: splice the shadow chain&rsquo;s <code>target.dir/</code> over the echo&rsquo;d parent&rsquo;s outer files. Refreshes the shadow chain&rsquo;s outer state. Returns null to fall through to <code>mergeMappedParentTrees</code>.</p>
+<p>For a source merge that pulls in echo&rsquo;d target-side parents: splice the shadow chain&rsquo;s <code>target.dir/</code> over the echo&rsquo;d parent&rsquo;s outer files. Refreshes the shadow chain&rsquo;s outer state. With ≥2 echo&rsquo;d parents (octopus directly merging multiple shadow refs), gates the splice on the echo targets agreeing on outer state before falling through to the single-echo path. Returns null when there&rsquo;s no echo&rsquo;d parent, or when multi-echo outers diverge &mdash; caller falls through to <code>composeSameRepoMergeTree</code>.</p>
 <pre><code>The Br2 case from the reference scenario (§4) — syncing backend→monorepo
 (source = backend repo, target = monorepo, target.dir = "backend").
 
@@ -1348,17 +1348,26 @@ Br2 on backend is a merge with parents [Bc4, Mr1']:
 
 In:  commit = Br2; mappedParents = [Bc4', Mr1] on monorepo
      mappedParents[0] = Bc4' (the shadow-chain parent)
-     echoTargetSHA = Mr1 (resolved from Mr1' parent's trailer)
+     echoTargets = [Mr1] (resolved from Mr1' parent's trailer)
      target.dir = "backend"
 Out: tree-SHA = Mr1's outer (frontend/, README.md, …)
                 ⊕ Bc4's content spliced in at backend/
      This is exactly the "refresh shadow chain's outer state" splice.
 
 In:  commit = Bc3 (no parent carries a monorepo skip-trailer)
-Out: null  (not a cross-repo merge; caller uses mergeMappedParentTrees)
+Out: null  (not a cross-repo merge; caller uses composeSameRepoMergeTree)
 
 In:  target.dir = "" (e.g. monorepo→backend direction, where backend has no subdir)
-Out: null  (no inner/outer split — caller uses plain merge logic)</code></pre>
+Out: null  (no inner/outer split — caller uses plain merge logic)
+
+In:  multi-echo octopus — Bm on team-backend directly merges two shadow refs;
+     parents = [Bc1, Mc'_team, Mp'_team], both shadow tips carry the
+     target-side echo trailer. echoTargets = [Mc, Mp] on monorepo.
+Out: outerOnlyTree(Mc, "backend") == outerOnlyTree(Mp, "backend") →
+     falls through to single-echo splice using echoTargets[0] = Mc.
+     Outers differ → null; caller's composeSameRepoMergeTree halts on
+     the same outer-state divergence (see Walkthrough D / sht7's
+     multi-echo-octopus sub-tests).</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1377,7 +1386,7 @@ Out: []
 </div>
 
 <div class="card fn-card">
-<h4><code>mergeMappedParentTrees({ mappedParents, commitShort, targetDir }): string | null</code></h4>
+<h4><code>composeSameRepoMergeTree({ mappedParents, commitShort, targetDir }): string | null</code></h4>
 <p>Pick a parent-tree base when no cross-repo splice fires. 1 parent → that tree; 2 parents → <code>git merge-tree</code>; ≥3 parents or merge-tree conflict → outer-agreement check (if every parent has identical content outside <code>targetDir/</code>, splice <code>[0]</code>&rsquo;s inner over the shared outer). Returns null if outers diverge &mdash; caller halts the branch (see Walkthrough D).</p>
 <pre><code>In:  mappedParents = [Bc3']
 Out: Bc3''s tree (`rev-parse Bc3'^{tree}`)
@@ -1410,7 +1419,7 @@ Out: null</code></pre>
 
 <div class="card fn-card">
 <h4><code>formatUnresolvableMergeError({ commit, meta, mappedParents, source, target, pair }): string</code></h4>
-<p>Build the halt diagnostic printed when <code>mergeMappedParentTrees</code> returns null. Names the divergent parents and presents two recovery paths: (1) the recommended round-trip + squash — resolve on the target&rsquo;s working branch and let the next sync cycle absorb the halt naturally; (2) the always-available hand-built recipe — create a commit on the shadow ref with the divergent mapped parents as its git parents and the <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailer in its message, so <code>loadReplayedMappings</code> skips the source merge on the next run. The function returns the string; the caller stores it on the <code>haltReasons</code> map and surfaces it via <code>mirrorHistory</code>&rsquo;s <code>haltedBranches</code>.</p>
+<p>Build the halt diagnostic printed when <code>composeSameRepoMergeTree</code> returns null. Names the divergent parents and presents two recovery paths: (1) the recommended round-trip + squash — resolve on the target&rsquo;s working branch and let the next sync cycle absorb the halt naturally; (2) the always-available hand-built recipe — create a commit on the shadow ref with the divergent mapped parents as its git parents and the <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailer in its message, so <code>loadReplayedMappings</code> skips the source merge on the next run. The function returns the string; the caller stores it on the <code>haltReasons</code> map and surfaces it via <code>mirrorHistory</code>&rsquo;s <code>haltedBranches</code>.</p>
 <pre><code>In:  octopus merge with 3 mapped parents on monorepo,
      source = team repo, target = monorepo (target.dir="backend"),
      pair.name = "backend"
@@ -1588,8 +1597,8 @@ Out: Map { "project" → "Bt3'", "core-dev" → "Bc4'" }</code></pre>
 
 <div class="card fn-card">
 <h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns }): ReplayHalts</code></h4>
-<p>The replay loop. For each commit: <code>resolveHaltAwareParents</code> → <code>composeCrossRepoMergeTree</code> (if applicable) or <code>mergeMappedParentTrees</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{source.dir}/.shadowignore</code> are appended to <code>autoIgnorePatterns</code> (the sibling-pair pre-computed list) before tree building.</p>
-<p>When <code>mergeMappedParentTrees</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatUnresolvableMergeError</code> into <code>haltReasons</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>mappedParents</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeCrossRepoMergeTree</code> recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltReasons }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
+<p>The replay loop. For each commit: <code>resolveHaltAwareParents</code> → <code>composeCrossRepoMergeTree</code> (if applicable) or <code>composeSameRepoMergeTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{source.dir}/.shadowignore</code> are appended to <code>autoIgnorePatterns</code> (the sibling-pair pre-computed list) before tree building.</p>
+<p>When <code>composeSameRepoMergeTree</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatUnresolvableMergeError</code> into <code>haltReasons</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>mappedParents</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeCrossRepoMergeTree</code> recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltReasons }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
      targetInit = monorepo's init; source.dir = ""; target.dir = "backend"
 Out: { haltedSources: Set(), haltReasons: Map() };
@@ -1848,7 +1857,7 @@ Out: { exitCode: 1,
             echo&rsquo;d commit).</li>
         </ul>
       </li>
-      <li><strong><code>mergeMappedParentTrees({ mappedParents: [P'], targetDir })</code></strong>
+      <li><strong><code>composeSameRepoMergeTree({ mappedParents: [P'], targetDir })</code></strong>
         &rarr; <code>P'.tree</code>.
         <ul>
           <li>Single-parent branch: <code>git rev-parse P'^{tree}</code>. No <code>merge-tree</code>,
@@ -1938,7 +1947,7 @@ Out: { exitCode: 1,
             merge, not a cross-pair splice.</li>
         </ul>
       </li>
-      <li><strong><code>mergeMappedParentTrees({ mappedParents: [A', B'], commitShort, targetDir
+      <li><strong><code>composeSameRepoMergeTree({ mappedParents: [A', B'], commitShort, targetDir
         })</code></strong> &rarr; <code>T<sub>merged</sub></code>.
         <ul>
           <li><code>git merge-tree --write-tree A' B'</code> &mdash; 3-way auto-merge of the two
@@ -2049,7 +2058,7 @@ Out: { exitCode: 1,
             tree SHA.</li>
         </ul>
       </li>
-      <li><em>note:</em> <code>mergeMappedParentTrees</code> is <strong>not</strong> called when
+      <li><em>note:</em> <code>composeSameRepoMergeTree</code> is <strong>not</strong> called when
         <code>composeCrossRepoMergeTree</code> returns a tree &mdash; the cross-repo compose
         short-circuits the regular merge path. <code>parentTree = composedParentTree</code>.</li>
       <li>read <code>.shadowignore</code> &mdash; same as A.</li>
@@ -2080,6 +2089,19 @@ Out: { exitCode: 1,
   just picks: outer from the echo (real intent), inner from the shadow (latest content).
 </div>
 
+<p>
+  <strong>Multi-echo variant.</strong> If the source merge is an octopus that directly merges
+  multiple shadow refs (e.g. <code>git merge --no-ff shadow/&lt;pair&gt;/core-dev shadow/&lt;pair&gt;/project</code>),
+  ≥2 of its direct parents carry <code>skipTrailerKey</code>. <code>composeCrossRepoMergeTree</code>
+  collects all echo targets and gates the splice on their outer slices agreeing
+  (<code>outerOnlyTree</code> per echo, hash compare). Agreement &rarr; fall through to the
+  single-echo splice using <code>echoTargets[0]</code> &mdash; <code>buildReplayedTree</code>&rsquo;s
+  diff against the first source parent fills in any inner the other echoes contributed.
+  Divergence &rarr; return <code>null</code>; the engine cascades to Walkthrough D&rsquo;s halt
+  path. sht7&rsquo;s <code>multi-echo-octopus-halts</code> / <code>-recovery</code> sub-tests cover
+  both branches.
+</p>
+
 <h3>Walkthrough D &mdash; Merge with unresolvable conflict</h3>
 
 <p>
@@ -2091,7 +2113,7 @@ Out: { exitCode: 1,
 </p>
 
 <p>
-  Same call tree as B up to <code>mergeMappedParentTrees</code>. From there, the engine falls through
+  Same call tree as B up to <code>composeSameRepoMergeTree</code>. From there, the engine falls through
   three layers; once the layers exhaust, two sub-paths follow.
 </p>
 
@@ -2101,7 +2123,7 @@ Out: { exitCode: 1,
       <li><code>getCommitMeta</code>, <code>hasTrailer</code>, <code>resolveTargetParents</code> &rarr;
         <code>[A', B']</code>, <code>composeCrossRepoMergeTree</code> &rarr; <code>null</code>
         &mdash; same as B.</li>
-      <li><strong><code>mergeMappedParentTrees({ mappedParents: [A', B'], targetDir })</code></strong>
+      <li><strong><code>composeSameRepoMergeTree({ mappedParents: [A', B'], targetDir })</code></strong>
         &rarr; <code>null</code>.
         <ul>
           <li><code>git merge-tree --write-tree A' B'</code> &mdash; conflict, no clean SHA.</li>
