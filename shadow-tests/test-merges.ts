@@ -595,7 +595,7 @@ function runManualMergeRecovery(): void {
     // Rewrite shadow branch-a/branch-b tips to add a differing outer file,
     // preserving each commit's frontend/ subtree and Shadow-replayed-team
     // trailer. This simulates outer state arriving via a sibling pair's
-    // splice — the case where composeSameRepoMergeTree has nothing to fall back
+    // splice — the case where composeMergeBaseTree has nothing to fall back
     // to.
     git("fetch origin", local);
     const shaA = git("rev-parse origin/shadow/frontend/branch-a", local);

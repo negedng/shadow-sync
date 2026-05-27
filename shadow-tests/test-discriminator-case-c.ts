@@ -11,7 +11,7 @@
  * The implemented discriminator (loose form: any-pair trailer regex) keeps
  * the merge. This matters because the resulting `Mc_A'_be<noop>` synthetic
  * on backend's shadow chain carries trailer information that
- * `composeCrossRepoMergeTree` reads on subsequent --from b runs to compose
+ * `composeMergeBaseTree` reads on subsequent --from b runs to compose
  * outer state correctly across pairs. Dropping it would cause silent
  * cross-pair drift (see full_history_explained.html §4).
  *

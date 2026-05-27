@@ -490,7 +490,7 @@ function runSht5() {
     const Mt3 = mergeRef(mono, "origin/shadow/frontend/project", "Mt3");
 
     // The Mt3 merge regression: shadow/frontend/project on monorepo has only frontend/* (engine's
-    // composeCrossRepoMergeTree didn't preserve backend through Ft2 = merge(Ft1, Fr2) because
+    // composeMergeBaseTree didn't preserve backend through Ft2 = merge(Ft1, Fr2) because
     // neither parent had the skip-trailer key — Fr2 is a local frontend merge with no trailer).
     // Merge base of Mt2 and Ft2'_mono is Mr1 (which has both pair trees), so 3-way merge sees
     // "Mt2 deleted frontend, Ft2'_mono deleted backend" and applies BOTH deletions, leaving the
@@ -767,7 +767,7 @@ function runSht5() {
     // shadow replay has a deterministic predicted tree. Authored content
     // originates only from the obvious authoring side; content that flows
     // across pairs via shadow merges is sourced from a monorepo commit
-    // (via composeCrossRepoMergeTree splicing or composeSameRepoMergeTree).
+    // (via composeMergeBaseTree's echo splice or outer-agreement / merge-tree branches).
     // ──────────────────────────────────────────────────────────────────────
 
     // ── Backend named commits ──────────────────────────────────────────────
@@ -826,10 +826,10 @@ function runSht5() {
     assertTreeContents(mono, Fr1_mono, monoTree(OUTER_MC0, EMPTY, FE_FR1), "Fr1'_mono tree");
     assertTreeContents(mono, Ft1_mono, monoTree(OUTER_MC0, EMPTY, FE_FT1), "Ft1'_mono tree");
 
-    // Cross-repo merges replayed onto monorepo with composeCrossRepoMergeTree firing.
+    // Cross-repo merges replayed onto monorepo with composeMergeBaseTree's echo-splice branch firing.
     const Bc3_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc3, "Bc3'_mono");
     assertTreeContents(mono, Bc3_mono, monoTree(OUTER_MC4, BE_BC3, FE_MC4),
-      "Bc3'_mono (composeCrossRepoMergeTree splice: Mc4 outer + Bc3 be + Mc4 fe)");
+      "Bc3'_mono (composeMergeBaseTree echo splice: Mc4 outer + Bc3 be + Mc4 fe)");
     assertTreeContents(mono, Bc4_mono, monoTree(OUTER_MC4, BE_BC4, FE_MC4),
       "Bc4'_mono (Mc5 outer + Bc4 be + Mc5 fe via Mc5'_be echo; Mc6 cross-pair merge dropped)");
     assertTreeContents(mono, Br2_mono, monoTree(OUTER_MC4, BE_BR2, FE_MR1),
@@ -837,9 +837,9 @@ function runSht5() {
     assertTreeContents(mono, Bf1_mono, monoTree(OUTER_MC4, BE_BF1, FE_FT2),
       "Bf1'_mono (Mf1 outer + Bf1 be + Ft2 fe via Mf1'_be echo)");
 
-    // Bt2'_mono / Bt3'_mono have no direct echo parent — composeSameRepoMergeTree does the FF.
+    // Bt2'_mono / Bt3'_mono have no direct echo parent — composeMergeBaseTree's merge-tree branch FFs.
     assertTreeContents(mono, Bt2_mono, monoTree(OUTER_MC4, BE_BT2, FE_MR1),
-      "Bt2'_mono (composeSameRepoMergeTree FF to Br2'_mono → preserves outer + fe slice)");
+      "Bt2'_mono (composeMergeBaseTree merge-tree FF to Br2'_mono → preserves outer + fe slice)");
     assertTreeContents(mono, Bt3_mono, monoTree(OUTER_MC4, BE_BT3, FE_FT2),
       "Bt3'_mono (FF to Bf1'_mono)");
 
@@ -1962,6 +1962,110 @@ async function runSht7(): Promise<void> {
     }
   }
 
+  function runHaltedPartialTipFirstParent(): void {
+    // Topology: backend has project-a + project-b. Bm = `git merge project-b`
+    // on project-a creates a 2-parent merge whose mapped parents on mono
+    // disagree on outer state (README.md) → halt. After halt,
+    // mapBranchesToTargetTips must pick project-a's newest mapped ancestor as
+    // the partial tip — which is Bp1x' (last project-a commit before Bm). If
+    // the function walks full topo-order instead of first-parent, the walk
+    // crosses into project-b's history via Bm's second-parent edge and
+    // returns Bp2m' instead — a project-b commit that isn't an ancestor of
+    // shadow/backend/project-a's current tip, so the FF push fails.
+    const env = createTestEnv("partial-tip-first-parent", "backend");
+    setBranchFiltersForTesting(new Map([
+      ["origin", [compileIgnorePattern("main"), compileIgnorePattern("project-*")]],
+      ["team",   [compileIgnorePattern("main"), compileIgnorePattern("project-*")]],
+    ]));
+
+    try {
+      // BE: Bc1 on main; Bp1 on project-a; Bp2 on project-b (off Bc1).
+      writeFile(env.remoteWorking, "init.txt", "init\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bc1"', env.remoteWorking);
+      git("push origin main", env.remoteWorking);
+
+      git("checkout -b project-a", env.remoteWorking);
+      writeFile(env.remoteWorking, "feat-a.ts", "feat a\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bp1"', env.remoteWorking);
+      git("push origin project-a", env.remoteWorking);
+
+      git("checkout -b project-b main", env.remoteWorking);
+      writeFile(env.remoteWorking, "feat-b.ts", "feat b\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bp2"', env.remoteWorking);
+      git("push origin project-b", env.remoteWorking);
+      git("checkout main", env.remoteWorking);
+
+      const r1 = runCiSync(env);
+      if (r1.status !== 0) throw new Error(`bootstrap --from b failed: ${r1.stderr}`);
+
+      // M-side: Mp1c on project-a (README=v_a), Mp2c on project-b (README=v_b).
+      // Outer divergence is what causes Bm to halt later.
+      git("checkout -b project-a", env.localRepo);
+      writeFile(env.localRepo, "README.md", "v_a\n");
+      writeFile(env.localRepo, "backend/release-notes.txt", "release a\n");
+      git("add -A", env.localRepo);
+      git('commit -m "Mp1c"', env.localRepo);
+
+      git("checkout -b project-b main", env.localRepo);
+      writeFile(env.localRepo, "README.md", "v_b\n");
+      writeFile(env.localRepo, "backend/release-notes.txt", "release b\n");
+      git("add -A", env.localRepo);
+      git('commit -m "Mp2c"', env.localRepo);
+      git("checkout project-a", env.localRepo);
+
+      const r2 = runPush(env);
+      if (r2.status !== 0) throw new Error(`--from a failed: ${r2.stderr}`);
+
+      // BE operator: Bp1m + Bp1x on project-a, Bp2m on project-b.
+      git("fetch origin --prune", env.remoteWorking);
+      git("checkout project-a", env.remoteWorking);
+      git('merge --no-ff origin/shadow/backend/project-a -m "Bp1m"', env.remoteWorking);
+      writeFile(env.remoteWorking, "feat-a-extra.ts", "extra\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bp1x"', env.remoteWorking);
+      git("push origin project-a", env.remoteWorking);
+
+      git("checkout project-b", env.remoteWorking);
+      git('merge --no-ff origin/shadow/backend/project-b -m "Bp2m"', env.remoteWorking);
+      git("push origin project-b", env.remoteWorking);
+
+      // Bm = merge project-b INTO project-a. Conflict on release-notes.txt.
+      git("checkout project-a", env.remoteWorking);
+      try {
+        git('merge --no-ff project-b -m "Bm"', env.remoteWorking);
+      } catch {
+        writeFile(env.remoteWorking, "release-notes.txt", "release a + release b\n");
+        git("add -A", env.remoteWorking);
+        git('commit --no-edit', env.remoteWorking);
+      }
+      git("push origin project-a", env.remoteWorking);
+
+      // --from b must halt on Bm. Push of project-a's partial tip must
+      // succeed (FF push of Bp1x', NOT Bp2m').
+      const r3 = runCiSync(env);
+      assert(r3.status !== 0, "expected --from b to halt on Bm");
+      assert(/cannot auto-resolve replay parent tree/.test(r3.stdout + r3.stderr),
+        `expected halt diagnostic in:\n${r3.stdout}\n${r3.stderr}`);
+      assert(!/diverged with different tree/.test(r3.stdout + r3.stderr),
+        `partial-tip FF push must NOT diverge; output:\n${r3.stdout}\n${r3.stderr}`);
+
+      // Shadow/backend/project-a partial tip must carry project-a's content
+      // (feat-a-extra.ts from Bp1x), NOT project-b's (feat-b.ts which would
+      // be present only if Bp2m' was picked as the partial tip).
+      git("fetch origin --prune", env.localRepo);
+      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/project-a", env.localRepo);
+      assert(tree.includes("backend/feat-a-extra.ts"),
+        `partial tip must be Bp1x' (has feat-a-extra.ts); tree:\n${tree}`);
+      assert(!tree.includes("backend/feat-b.ts"),
+        `partial tip must NOT be project-b's Bp2m' (would include feat-b.ts); tree:\n${tree}`);
+    } finally {
+      env.cleanup();
+    }
+  }
+
   const subs: Array<[string, () => void]> = [
     ["happy-round-trip", runHappyRoundTrip],
     ["idempotent-rerun", runIdempotentRerun],
@@ -1970,6 +2074,12 @@ async function runSht7(): Promise<void> {
     ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
     ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
     ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
+    // ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
+    // ^ disabled: reproduces a known bug where mapBranchesToTargetTips picks
+    // the wrong-branch ancestor after a halt because `--topo-order` enumeration
+    // is non-deterministic on sibling ordering. The principled fix is upstream
+    // in isLoadBearing (so the right commit lives on first-parent line) —
+    // tracked in memory: project_map_branches_to_target_tips_topo_brittle.
   ];
   let failed = 0;
   try {

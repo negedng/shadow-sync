@@ -782,98 +782,91 @@ function composeSubtree(baseTree: string, subdir: string, subtreeContent: string
 }
 
 /**
- * Cross-repo merge: splice the shadow chain's target.dir/ over the echo'd
- * parent's outer files, so checking out an old shadow commit reflects the
- * target's outer state then — not a frozen bootstrap snapshot. Returns null
- * when there's no clean composition (no echo'd parents, or multi-echo with
- * divergent outer slices) — caller falls through to composeSameRepoMergeTree,
- * which halts on divergence.
+ * Build the base tree for replaying `commit` onto `mappedParents`.
+ * buildReplayedTree later overlays the source-side diff on top, carrying the
+ * user's merge resolution into the replay.
  *
- * Round-trip exception: if the echo target is itself in mappedParents (the
- * operator's resolution merge `Mm` was spliced in via resolveHaltAwareParents
- * to keep the previous shadow tip in the parent set), the inner slice we want
- * is the CURRENT commit's source-side tree — that's the operator's resolved
- * inner including any backend-only intermediate work (e.g. files added between
- * the halt and the round-trip). Splice that into Mm's outer.
+ * Cross-repo (target.dir set):
+ *   Echo splice (≥1 source parent carries the target trailer) → splice the
+ *     shadow chain's target.dir/ over the echo'd target's outer files, so old
+ *     shadow commits reflect target's outer state at the time, not a frozen
+ *     bootstrap snapshot. Runs before the 1-parent shortcut so 1-parent commits
+ *     on top of an echo still hit the round-trip branch. Round-trip exception:
+ *     if the echo target is itself in mappedParents (the operator's resolution
+ *     merge Mm was spliced in via resolveHaltAwareParents to keep the previous
+ *     shadow tip in the parent set), the inner slice we want is the CURRENT
+ *     commit's source-side tree — the operator's resolved inner including any
+ *     backend-only intermediate work. Splice that into Mm's outer. Multi-echo:
+ *     outers must agree; otherwise return null.
+ *   1 mapped parent, no echo → that tree.
+ *   2 parents, no echo, clean merge-tree → that tree. For ancestor/descendant
+ *     pairs (e.g. via a prior shadow-sync round) merge-tree reduces to a
+ *     fast-forward, preserving outer state a first-parent fallback would drop.
+ *   2-parent merge-tree conflict / 3+ parents, no echo → outer-agreement: if
+ *     every mapped parent has the same tree outside target.dir/, splice
+ *     mappedParents[0]'s target.dir/ over that shared outer. Outer divergence
+ *     returns null — caller halts the branch (see formatUnresolvableMergeError).
  *
- * Multi-echo case: source merge whose multiple direct parents are echoes
- * (e.g. octopus that merges two shadow refs at once). If their outers agree,
- * fall through to the single-echo logic; otherwise bail so the downstream
- * halt fires.
+ * Same-repo (no target.dir):
+ *   1 parent → that tree.
+ *   2 parents, clean merge-tree → that tree.
+ *   Else → mappedParents[0]'s tree. Source layout matches target's, so the
+ *     source merge commit's diff already carries the user's resolution.
  */
-function composeCrossRepoMergeTree(opts: {
+function composeMergeBaseTree(opts: {
   commit: TopoCommit;
   mappedParents: string[];
   shaMapping: Map<string, string>;
   dc: DirectionConfig;
 }): string | null {
   const { commit, mappedParents, shaMapping, dc } = opts;
-  if (!dc.target.dir || mappedParents.length === 0) return null;
+  const targetDir = dc.target.dir;
+  const commitShort = commit.hash.slice(0, 8);
 
-  const skipKey = targetTrailerKey(dc);
-  const echoTargets: string[] = [];
-  for (const sourceParent of commit.parents) {
-    const parentMeta = getCommitMeta(sourceParent);
-    if (hasTrailer(parentMeta.trailers, skipKey)) {
-      const mapped = shaMapping.get(sourceParent);
-      if (mapped) echoTargets.push(mapped);
+  // Cross-repo echo splice runs first — handles round-trip case even when
+  // the commit has a single mapped parent that is itself the echo target.
+  if (targetDir) {
+    const skipKey = targetTrailerKey(dc);
+    const echoTargets: string[] = [];
+    for (const sourceParent of commit.parents) {
+      const parentMeta = getCommitMeta(sourceParent);
+      if (hasTrailer(parentMeta.trailers, skipKey)) {
+        const mapped = shaMapping.get(sourceParent);
+        if (mapped) echoTargets.push(mapped);
+      }
+    }
+
+    if (echoTargets.length > 0) {
+      if (echoTargets.length > 1) {
+        const outers = echoTargets.map(t => outerOnlyTree(t, targetDir));
+        if (!outers.every(o => o === outers[0])) return null;
+      }
+
+      const echoTargetSHA = echoTargets[0];
+      const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
+      if (!echoTreeRes.ok) return null;
+
+      // Round-trip: echo target in mappedParents → splice source's inner over Mm's outer.
+      if (mappedParents.includes(echoTargetSHA)) {
+        const sourceInnerRes = dc.source.dir
+          ? git(["rev-parse", `${commit.hash}:${dc.source.dir}`], { safe: true })
+          : git(["rev-parse", `${commit.hash}^{tree}`], { safe: true });
+        if (!sourceInnerRes.ok) return echoTreeRes.stdout;
+        return composeSubtree(echoTreeRes.stdout, targetDir, sourceInnerRes.stdout);
+      }
+
+      const shadowDirRes = git(["rev-parse", `${mappedParents[0]}:${targetDir}`], { safe: true });
+      if (!shadowDirRes.ok) return echoTreeRes.stdout;
+      return composeSubtree(echoTreeRes.stdout, targetDir, shadowDirRes.stdout);
     }
   }
-  if (echoTargets.length === 0) return null;
-
-  if (echoTargets.length > 1) {
-    const outers = echoTargets.map(t => outerOnlyTree(t, dc.target.dir));
-    if (!outers.every(o => o === outers[0])) return null;
-    // Outers agree — fall through to the single-echo logic with echoTargets[0].
-  }
-
-  const echoTargetSHA = echoTargets[0];
-  const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
-  if (!echoTreeRes.ok) return null;
-
-  // Round-trip case: echo target in mappedParents → splice source's inner over Mm's outer.
-  if (mappedParents.includes(echoTargetSHA)) {
-    const sourceInnerRes = dc.source.dir
-      ? git(["rev-parse", `${commit.hash}:${dc.source.dir}`], { safe: true })
-      : git(["rev-parse", `${commit.hash}^{tree}`], { safe: true });
-    if (!sourceInnerRes.ok) return echoTreeRes.stdout;
-    return composeSubtree(echoTreeRes.stdout, dc.target.dir, sourceInnerRes.stdout);
-  }
-
-  const shadowDirRes = git(["rev-parse", `${mappedParents[0]}:${dc.target.dir}`], { safe: true });
-  if (!shadowDirRes.ok) return echoTreeRes.stdout;
-  return composeSubtree(echoTreeRes.stdout, dc.target.dir, shadowDirRes.stdout);
-}
-
-/**
- * Parent-tree base for replay when composeCrossRepoMergeTree returns null
- * (no echo'd parent, or multi-echo with divergent outers). Three layers:
- *   1 parent → that tree.
- *   2 parents → git merge-tree. For ancestor/descendant cases (e.g.
- *     Bt1'_mono being an ancestor of Br2'_mono via a previous shadow-sync
- *     round) the merge-tree reduces to a fast-forward — we get the descendant's
- *     tree, which preserves outer state (e.g. frontend slice from a sibling
- *     pair's spliced shadow merge) that the simple first-parent fallback would
- *     have dropped.
- *   3+ parents (no merge-tree) or 2-parent merge-tree conflict → outer-
- *     agreement check: if the mapped parents agree on their outer slice
- *     (everything outside targetDir/), splice mappedParents[0]'s targetDir/ over
- *     that shared outer — buildReplayedTree applies the source diff on top,
- *     carrying the user's in-repo merge resolution. If outers diverge, return
- *     null — caller halts the branch (see formatUnresolvableMergeError).
- */
-function composeSameRepoMergeTree(opts: {
-  mappedParents: string[];
-  commitShort: string;
-  targetDir: string;
-}): string | null {
-  const { mappedParents, commitShort, targetDir } = opts;
 
   if (mappedParents.length === 1) {
     const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
     if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
     return treeRes.stdout;
   }
+
   if (mappedParents.length === 2) {
     const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
     if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) {
@@ -881,21 +874,13 @@ function composeSameRepoMergeTree(opts: {
     }
   }
 
-  // Without a targetDir there's no outer/inner split — the source side has the
-  // same file layout as target, so the source merge commit's diff already
-  // carries the user's conflict resolution. Returning mappedParents[0]'s tree
-  // lets buildReplayedTree apply that resolution on top.
   if (!targetDir) {
     const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
     if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
     return treeRes.stdout;
   }
 
-  // Outer-agreement check: if every mapped parent has the same tree outside
-  // targetDir/, splice mappedParents[0]'s targetDir/ over that shared outer.
-  // The source merge's diff (applied later by buildReplayedTree) carries the
-  // user's resolution for content inside targetDir/, so picking one parent's
-  // inner here is fine — only the outer needs to be globally consistent.
+  // Cross-repo, no echo, conflict / octopus: outer-agreement.
   const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDir));
   if (outerTrees.every(t => t === outerTrees[0])) {
     const subdirRes = git(["rev-parse", `${mappedParents[0]}:${targetDir}`], { safe: true });
@@ -1058,7 +1043,7 @@ function inferSourceBranch(commitHash: string, sourceRemote: string): string | n
 }
 
 /**
- * Build the actionable error printed when composeSameRepoMergeTree gives up.
+ * Build the actionable error printed when composeMergeBaseTree gives up.
  * The operator's escape: hand-write a target-side commit whose parents are the
  * divergent mapped parents and whose message carries the source→target trailer.
  * `loadReplayedMappings` will pick that up on the next run and treat the source
@@ -1287,8 +1272,7 @@ function replayCommits(opts: {
         // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
         parentTree = null;
       } else {
-        parentTree = composeCrossRepoMergeTree({ commit, mappedParents, shaMapping, dc })
-                  ?? composeSameRepoMergeTree({ mappedParents, commitShort: meta.short, targetDir: dc.target.dir });
+        parentTree = composeMergeBaseTree({ commit, mappedParents, shaMapping, dc });
         if (parentTree === null) {
           // Neither compose path produced a defensible tree. Halt the branch
           // (other branches in this call keep flowing); the diagnostic surfaces
