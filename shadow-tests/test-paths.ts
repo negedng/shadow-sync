@@ -409,8 +409,8 @@ function runAutoIgnoreNestedPair(): void {
   const env = createTestEnv("auto-ignore-nested", "backend");
   try {
     const pairs: SyncPair[] = [
-      { name: "backend",        a: { remote: "origin", url: env.originBare, dir: "backend" }, b: { remote: "team", url: env.remoteBare, dir: "" } },
-      { name: "common-backend", a: { remote: "origin", url: env.originBare, dir: "common"  }, b: { remote: "team", url: env.remoteBare, dir: "src/common" } },
+      { name: "backend",        a: { remote: "origin", url: env.originBare }, b: { remote: "team", url: env.remoteBare }, mappings: [{ a: "backend", b: "" }] },
+      { name: "common-backend", a: { remote: "origin", url: env.originBare }, b: { remote: "team", url: env.remoteBare }, mappings: [{ a: "common",  b: "src/common" }] },
     ];
 
     // Phase 1: leaf commits top-level + nested-common files, no .shadowignore.

@@ -9,8 +9,12 @@ import * as os from "os";
 export interface RepoEndpoint {
   remote: string;
   url: string;
-  /** "" = repo root; otherwise the synced subdirectory. */
-  dir: string;
+}
+
+/** One folder pair: a.dir on side a ↔ b.dir on side b. "" = repo root. */
+export interface DirMapping {
+  a: string;
+  b: string;
 }
 
 export interface SyncPair {
@@ -19,6 +23,8 @@ export interface SyncPair {
   /** Symmetric: direction is chosen at runtime via --from. */
   a: RepoEndpoint;
   b: RepoEndpoint;
+  /** 1..N folder mappings. Dirs on each side must be disjoint. */
+  mappings: DirMapping[];
 }
 
 interface ShadowSyncConfig {
@@ -29,16 +35,42 @@ interface ShadowSyncConfig {
   shadowBranchPrefix: string;
 }
 
+interface DirMappingDirected {
+  source: string;
+  target: string;
+}
+
 interface DirectionConfig {
   pair: SyncPair;
   source: RepoEndpoint;
   target: RepoEndpoint;
+  /** Direction-flipped pair.mappings. */
+  mappings: DirMappingDirected[];
 }
 
 function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig {
   const source = from === "a" ? pair.a : pair.b;
   const target = from === "a" ? pair.b : pair.a;
-  return { pair, source, target };
+  const mappings = pair.mappings.map(m =>
+    from === "a" ? { source: m.a, target: m.b } : { source: m.b, target: m.a });
+  return { pair, source, target, mappings };
+}
+
+function validatePair(pair: SyncPair): void {
+  if (!pair.mappings || pair.mappings.length === 0) {
+    fail(`pair "${pair.name}" must declare at least one mapping`);
+  }
+  // Only exact-duplicate source/target dirs within a side are ambiguous —
+  // nested dirs (e.g. "" + "src/common") route deterministically via
+  // longest-prefix in buildReplayedTree.
+  const aDirs = new Set<string>();
+  const bDirs = new Set<string>();
+  for (const m of pair.mappings) {
+    if (aDirs.has(m.a)) fail(`pair "${pair.name}" has duplicate a-dir "${m.a}"`);
+    if (bDirs.has(m.b)) fail(`pair "${pair.name}" has duplicate b-dir "${m.b}"`);
+    aDirs.add(m.a);
+    bDirs.add(m.b);
+  }
 }
 
 const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-config.json");
@@ -65,6 +97,17 @@ function loadConfig(): ShadowSyncConfig {
   const shadowBranchPrefix = (doc.shadowBranchPrefix as string) ?? "shadow";
 
   const pairs = (doc.pairs as SyncPair[]) ?? [];
+  for (const pair of pairs) {
+    const legacyA = (pair.a as unknown as Record<string, unknown>)?.dir;
+    const legacyB = (pair.b as unknown as Record<string, unknown>)?.dir;
+    if ((legacyA !== undefined || legacyB !== undefined) && !pair.mappings) {
+      throw new ShadowSyncError(
+        `pair "${pair.name}" uses the legacy single-dir shape. Replace ` +
+        `a.dir/b.dir with a top-level mappings: [{ a, b }, ...] array.`,
+      );
+    }
+    validatePair(pair);
+  }
 
   return { pairs, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
 }
@@ -96,6 +139,7 @@ export function applyTestOverrides(opts: {
   shadowBranchPrefix?: string;
 }): void {
   _repoRoot = opts.repoRoot;
+  for (const pair of opts.pairs) validatePair(pair);
   PAIRS.length = 0;
   PAIRS.push(...opts.pairs);
   if (opts.shadowBranchPrefix != null) _shadowBranchPrefix = opts.shadowBranchPrefix;
@@ -389,12 +433,19 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
   return map;
 }
 
-function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCommit[] {
+function collectSourceCommits(
+  source: RepoEndpoint, branches: string[], sourceDirs: string[],
+): TopoCommit[] {
   // --full-history surfaces all merges in the path-filtered reachable set;
   // filterLoadBearingCommits drops the non-load-bearing ones afterward.
   const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
     ...branches.map(b => `${source.remote}/${b}`)];
-  if (source.dir) args.push("--", `${source.dir}/`);
+  // Path filter only when no mapping is at root. Any root source means the
+  // whole commit graph is in-scope and no `--` is added.
+  const anyRoot = sourceDirs.some(d => d === "");
+  if (sourceDirs.length > 0 && !anyRoot) {
+    args.push("--", ...sourceDirs.map(d => `${d}/`));
+  }
   const result = git(args, { safe: true });
   if (!result.ok) fail(`rev-list failed (${args.join(" ")}): ${result.stderr}`);
   if (!result.stdout) return [];
@@ -405,15 +456,16 @@ function collectSourceCommits(source: RepoEndpoint, branches: string[]): TopoCom
 
 function filterLoadBearingCommits(
   commits: TopoCommit[],
-  autoIgnorePatterns: RegExp[],
+  autoIgnorePatternsBySourceIdx: RegExp[][],
   dc: DirectionConfig,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
   const keptSet = new Set<string>();
   const kept: TopoCommit[] = [];
+  const sourceDirs = dc.mappings.map(m => m.source);
   for (const c of commits) {
-    if (isLoadBearing(c, dc.source.dir, autoIgnorePatterns, keptSet)) {
+    if (isLoadBearing(c, sourceDirs, autoIgnorePatternsBySourceIdx, keptSet)) {
       keptSet.add(c.hash);
       kept.push(c);
     }
@@ -422,26 +474,30 @@ function filterLoadBearingCommits(
 }
 
 /**
- * Drop iff the commit's effective tree at sourceDir/ matches the 1st parent's
- * AND (for merges) every non-first parent's exclusive ancestry above its
- * merge-base with the 1st parent is empty of kept commits. P1 is the trunk;
- * any Pi (i>=1) contributing a kept commit anchors the merge.
+ * Drop iff the commit's effective source tree (composed across all mappings)
+ * matches the 1st parent's AND (for merges) every non-first parent's
+ * exclusive ancestry above its merge-base with the 1st parent is empty of
+ * kept commits. P1 is the trunk; any Pi (i>=1) contributing a kept commit
+ * anchors the merge.
  */
 function isLoadBearing(
   c: TopoCommit,
-  sourceDir: string,
-  autoIgnorePatterns: RegExp[],
+  sourceDirs: string[],
+  autoIgnorePatternsBySourceIdx: RegExp[][],
   keptSet: Set<string>,
 ): boolean {
   if (c.parents.length === 0) return true;
 
-  const effectiveIgnore = readShadowIgnorePatterns(c.hash, sourceDir, autoIgnorePatterns);
+  const effectiveIgnoreBySrc = sourceDirs.map((dir, i) =>
+    readShadowIgnorePatterns(c.hash, dir, autoIgnorePatternsBySourceIdx[i] ?? []));
 
-  if (!sourceDir && effectiveIgnore.length === 0) return true;
+  // The effective-ignore list always contains SHADOWIGNORE_SELF_RE, so we
+  // never short-circuit on "empty patterns" alone. Composite tree drives the
+  // decision.
 
-  const commitTree = effectiveSourceTree(c.hash, sourceDir, effectiveIgnore);
+  const commitTree = effectiveSourceTreeMulti(c.hash, sourceDirs, effectiveIgnoreBySrc);
   if (!commitTree) return true;
-  const tree1st = effectiveSourceTree(c.parents[0], sourceDir, effectiveIgnore);
+  const tree1st = effectiveSourceTreeMulti(c.parents[0], sourceDirs, effectiveIgnoreBySrc);
   if (tree1st !== commitTree) return true;
 
   if (c.parents.length === 1) return false;
@@ -653,36 +709,53 @@ export function compileIgnorePattern(pattern: string): RegExp {
 function computeAutoIgnorePatterns(
   dc: DirectionConfig,
   allPairs: SyncPair[] = PAIRS,
-): { patterns: string[]; reasons: Map<string, string[]> } {
-  const seen = new Set<string>();
-  const patterns: string[] = [];
+): { patternsBySourceIdx: string[][]; reasons: Map<string, string[]> } {
+  const patternsBySourceIdx: string[][] = dc.mappings.map(() => []);
+  const seenBySourceIdx: Set<string>[] = dc.mappings.map(() => new Set<string>());
   const reasons = new Map<string, string[]>();
 
-  for (const other of allPairs) {
-    if (other.name === dc.pair.name) continue;
-    for (const o of [other.a, other.b]) {
-      for (const myEnd of [dc.source, dc.target]) {
-        if (o.remote !== myEnd.remote) continue;
-        let rel: string | null = null;
-        if (myEnd.dir === "") {
-          if (o.dir !== "") rel = o.dir;
-        } else if (o.dir.startsWith(myEnd.dir + "/")) {
-          rel = o.dir.slice(myEnd.dir.length + 1);
-        }
-        if (!rel) continue;
-        for (const pat of [rel, `${rel}/**`]) {
-          if (seen.has(pat)) continue;
-          seen.add(pat);
-          patterns.push(pat);
-          const list = reasons.get(other.name) ?? [];
-          list.push(pat);
-          reasons.set(other.name, list);
+  // Per source mapping i, look for nesting against every other pair's
+  // mapping dirs on the same remote (matched against either source or target
+  // side of THIS pair — content-relative space is symmetric within a mapping).
+  for (let i = 0; i < dc.mappings.length; i++) {
+    const myMapping = dc.mappings[i];
+    const myEnds: Array<{ endpoint: RepoEndpoint; dir: string }> = [
+      { endpoint: dc.source, dir: myMapping.source },
+      { endpoint: dc.target, dir: myMapping.target },
+    ];
+
+    for (const other of allPairs) {
+      if (other.name === dc.pair.name) continue;
+      const otherSides: Array<{ endpoint: RepoEndpoint; dirs: string[] }> = [
+        { endpoint: other.a, dirs: other.mappings.map(m => m.a) },
+        { endpoint: other.b, dirs: other.mappings.map(m => m.b) },
+      ];
+      for (const otherSide of otherSides) {
+        for (const myEnd of myEnds) {
+          if (otherSide.endpoint.remote !== myEnd.endpoint.remote) continue;
+          for (const oDir of otherSide.dirs) {
+            let rel: string | null = null;
+            if (myEnd.dir === "") {
+              if (oDir !== "") rel = oDir;
+            } else if (oDir.startsWith(myEnd.dir + "/")) {
+              rel = oDir.slice(myEnd.dir.length + 1);
+            }
+            if (!rel) continue;
+            for (const pat of [rel, `${rel}/**`]) {
+              if (seenBySourceIdx[i].has(pat)) continue;
+              seenBySourceIdx[i].add(pat);
+              patternsBySourceIdx[i].push(pat);
+              const list = reasons.get(other.name) ?? [];
+              list.push(pat);
+              reasons.set(other.name, list);
+            }
+          }
         }
       }
     }
   }
 
-  return { patterns, reasons };
+  return { patternsBySourceIdx, reasons };
 }
 
 // ── Branch filters ────────────────────────────────────────────────────────────
@@ -730,7 +803,7 @@ export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): v
 // would actually flow to the target if this commit's diff were replayed —
 // without it, a commit whose only changes are ignored produces a "ghost" tree
 // that differs at the source but is identical post-filter.
-function effectiveSourceTree(
+function effectiveSourceTreeSingle(
   hash: string,
   sourceDir: string,
   ignorePatterns: RegExp[],
@@ -752,19 +825,60 @@ function effectiveSourceTree(
   });
 }
 
+// Composite effective tree across all mappings — hash changes iff any
+// mapping's per-source effective tree changes. Each mapping's source subtree
+// is mounted at __src_${i}__/ in the synthesized index so per-mapping pattern
+// sets can be applied without prefix collisions.
+function effectiveSourceTreeMulti(
+  hash: string,
+  sourceDirs: string[],
+  patternsBySourceIdx: RegExp[][],
+): string {
+  if (sourceDirs.length === 1) {
+    return effectiveSourceTreeSingle(hash, sourceDirs[0], patternsBySourceIdx[0] ?? []);
+  }
+  return withTmpIndex("effective-multi", idxEnv => {
+    for (let i = 0; i < sourceDirs.length; i++) {
+      const dir = sourceDirs[i];
+      const treeRef = dir ? `${hash}:${dir}` : `${hash}^{tree}`;
+      const exists = git(["rev-parse", "--verify", `${treeRef}`], { safe: true });
+      if (!exists.ok) continue;
+      git(["read-tree", `--prefix=__src_${i}__/`, treeRef], { env: idxEnv });
+    }
+    const anyPatterns = patternsBySourceIdx.some(p => p && p.length > 0);
+    if (!anyPatterns) return git(["write-tree"], { env: idxEnv });
+    const ls = git(["ls-files"], { env: idxEnv, safe: true });
+    if (ls.ok && ls.stdout) {
+      const toRemove: string[] = [];
+      for (const p of ls.stdout.split("\n").filter(Boolean)) {
+        const m = p.match(/^__src_(\d+)__\/(.*)$/);
+        if (!m) continue;
+        const idx = parseInt(m[1], 10);
+        const rel = m[2];
+        const patterns = patternsBySourceIdx[idx] ?? [];
+        if (patterns.some(re => re.test(rel))) toRemove.push(p);
+      }
+      if (toRemove.length > 0) {
+        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
+      }
+    }
+    return git(["write-tree"], { env: idxEnv });
+  });
+}
+
 /**
- * Apply this commit's diff (vs first parent) to parentTree. Root commits
- * are treated as additions of every file in sourceDir.
+ * Apply this commit's diff (vs first parent) to parentTree, composed across
+ * all of the pair's source→target mappings. Root commits become additions of
+ * every file under every source dir.
  */
 function buildReplayedTree(opts: {
   commitHash: string;
-  sourceDir: string;
-  targetDir: string;
+  mappings: DirMappingDirected[];
   parentTree: string | null;
   tmpIndex: string;
-  shadowIgnorePatterns: RegExp[];
+  shadowIgnorePatternsBySourceIdx: RegExp[][];
 }): string | null {
-  const { commitHash, sourceDir, targetDir, parentTree, tmpIndex, shadowIgnorePatterns } = opts;
+  const { commitHash, mappings, parentTree, tmpIndex, shadowIgnorePatternsBySourceIdx } = opts;
   const idxEnv = { GIT_INDEX_FILE: tmpIndex };
 
   if (parentTree) {
@@ -775,11 +889,16 @@ function buildReplayedTree(opts: {
 
   // diff-tree -r format: :oldmode newmode oldhash newhash status\tpath
   const sourceParent = git(["rev-parse", `${commitHash}^`], { safe: true });
+  const sourceDirs = mappings.map(m => m.source);
+  // Any "" source matches the entire tree → skip the pathspec filter so
+  // siblings of more-specific sources (e.g. src/init.txt next to src/common)
+  // aren't excluded. Otherwise pass the non-root dirs to git's pathspec.
+  const anyRootSource = sourceDirs.some(d => d === "");
   let diffOutput: string;
 
   if (sourceParent.ok) {
     const diffArgs = ["diff-tree", "-r", sourceParent.stdout, commitHash];
-    if (sourceDir) diffArgs.push("--", `${sourceDir}/`);
+    if (!anyRootSource) diffArgs.push("--", ...sourceDirs.map(d => `${d}/`));
     const diffRes = git(diffArgs, { safe: true });
     if (!diffRes.ok) {
       fail(`diff-tree failed for ${commitHash}: ${diffRes.stderr}`);
@@ -788,7 +907,7 @@ function buildReplayedTree(opts: {
   } else {
     // Source root has no parent tree to diff against — reshape ls-tree into diff-tree's "A" entries so downstream logic sees a normal diff.
     const lsArgs = ["ls-tree", "-r", commitHash];
-    if (sourceDir) lsArgs.push("--", `${sourceDir}/`);
+    if (!anyRootSource) lsArgs.push("--", ...sourceDirs.map(d => `${d}/`));
     const lsResult = git(lsArgs, { safe: true });
     if (!lsResult.ok || !lsResult.stdout) return null;
     diffOutput = lsResult.stdout.split("\n").filter(Boolean)
@@ -801,6 +920,12 @@ function buildReplayedTree(opts: {
 
   if (!diffOutput) return parentTree ?? null;
 
+  // Mappings sorted by source-length desc so longest-prefix wins for nested
+  // source dirs. (Disjointness rules out true nesting between two of OUR
+  // mappings, but ordering keeps the fallback unambiguous.)
+  const sortedMappings = mappings.map((m, i) => ({ ...m, idx: i }))
+    .sort((a, b) => b.source.length - a.source.length);
+
   // No -M/-C above, so renames surface as D+A — we only handle A/M/D/T.
   const removals: string[] = [];
   const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
@@ -809,15 +934,15 @@ function buildReplayedTree(opts: {
     if (!m) continue;
     const [, newMode, newHash, status, filePath] = m;
 
-    let srcRelative = filePath;
-    if (sourceDir) {
-      if (!srcRelative.startsWith(`${sourceDir}/`)) continue;
-      srcRelative = srcRelative.slice(sourceDir.length + 1);
-    }
+    // Pick the owning mapping: first source dir that matches the file path.
+    const owner = sortedMappings.find(om =>
+      om.source === "" || filePath === om.source || filePath.startsWith(`${om.source}/`));
+    if (!owner) continue;
 
-    if (shadowIgnorePatterns.some(p => p.test(srcRelative))) continue;
+    const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
+    if ((shadowIgnorePatternsBySourceIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) continue;
 
-    const targetPath = targetDir ? `${targetDir}/${srcRelative}` : srcRelative;
+    const targetPath = owner.target ? `${owner.target}/${srcRelative}` : srcRelative;
 
     if (status === "D") {
       removals.push(targetPath);
@@ -850,23 +975,42 @@ function withTmpIndex<T>(label: string, fn: (idxEnv: { GIT_INDEX_FILE: string })
   }
 }
 
-/** Build a tree from `refOrTree` with `subdir/` stripped out — the "outer" slice. */
-function outerOnlyTree(refOrTree: string, subdir: string): string {
+/** Build a tree from `refOrTree` with every `subdirs[i]/` stripped — the "outer" slice. */
+function outerOnlyTree(refOrTree: string, subdirs: string[]): string {
+  const nonRoot = subdirs.filter(d => d !== "");
+  if (nonRoot.length === 0) {
+    // All-root means the outer is empty.
+    const res = git(["mktree"], { input: "" });
+    return res;
+  }
   return withTmpIndex("outer", idxEnv => {
     git(["read-tree", refOrTree], { env: idxEnv });
-    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
+    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", ...nonRoot], { env: idxEnv, safe: true });
     return git(["write-tree"], { env: idxEnv });
   });
 }
 
-/** Splice `subtreeContent` into `baseTree` at `subdir/`, replacing what was there. */
-function composeSubtree(baseTree: string, subdir: string, subtreeContent: string): string {
+/** Splice each `slices[i].content` into `baseTree` at `slices[i].subdir`. */
+function composeSubtrees(baseTree: string, slices: Array<{ subdir: string; content: string }>): string {
+  const rootSlice = slices.find(s => s.subdir === "");
+  const nonRoot = slices.filter(s => s.subdir !== "");
   return withTmpIndex("compose", idxEnv => {
-    git(["read-tree", baseTree], { env: idxEnv });
-    // --ignore-unmatch: baseTree may not have subdir/ — that's fine, the
-    // subsequent read-tree --prefix populates it from scratch.
-    git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--", subdir], { env: idxEnv, safe: true });
-    git(["read-tree", `--prefix=${subdir}/`, subtreeContent], { env: idxEnv });
+    // Establish base: the root slice wins wholesale if present; otherwise the
+    // caller-supplied baseTree.
+    if (rootSlice) {
+      git(["read-tree", rootSlice.content], { env: idxEnv });
+    } else {
+      git(["read-tree", baseTree], { env: idxEnv });
+    }
+    // Strip every non-root subdir from the base before splicing in the
+    // mapping-specific content, so read-tree --prefix can populate cleanly.
+    if (nonRoot.length > 0) {
+      git(["rm", "-rf", "--cached", "-q", "--ignore-unmatch", "--",
+        ...nonRoot.map(s => s.subdir)], { env: idxEnv, safe: true });
+      for (const s of nonRoot) {
+        git(["read-tree", `--prefix=${s.subdir}/`, s.content], { env: idxEnv });
+      }
+    }
     return git(["write-tree"], { env: idxEnv });
   });
 }
@@ -910,12 +1054,19 @@ function composeMergeBaseTree(opts: {
   dc: DirectionConfig;
 }): string | null {
   const { commit, mappedParents, shaMapping, dc } = opts;
-  const targetDir = dc.target.dir;
   const commitShort = commit.hash.slice(0, 8);
+  const targetDirs = dc.mappings.map(m => m.target);
+  const sourceDirs = dc.mappings.map(m => m.source);
+  // "Cross-repo" semantics fire iff every mapping target is a confined
+  // subdir of the target tree (none of them is the target root). When any
+  // mapping has target="", the synthetic spans the whole target — there's
+  // no outer to preserve, so we fall through to the same-repo branch
+  // (use mappedParents[0]'s tree).
+  const crossRepo = !targetDirs.includes("");
 
   // Cross-repo echo splice runs first — handles round-trip case even when
   // the commit has a single mapped parent that is itself the echo target.
-  if (targetDir) {
+  if (crossRepo) {
     const skipKey = targetTrailerKey(dc);
     const echoTargets: string[] = [];
     for (const sourceParent of commit.parents) {
@@ -928,7 +1079,7 @@ function composeMergeBaseTree(opts: {
 
     if (echoTargets.length > 0) {
       if (echoTargets.length > 1) {
-        const outers = echoTargets.map(t => outerOnlyTree(t, targetDir));
+        const outers = echoTargets.map(t => outerOnlyTree(t, targetDirs));
         if (!outers.every(o => o === outers[0])) return null;
       }
 
@@ -936,18 +1087,28 @@ function composeMergeBaseTree(opts: {
       const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
       if (!echoTreeRes.ok) return null;
 
-      // Round-trip: echo target in mappedParents → splice source's inner over Mm's outer.
+      // Round-trip: echo target in mappedParents → splice each mapping's
+      // source-inner over Mm's outer.
       if (mappedParents.includes(echoTargetSHA)) {
-        const sourceInnerRes = dc.source.dir
-          ? git(["rev-parse", `${commit.hash}:${dc.source.dir}`], { safe: true })
-          : git(["rev-parse", `${commit.hash}^{tree}`], { safe: true });
-        if (!sourceInnerRes.ok) return echoTreeRes.stdout;
-        return composeSubtree(echoTreeRes.stdout, targetDir, sourceInnerRes.stdout);
+        const slices: Array<{ subdir: string; content: string }> = [];
+        for (let i = 0; i < dc.mappings.length; i++) {
+          const m = dc.mappings[i];
+          const ref = m.source ? `${commit.hash}:${m.source}` : `${commit.hash}^{tree}`;
+          const innerRes = git(["rev-parse", ref], { safe: true });
+          if (!innerRes.ok) return echoTreeRes.stdout;
+          slices.push({ subdir: m.target, content: innerRes.stdout });
+        }
+        return composeSubtrees(echoTreeRes.stdout, slices);
       }
 
-      const shadowDirRes = git(["rev-parse", `${mappedParents[0]}:${targetDir}`], { safe: true });
-      if (!shadowDirRes.ok) return echoTreeRes.stdout;
-      return composeSubtree(echoTreeRes.stdout, targetDir, shadowDirRes.stdout);
+      const slices: Array<{ subdir: string; content: string }> = [];
+      for (const m of dc.mappings) {
+        const ref = m.target ? `${mappedParents[0]}:${m.target}` : `${mappedParents[0]}^{tree}`;
+        const shadowRes = git(["rev-parse", ref], { safe: true });
+        if (!shadowRes.ok) return echoTreeRes.stdout;
+        slices.push({ subdir: m.target, content: shadowRes.stdout });
+      }
+      return composeSubtrees(echoTreeRes.stdout, slices);
     }
   }
 
@@ -964,21 +1125,26 @@ function composeMergeBaseTree(opts: {
     }
   }
 
-  if (!targetDir) {
+  if (!crossRepo) {
     const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
     if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
     return treeRes.stdout;
   }
 
   // Cross-repo, no echo, conflict / octopus: outer-agreement.
-  const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDir));
+  const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDirs));
   if (outerTrees.every(t => t === outerTrees[0])) {
-    const subdirRes = git(["rev-parse", `${mappedParents[0]}:${targetDir}`], { safe: true });
-    return subdirRes.ok
-      ? composeSubtree(outerTrees[0], targetDir, subdirRes.stdout)
-      : outerTrees[0];
+    const slices: Array<{ subdir: string; content: string }> = [];
+    for (const m of dc.mappings) {
+      const ref = m.target ? `${mappedParents[0]}:${m.target}` : `${mappedParents[0]}^{tree}`;
+      const subdirRes = git(["rev-parse", ref], { safe: true });
+      if (!subdirRes.ok) return outerTrees[0];
+      slices.push({ subdir: m.target, content: subdirRes.stdout });
+    }
+    return composeSubtrees(outerTrees[0], slices);
   }
 
+  void sourceDirs;
   return null;
 }
 
@@ -1151,10 +1317,14 @@ function formatUnresolvableMergeError(opts: {
   const reason = mappedParents.length === 2
     ? `merge-tree conflict between mapped parents on ${target.remote}`
     : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`;
-  const sourceScope = source.dir ? `${source.dir}/` : "<root>";
+  const sourceDirs = dc.mappings.map(m => m.source).filter(d => d !== "");
+  const targetDirs = dc.mappings.map(m => m.target).filter(d => d !== "");
+  const sourceScope = sourceDirs.length > 0 ? sourceDirs.map(d => `${d}/`).join(", ") : "<root>";
+  const targetScope = targetDirs.length > 0 ? targetDirs.map(d => `${d}/`).join(", ") : "<root>";
   const outerNote =
-    `Mapped parents disagree on outer state (files outside ${target.dir}/). ` +
+    `Mapped parents disagree on outer state (files outside ${targetScope}). ` +
     `The source commit's scope is ${sourceScope}, so it couldn't have authored this outer-state difference.`;
+  void source;
   const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
   const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
@@ -1318,9 +1488,9 @@ function replayCommits(opts: {
   shaMapping: Map<string, string>;
   targetInit: string | null;
   dc: DirectionConfig;
-  autoIgnorePatterns: RegExp[];
+  autoIgnorePatternsBySourceIdx: RegExp[][];
 }): ReplayHalts {
-  const { newCommits, shaMapping, targetInit, dc, autoIgnorePatterns } = opts;
+  const { newCommits, shaMapping, targetInit, dc, autoIgnorePatternsBySourceIdx } = opts;
   const addKey = sourceTrailerKey(dc);
   const tmpIndex = path.join(
     os.tmpdir(),
@@ -1372,15 +1542,15 @@ function replayCommits(opts: {
         }
       }
 
-      const shadowIgnorePatterns = readShadowIgnorePatterns(commit.hash, dc.source.dir, autoIgnorePatterns);
+      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
+        readShadowIgnorePatterns(commit.hash, m.source, autoIgnorePatternsBySourceIdx[i] ?? []));
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,
-        sourceDir: dc.source.dir,
-        targetDir: dc.target.dir,
+        mappings: dc.mappings,
         parentTree,
         tmpIndex,
-        shadowIgnorePatterns,
+        shadowIgnorePatternsBySourceIdx: shadowIgnoreBySourceIdx,
       });
 
       if (!tree) {
@@ -1440,7 +1610,7 @@ export function mirrorHistory(opts: {
   const dc = buildDirectionConfig(pair, from);
 
   const auto = computeAutoIgnorePatterns(dc);
-  const autoIgnorePatterns = auto.patterns.map(compileIgnorePattern);
+  const autoIgnorePatternsBySourceIdx = auto.patternsBySourceIdx.map(arr => arr.map(compileIgnorePattern));
   if (auto.reasons.size > 0) {
     for (const [fromPair, pats] of auto.reasons) {
       console.log(`Auto-ignoring nested-pair paths from "${fromPair}": ${pats.join(", ")}`);
@@ -1451,8 +1621,9 @@ export function mirrorHistory(opts: {
   const shaMapping = loadReplayedMappings({ branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  const sourceCommits = collectSourceCommits(dc.source, branches);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, autoIgnorePatterns, dc);
+  const sourceDirs = dc.mappings.map(m => m.source);
+  const sourceCommits = collectSourceCommits(dc.source, branches, sourceDirs);
+  const relevantCommits = filterLoadBearingCommits(sourceCommits, autoIgnorePatternsBySourceIdx, dc);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote);
 
@@ -1478,7 +1649,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, autoIgnorePatterns });
+  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, autoIgnorePatternsBySourceIdx });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're

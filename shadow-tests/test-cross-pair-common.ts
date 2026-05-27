@@ -136,8 +136,8 @@ export default function run(): void {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "common-backend",  a: { remote: "origin", url: mono.bare, dir: "common" }, b: { remote: "backend",  url: backend.bare,  dir: "src/common" } },
-        { name: "common-frontend", a: { remote: "origin", url: mono.bare, dir: "common" }, b: { remote: "frontend", url: frontend.bare, dir: "src/common" } },
+        { name: "common-backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "common", b: "src/common" }] },
+        { name: "common-frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "common", b: "src/common" }] },
       ],
       shadowBranchPrefix: "shadow",
     });

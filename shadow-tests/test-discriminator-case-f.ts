@@ -124,8 +124,8 @@ async function runE1AutoIgnore(tmpDir: string) {
       // Sibling overlap: "backend" pair's source (dir="") contains
       // "common-backend"'s source dir "src/common". The "backend"
       // pair gets autoIgnorePatterns covering that nested subtree.
-      { name: "backend",        a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
-      { name: "common-backend", a: { remote: "origin", url: mono.bare, dir: "common"  }, b: { remote: "backend", url: backend.bare, dir: "src/common" } },
+      { name: "backend",        a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "backend", b: "" }] },
+      { name: "common-backend", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "common",  b: "src/common" }] },
     ],
     shadowBranchPrefix: "shadow",
   });
@@ -175,7 +175,7 @@ async function runE2ShadowIgnore(tmpDir: string) {
   applyTestOverrides({
     repoRoot: mono.working,
     pairs: [
-      { name: "leaf", a: { remote: "origin", url: mono.bare, dir: "leaf" }, b: { remote: "leaf", url: leaf.bare, dir: "" } },
+      { name: "leaf", a: { remote: "origin", url: mono.bare }, b: { remote: "leaf", url: leaf.bare }, mappings: [{ a: "leaf", b: "" }] },
     ],
     shadowBranchPrefix: "shadow",
   });

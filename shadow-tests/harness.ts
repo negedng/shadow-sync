@@ -235,8 +235,9 @@ export interface RunResult {
 function buildPairs(env: TestEnv): SyncPair[] {
   return env.remotes.map(r => ({
     name: r.subdir,
-    a: { remote: "origin", url: env.originBare, dir: r.subdir },
-    b: { remote: r.remoteName, url: r.remoteBare, dir: r.remoteSubdir },
+    a: { remote: "origin", url: env.originBare },
+    b: { remote: r.remoteName, url: r.remoteBare },
+    mappings: [{ a: r.subdir, b: r.remoteSubdir }],
   }));
 }
 

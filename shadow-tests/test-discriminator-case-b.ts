@@ -82,8 +82,8 @@ async function main() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",  a: { remote: "origin", url: mono.bare, dir: "backend"  }, b: { remote: "backend",  url: backend.bare,  dir: "" } },
-        { name: "frontend", a: { remote: "origin", url: mono.bare, dir: "frontend" }, b: { remote: "frontend", url: frontend.bare, dir: "" } },
+        { name: "backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "backend",  b: "" }] },
+        { name: "frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "frontend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });

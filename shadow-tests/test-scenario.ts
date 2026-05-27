@@ -323,8 +323,8 @@ function runSht5() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",  a: { remote: "origin", url: mono.bare, dir: "backend"  }, b: { remote: "backend",  url: backend.bare,  dir: "" } },
-        { name: "frontend", a: { remote: "origin", url: mono.bare, dir: "frontend" }, b: { remote: "frontend", url: frontend.bare, dir: "" } },
+        { name: "backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "backend",  b: "" }] },
+        { name: "frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "frontend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -1062,14 +1062,30 @@ function runSht6() {
     }, "Mc0");
     git("push origin main", mono.working);
 
-    // 4-pair config: parent + dedicated common pairs, nested dir on the leaf side.
+    // 2-pair config (multi-mapping): each pair covers its own slice AND
+    // the shared common/ slice. Replaces the older 4-pair shape with
+    // dedicated common-backend / common-frontend pairs.
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",         a: { remote: "origin", url: mono.bare, dir: "backend"  }, b: { remote: "backend",  url: backend.bare,  dir: "" } },
-        { name: "frontend",        a: { remote: "origin", url: mono.bare, dir: "frontend" }, b: { remote: "frontend", url: frontend.bare, dir: "" } },
-        { name: "common-backend",  a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "backend",  url: backend.bare,  dir: "src/common"   } },
-        { name: "common-frontend", a: { remote: "origin", url: mono.bare, dir: "common"   }, b: { remote: "frontend", url: frontend.bare, dir: "src/app/common"        } },
+        {
+          name: "backend",
+          a: { remote: "origin",  url: mono.bare    },
+          b: { remote: "backend", url: backend.bare },
+          mappings: [
+            { a: "backend", b: "" },
+            { a: "common",  b: "src/common" },
+          ],
+        },
+        {
+          name: "frontend",
+          a: { remote: "origin",   url: mono.bare     },
+          b: { remote: "frontend", url: frontend.bare },
+          mappings: [
+            { a: "frontend", b: "" },
+            { a: "common",   b: "src/app/common" },
+          ],
+        },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -1099,32 +1115,26 @@ function runSht6() {
     }
 
     git("fetch origin", mono.working);
-    // Shadow refs on monorepo are monorepo-shaped: leaf content is spliced under
-    // the target dir, monorepo's bootstrap tree (Mc0) provides everything else.
-    // Parent-pair shadow refs: canonical common excluded via autoignore
-    // (derived from the common-* pairs nested inside the parent pairs).
-    assertPathPresent(mono, "origin/shadow/backend/main",  "backend/src/init.txt",      "[Phase 1 backend shadow]");
-    assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/common/util.ts", "[Phase 1 backend shadow] canonical common excluded");
-    assertPathPresent(mono, "origin/shadow/frontend/main", "frontend/src/init.txt",     "[Phase 1 frontend shadow]");
-    assertPathAbsent(mono,  "origin/shadow/frontend/main", "frontend/src/app/common/util.ts", "[Phase 1 frontend shadow] canonical common excluded");
-    // Common-pair shadow refs: canonical common content under "common/" prefix.
-    assertPathPresent(mono, "origin/shadow/common-backend/main",  "common/util.ts", "[Phase 1 common-backend shadow] util.ts under common/");
-    assertContent(mono, "origin/shadow/common-backend/main", "common/util.ts", "util v1\n", "[Phase 1 common-backend shadow]");
-    assertPathPresent(mono, "origin/shadow/common-frontend/main", "common/util.ts", "[Phase 1 common-frontend shadow] util.ts under common/");
-    assertContent(mono, "origin/shadow/common-frontend/main", "common/util.ts", "util v1\n", "[Phase 1 common-frontend shadow]");
-    // Common-pair shadow refs must NOT carry non-common leaf content (e.g. src/init.txt).
-    assertPathAbsent(mono, "origin/shadow/common-backend/main",  "backend/src/init.txt", "[Phase 1 common-backend shadow] no non-common leaf content");
-    assertPathAbsent(mono, "origin/shadow/common-frontend/main", "frontend/src/init.txt", "[Phase 1 common-frontend shadow] no non-common leaf content");
+    // Shadow refs on monorepo are monorepo-shaped: each pair's shadow ref
+    // carries BOTH its primary slice (backend/, frontend/) AND its share of
+    // the common/ slice via the second mapping. Longest-prefix routing in
+    // buildReplayedTree keeps canonical common out of the nested
+    // backend/src/common/ and frontend/src/app/common/ subdirs.
+    assertPathPresent(mono, "origin/shadow/backend/main",  "backend/src/init.txt",      "[Phase 1 backend shadow] primary slice");
+    assertPathPresent(mono, "origin/shadow/backend/main",  "common/util.ts",            "[Phase 1 backend shadow] common slice");
+    assertContent(mono,     "origin/shadow/backend/main",  "common/util.ts", "util v1\n", "[Phase 1 backend shadow] common util.ts");
+    assertPathAbsent(mono,  "origin/shadow/backend/main",  "backend/src/common/util.ts", "[Phase 1 backend shadow] canonical common routed via longer mapping");
+    assertPathPresent(mono, "origin/shadow/frontend/main", "frontend/src/init.txt",     "[Phase 1 frontend shadow] primary slice");
+    assertPathPresent(mono, "origin/shadow/frontend/main", "common/util.ts",            "[Phase 1 frontend shadow] common slice");
+    assertContent(mono,     "origin/shadow/frontend/main", "common/util.ts", "util v1\n", "[Phase 1 frontend shadow] common util.ts");
+    assertPathAbsent(mono,  "origin/shadow/frontend/main", "frontend/src/app/common/util.ts", "[Phase 1 frontend shadow] canonical common routed via longer mapping");
 
     // ── Phase 1b: Merge shadow refs into monorepo main ──────────────────────
-    // Order: backend → common-backend → frontend → common-frontend.
-    // The second common merge is a no-op (same byte content from byte-identical leaves).
-    const Mcm1 = mergeRef(mono, "origin/shadow/backend/main",         "Mcm1");
-    const Mcm2 = mergeRef(mono, "origin/shadow/common-backend/main",  "Mcm2");
-    const Mcm3 = mergeRef(mono, "origin/shadow/frontend/main",        "Mcm3");
-    const Mcm4 = mergeRef(mono, "origin/shadow/common-frontend/main", "Mcm4");
+    // Two merges only — each pair's single shadow ref brings both slices.
+    const Mcm1 = mergeRef(mono, "origin/shadow/backend/main",  "Mcm1");
+    const Mcm4 = mergeRef(mono, "origin/shadow/frontend/main", "Mcm4");
     git("push origin main", mono.working);
-    void Mcm1; void Mcm2; void Mcm3;
+    void Mcm1;
 
     // Mcm4 is the post-init monorepo state. Verify the layout matches the design:
     // root common/, no nested canonical common under backend/ or frontend/.
@@ -1149,13 +1159,13 @@ function runSht6() {
       assertEqual(r.exitCode, 0, `[Phase 2] --from a after Mcm5: ${r.stderr.slice(0, 400)}`);
     }
 
-    // Each leaf merges its dedicated common shadow ref to land the v2 update at
-    // its own canonical path.
+    // Each leaf merges its single shadow ref — the same merge brings both
+    // the parent slice and the common slice at their canonical leaf paths.
     git("fetch origin", backend.working);
-    const Bcm1 = mergeRef(backend, "origin/shadow/common-backend/main", "Bcm1");
+    const Bcm1 = mergeRef(backend, "origin/shadow/backend/main", "Bcm1");
     git("push origin main", backend.working);
     git("fetch origin", frontend.working);
-    const Fcm1 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm1");
+    const Fcm1 = mergeRef(frontend, "origin/shadow/frontend/main", "Fcm1");
     git("push origin main", frontend.working);
 
     assertContent(backend,  Bcm1, "src/common/util.ts", "util v2\n", "[Phase 2] backend canonical = v2");
@@ -1180,23 +1190,19 @@ function runSht6() {
     }
 
     git("fetch origin", backend.working);
-    const Bcm2 = mergeRef(backend, "origin/shadow/backend/main",        "Bcm2");
-    const Bcm3 = mergeRef(backend, "origin/shadow/common-backend/main", "Bcm3");
+    const Bcm3 = mergeRef(backend, "origin/shadow/backend/main", "Bcm3");
     git("push origin main", backend.working);
-    void Bcm2;
 
     git("fetch origin", frontend.working);
-    const Fcm2 = mergeRef(frontend, "origin/shadow/frontend/main",        "Fcm2");
-    const Fcm3 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm3");
+    const Fcm3 = mergeRef(frontend, "origin/shadow/frontend/main", "Fcm3");
     git("push origin main", frontend.working);
-    void Fcm2;
 
-    assertPathPresent(backend, Bcm3, "src/api.ts", "[Phase 3] backend got api.ts via parent pair");
+    assertPathPresent(backend, Bcm3, "src/api.ts", "[Phase 3] backend got api.ts via primary mapping");
     assertContent(backend, Bcm3, "src/api.ts", "api v1\n", "[Phase 3] backend api.ts content");
     assertContent(backend, Bcm3, "src/common/util.ts", "util v3\n", "[Phase 3] backend canonical common = v3");
     assertPathAbsent(backend, Bcm3, "src/component.ts", "[Phase 3] frontend slice did NOT leak to backend");
 
-    assertPathPresent(frontend, Fcm3, "src/component.ts", "[Phase 3] frontend got component.ts via parent pair");
+    assertPathPresent(frontend, Fcm3, "src/component.ts", "[Phase 3] frontend got component.ts via primary mapping");
     assertContent(frontend, Fcm3, "src/component.ts", "component v1\n", "[Phase 3] frontend component.ts content");
     assertContent(frontend, Fcm3, "src/app/common/util.ts", "util v3\n", "[Phase 3] frontend canonical common = v3");
     assertPathAbsent(frontend, Fcm3, "src/api.ts", "[Phase 3] backend slice did NOT leak to frontend");
@@ -1227,13 +1233,13 @@ function runSht6() {
     assertContent(backend, Bcm4, "src/common/util.ts", "util v3\n",
       "[Phase 4] canonical common still at v3, variant did not leak in");
 
-    // The common pair must not have picked up the variant file. On the
-    // common-backend shadow (mono-shaped), the leaf's src/common/
-    // content is spliced under "common/" — a variant-only.ts under "common/"
-    // there would indicate leakage.
+    // The common mapping must not have picked up the variant file. With
+    // longest-prefix routing, the variant lands under the primary mapping's
+    // target (backend/project/...) — it must NOT appear at the common
+    // mapping's target (common/variant-only.ts).
     git("fetch origin", mono.working);
-    assertPathAbsent(mono, "origin/shadow/common-backend/main", "common/variant-only.ts",
-      "[Phase 4] variant file did NOT leak into common-backend shadow");
+    assertPathAbsent(mono, "origin/shadow/backend/main", "common/variant-only.ts",
+      "[Phase 4] variant file did NOT route to the common mapping's target");
 
     // monorepo/common/ must not gain variant-only.ts (the strict mapping invariant).
     // Re-fetch and check the post-Mcm7 main tip's tree.
@@ -1259,13 +1265,14 @@ function runSht6() {
     }
 
     git("fetch origin", mono.working);
-    // Bcm5 was replayed onto common-backend's shadow chain on monorepo.
-    assertContent(mono, "origin/shadow/common-backend/main", "common/util.ts", "util v3 leaf-stray\n",
-      "[Phase 5] leaf-stray edit reached monorepo's shadow/common-backend");
+    // Bcm5 was replayed onto the backend pair's shadow chain on monorepo —
+    // the common mapping routes src/common/util.ts to mono common/util.ts.
+    assertContent(mono, "origin/shadow/backend/main", "common/util.ts", "util v3 leaf-stray\n",
+      "[Phase 5] leaf-stray edit reached monorepo's shadow/backend (via common mapping)");
     // Operator merges to accept the leaf change into monorepo's common/.
     git("checkout main", mono.working);
     git("pull origin main", mono.working);
-    const Mcm8 = mergeRef(mono, "origin/shadow/common-backend/main", "Mcm8");
+    const Mcm8 = mergeRef(mono, "origin/shadow/backend/main", "Mcm8");
     git("push origin main", mono.working);
     void Mcm8;
 
@@ -1275,7 +1282,7 @@ function runSht6() {
     }
 
     git("fetch origin", frontend.working);
-    const Fcm4 = mergeRef(frontend, "origin/shadow/common-frontend/main", "Fcm4");
+    const Fcm4 = mergeRef(frontend, "origin/shadow/frontend/main", "Fcm4");
     git("push origin main", frontend.working);
 
     // Final --from b captures Fcm4 in monorepo's shadow chain. Without this,
@@ -2126,7 +2133,7 @@ function runSht8() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend", a: { remote: "origin", url: mono.bare, dir: "backend" }, b: { remote: "backend", url: backend.bare, dir: "" } },
+        { name: "backend", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "backend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });

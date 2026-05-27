@@ -2,8 +2,11 @@
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "repo-a", "url": "https://github.com/negedng/repo-a.git", "dir": "backend" },
-      "b": { "remote": "repo-b", "url": "https://github.com/negedng/repo-b.git", "dir": "" }
+      "a": { "remote": "repo-a", "url": "https://github.com/negedng/repo-a.git" },
+      "b": { "remote": "repo-b", "url": "https://github.com/negedng/repo-b.git" },
+      "mappings": [
+        { "a": "backend", "b": "" }
+      ]
     }
   ],
 
