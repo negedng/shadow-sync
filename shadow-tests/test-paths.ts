@@ -21,8 +21,6 @@ import {
   getShadowLogFull, getExternalShadowLogFull,
   setTestBranchAllowlist,
 } from "./harness";
-import { applyTestOverrides, SyncPair } from "../shadow-common";
-import { runSync } from "../shadow-sync";
 import { assertEqual, assertIncludes } from "./assert";
 
 function git(cmd: string, cwd: string): string {
@@ -403,82 +401,7 @@ function runShadowignoreNeverInTree(): void {
   }
 }
 
-// ── E. auto-derived shadowignore: nested pair on same remote ────────────────
-// Two pairs share a remote with one nested in the other; no manual .shadowignore.
-function runAutoIgnoreNestedPair(): void {
-  const env = createTestEnv("auto-ignore-nested", "backend");
-  try {
-    const pairs: SyncPair[] = [
-      { name: "backend",        a: { remote: "origin", url: env.originBare }, b: { remote: "team", url: env.remoteBare }, mappings: [{ a: "backend", b: "" }] },
-      { name: "common-backend", a: { remote: "origin", url: env.originBare }, b: { remote: "team", url: env.remoteBare }, mappings: [{ a: "common",  b: "src/common" }] },
-    ];
-
-    // Phase 1: leaf commits top-level + nested-common files, no .shadowignore.
-    fs.writeFileSync(path.join(env.remoteWorking, "app.ts"), "leaf app\n");
-    fs.mkdirSync(path.join(env.remoteWorking, "src/common"), { recursive: true });
-    fs.writeFileSync(path.join(env.remoteWorking, "src/common/util.ts"), "util v1\n");
-    git("add -A", env.remoteWorking);
-    git('commit -m "leaf: app + nested common"', env.remoteWorking);
-    git("push origin main", env.remoteWorking);
-
-    applyTestOverrides({ repoRoot: env.localRepo, pairs, shadowBranchPrefix: env.branchPrefix });
-    const r1 = runSync({ from: "b" });
-    assertEqual(r1.exitCode, 0, "[auto-ignore 1] sync --from b should succeed");
-    assertIncludes(r1.stdout, "Auto-ignoring nested-pair paths", "[auto-ignore 1] log line printed");
-    assertIncludes(r1.stdout, "src/common", "[auto-ignore 1] log mentions nested path");
-    assertIncludes(r1.stdout, "common-backend", "[auto-ignore 1] log names the source pair");
-
-    // Backend shadow must not carry the nested-pair contents.
-    git(`fetch origin shadow/backend/main`, env.localRepo);
-    const backendHashes = git(`log origin/shadow/backend/main --format=%H`, env.localRepo).split("\n").filter(Boolean);
-    for (const h of backendHashes) {
-      const files = git(`ls-tree -r --name-only ${h}`, env.localRepo).split("\n").filter(Boolean);
-      assertEqual(files.some(f => f.startsWith("backend/src/common/")), false,
-        `[auto-ignore 1] backend shadow ${h.slice(0, 8)}: no backend/src/common/`);
-    }
-
-    // Negative control: common-backend shadow DOES carry the nested file.
-    git(`fetch origin shadow/common-backend/main`, env.localRepo);
-    const cbContent = execSync(`git show origin/shadow/common-backend/main:common/util.ts`, {
-      cwd: env.localRepo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
-    }).replace(/\r\n/g, "\n");
-    assertEqual(cbContent, "util v1\n", "[auto-ignore 1] common-backend shadow carries util.ts");
-
-    // Phase 2: union with a manual .shadowignore on the leaf — both should block.
-    fs.writeFileSync(path.join(env.remoteWorking, ".shadowignore"), "extra/**\n");
-    fs.mkdirSync(path.join(env.remoteWorking, "extra"), { recursive: true });
-    fs.writeFileSync(path.join(env.remoteWorking, "extra/secret.ts"), "secret\n");
-    fs.writeFileSync(path.join(env.remoteWorking, "app.ts"), "leaf app v2\n");
-    fs.writeFileSync(path.join(env.remoteWorking, "src/common/util.ts"), "util v2\n");
-    git("add -A", env.remoteWorking);
-    git('commit -m "leaf: manual shadowignore + extra + updates"', env.remoteWorking);
-    git("push origin main", env.remoteWorking);
-
-    applyTestOverrides({ repoRoot: env.localRepo, pairs, shadowBranchPrefix: env.branchPrefix });
-    const r2 = runSync({ from: "b" });
-    assertEqual(r2.exitCode, 0, "[auto-ignore 2: union] sync should succeed");
-
-    git(`fetch origin shadow/backend/main`, env.localRepo);
-    const hashes2 = git(`log origin/shadow/backend/main --format=%H`, env.localRepo).split("\n").filter(Boolean);
-    for (const h of hashes2) {
-      const files = git(`ls-tree -r --name-only ${h}`, env.localRepo).split("\n").filter(Boolean);
-      assertEqual(files.some(f => f.startsWith("backend/src/common/")), false,
-        `[auto-ignore 2] backend shadow ${h.slice(0, 8)}: no nested-pair (auto)`);
-      assertEqual(files.some(f => f.startsWith("backend/extra/")), false,
-        `[auto-ignore 2] backend shadow ${h.slice(0, 8)}: no manual-ignore extra/`);
-    }
-
-    // common-backend shadow tracks the v2 update.
-    const cbV2 = execSync(`git show origin/shadow/common-backend/main:common/util.ts`, {
-      cwd: env.localRepo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
-    }).replace(/\r\n/g, "\n");
-    assertEqual(cbV2, "util v2\n", "[auto-ignore 2] common-backend shadow tracks v2");
-  } finally {
-    env.cleanup();
-  }
-}
-
-// ── F. multi-level .shadowignore + implicit self-strip ─────────────────────
+// ── E. multi-level .shadowignore + implicit self-strip ─────────────────────
 // .shadowignore at the source repo root cascades into the pair's sourceDir.
 // .shadowignore files themselves are never replayed onto the target.
 function runShadowignoreMultiLevel(): void {
@@ -538,7 +461,6 @@ export default function run(): void {
   runWarnings();
   runBranchesCustomPrefix();
   runShadowignoreNeverInTree();
-  runAutoIgnoreNestedPair();
   runShadowignoreMultiLevel();
 
   } finally {

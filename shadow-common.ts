@@ -452,7 +452,6 @@ function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoComm
 
 function filterLoadBearingCommits(
   commits: TopoCommit[],
-  autoIgnorePatternsBySourceIdx: RegExp[][],
   dc: DirectionConfig,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
@@ -460,7 +459,7 @@ function filterLoadBearingCommits(
   const keptSet = new Set<string>();
   const kept: TopoCommit[] = [];
   for (const c of commits) {
-    if (isLoadBearing(c, dc, autoIgnorePatternsBySourceIdx, keptSet)) {
+    if (isLoadBearing(c, dc, keptSet)) {
       keptSet.add(c.hash);
       kept.push(c);
     }
@@ -478,13 +477,12 @@ function filterLoadBearingCommits(
 function isLoadBearing(
   c: TopoCommit,
   dc: DirectionConfig,
-  autoIgnorePatternsBySourceIdx: RegExp[][],
   keptSet: Set<string>,
 ): boolean {
   if (c.parents.length === 0) return true;
 
-  const effectiveIgnoreBySrc = dc.mappings.map((m, i) =>
-    readShadowIgnorePatterns(c.hash, m.source, autoIgnorePatternsBySourceIdx[i] ?? []));
+  const effectiveIgnoreBySrc = dc.mappings.map(m =>
+    readShadowIgnorePatterns(c.hash, m.source));
 
   // The effective-ignore list always contains SHADOWIGNORE_SELF_RE, so we
   // never short-circuit on "empty patterns" alone. Composite fingerprint
@@ -605,16 +603,15 @@ function dropOrphanedCommits(
 // source-side metadata for shadow-sync, never replayed onto the target.
 const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
 
-// Merge auto-ignore patterns with .shadowignore files at every level from
-// sourceDir up to the repo root (gitignore-style: deeper files layer on top
-// of root-level files). File contents are read at the commit's snapshot so
-// patterns can evolve through history.
+// Read .shadowignore files at every level from sourceDir up to the repo root
+// (gitignore-style: deeper files layer on top of root-level files). File
+// contents are read at the commit's snapshot so patterns can evolve through
+// history.
 function readShadowIgnorePatterns(
   commitHash: string,
   sourceDir: string,
-  autoIgnorePatterns: RegExp[],
 ): RegExp[] {
-  const patterns: RegExp[] = [...autoIgnorePatterns, SHADOWIGNORE_SELF_RE];
+  const patterns: RegExp[] = [SHADOWIGNORE_SELF_RE];
 
   const dirs: string[] = [];
   if (sourceDir) {
@@ -697,64 +694,6 @@ export function compileIgnorePattern(pattern: string): RegExp {
     .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
     .replace(/<<GLOBSTAR>>/g, ".*");
   return new RegExp(`^${regex}$`);
-}
-
-/**
- * Derive ignore patterns for paths owned by another pair nested inside this
- * pair's source/target endpoint on the same remote. Lets two pairs share a
- * remote where one's `dir` is inside the other's without the outer pair
- * carrying the inner pair's content (which would duplicate on the target).
- */
-function computeAutoIgnorePatterns(
-  dc: DirectionConfig,
-  allPairs: SyncPair[] = PAIRS,
-): { patternsBySourceIdx: string[][]; reasons: Map<string, string[]> } {
-  const patternsBySourceIdx: string[][] = dc.mappings.map(() => []);
-  const seenBySourceIdx: Set<string>[] = dc.mappings.map(() => new Set<string>());
-  const reasons = new Map<string, string[]>();
-
-  // Per source mapping i, look for nesting against every other pair's
-  // mapping dirs on the same remote (matched against either source or target
-  // side of THIS pair — content-relative space is symmetric within a mapping).
-  for (let i = 0; i < dc.mappings.length; i++) {
-    const myMapping = dc.mappings[i];
-    const myEnds: Array<{ endpoint: RepoEndpoint; dir: string }> = [
-      { endpoint: dc.source, dir: myMapping.source },
-      { endpoint: dc.target, dir: myMapping.target },
-    ];
-
-    for (const other of allPairs) {
-      if (other.name === dc.pair.name) continue;
-      const otherSides: Array<{ endpoint: RepoEndpoint; dirs: string[] }> = [
-        { endpoint: other.a, dirs: other.mappings.map(m => m.a) },
-        { endpoint: other.b, dirs: other.mappings.map(m => m.b) },
-      ];
-      for (const otherSide of otherSides) {
-        for (const myEnd of myEnds) {
-          if (otherSide.endpoint.remote !== myEnd.endpoint.remote) continue;
-          for (const oDir of otherSide.dirs) {
-            let rel: string | null = null;
-            if (myEnd.dir === "") {
-              if (oDir !== "") rel = oDir;
-            } else if (oDir.startsWith(myEnd.dir + "/")) {
-              rel = oDir.slice(myEnd.dir.length + 1);
-            }
-            if (!rel) continue;
-            for (const pat of [rel, `${rel}/**`]) {
-              if (seenBySourceIdx[i].has(pat)) continue;
-              seenBySourceIdx[i].add(pat);
-              patternsBySourceIdx[i].push(pat);
-              const list = reasons.get(other.name) ?? [];
-              list.push(pat);
-              reasons.set(other.name, list);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return { patternsBySourceIdx, reasons };
 }
 
 // ── Branch filters ────────────────────────────────────────────────────────────
@@ -1461,9 +1400,8 @@ function replayCommits(opts: {
   shaMapping: Map<string, string>;
   targetInit: string | null;
   dc: DirectionConfig;
-  autoIgnorePatternsBySourceIdx: RegExp[][];
 }): ReplayHalts {
-  const { newCommits, shaMapping, targetInit, dc, autoIgnorePatternsBySourceIdx } = opts;
+  const { newCommits, shaMapping, targetInit, dc } = opts;
   const addKey = sourceTrailerKey(dc);
   const tmpIndex = path.join(
     os.tmpdir(),
@@ -1515,8 +1453,8 @@ function replayCommits(opts: {
         }
       }
 
-      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
-        readShadowIgnorePatterns(commit.hash, m.source, autoIgnorePatternsBySourceIdx[i] ?? []));
+      const shadowIgnoreBySourceIdx = dc.mappings.map(m =>
+        readShadowIgnorePatterns(commit.hash, m.source));
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,
@@ -1582,20 +1520,12 @@ export function mirrorHistory(opts: {
   const { pair, from, branches } = opts;
   const dc = buildDirectionConfig(pair, from);
 
-  const auto = computeAutoIgnorePatterns(dc);
-  const autoIgnorePatternsBySourceIdx = auto.patternsBySourceIdx.map(arr => arr.map(compileIgnorePattern));
-  if (auto.reasons.size > 0) {
-    for (const [fromPair, pats] of auto.reasons) {
-      console.log(`Auto-ignoring nested-pair paths from "${fromPair}": ${pats.join(", ")}`);
-    }
-  }
-
   console.log("Scanning history for already-replayed commits...");
   const shaMapping = loadReplayedMappings({ branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const sourceCommits = collectSourceCommits(dc, branches);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, autoIgnorePatternsBySourceIdx, dc);
+  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote);
 
@@ -1621,7 +1551,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, autoIgnorePatternsBySourceIdx });
+  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're
