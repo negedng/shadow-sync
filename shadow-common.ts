@@ -46,6 +46,57 @@ interface DirectionConfig {
   target: RepoEndpoint;
   /** Direction-flipped pair.mappings. */
   mappings: DirMappingDirected[];
+  /**
+   * Per-mapping auto-ignore patterns derived from intra-pair nested mappings.
+   * When one mapping's source path is the empty string or a strict prefix of
+   * another mapping's source path, the inner path's content is "owned" by the
+   * sibling mapping and must be stripped from the outer mapping's source slice.
+   * Same logic on the target side. Indexed by mapping idx; each entry has
+   * patterns for source-side reads and target-side reads.
+   */
+  autoIgnoreBySourceIdx: RegExp[][];
+  autoIgnoreByTargetIdx: RegExp[][];
+}
+
+// Build patterns to strip `innerPath/...` content from a tree rooted at `outerPath`.
+// `outerPath === ""` means tree root; `innerPath` must be non-empty and (when
+// outerPath is non-empty) start with `outerPath + "/"`. Returns null if inner
+// is not nested under outer.
+function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): RegExp[] | null {
+  let rel: string | null = null;
+  if (outerPath === "") {
+    if (innerPath === "") return null;
+    rel = innerPath;
+  } else if (innerPath.startsWith(outerPath + "/")) {
+    rel = innerPath.slice(outerPath.length + 1);
+  } else {
+    return null;
+  }
+  const escaped = escapeRegex(rel);
+  // Match the directory entry itself and anything under it.
+  return [new RegExp(`^${escaped}$`), new RegExp(`^${escaped}/.*$`)];
+}
+
+// Per-pair, per-mapping auto-ignore: a mapping's source/target slice excludes
+// content owned by sibling mappings nested under it. Trigger is intra-pair
+// nested mappings (e.g. primary at "" with a sibling at "src/common"); the
+// old trigger (multiple pairs on the same remote with overlapping dirs) is
+// gone now that SyncPair.mappings carries N folder mappings per pair.
+function computeAutoIgnorePatterns(
+  pair: SyncPair,
+): { a: RegExp[]; b: RegExp[] }[] {
+  return pair.mappings.map(m => {
+    const a: RegExp[] = [];
+    const b: RegExp[] = [];
+    for (const sibling of pair.mappings) {
+      if (sibling === m) continue;
+      const aPats = nestedRelativeIgnorePatterns(m.a, sibling.a);
+      if (aPats) a.push(...aPats);
+      const bPats = nestedRelativeIgnorePatterns(m.b, sibling.b);
+      if (bPats) b.push(...bPats);
+    }
+    return { a, b };
+  });
 }
 
 function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig {
@@ -53,7 +104,10 @@ function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig 
   const target = from === "a" ? pair.b : pair.a;
   const mappings = pair.mappings.map(m =>
     from === "a" ? { source: m.a, target: m.b } : { source: m.b, target: m.a });
-  return { pair, source, target, mappings };
+  const autoByMapping = computeAutoIgnorePatterns(pair);
+  const autoIgnoreBySourceIdx = autoByMapping.map(p => from === "a" ? p.a : p.b);
+  const autoIgnoreByTargetIdx = autoByMapping.map(p => from === "a" ? p.b : p.a);
+  return { pair, source, target, mappings, autoIgnoreBySourceIdx, autoIgnoreByTargetIdx };
 }
 
 // Derived projections of dc.mappings — recomputed at each call site,
@@ -481,8 +535,8 @@ function isLoadBearing(
 ): boolean {
   if (c.parents.length === 0) return true;
 
-  const effectiveIgnoreBySrc = dc.mappings.map(m =>
-    readShadowIgnorePatterns(c.hash, m.source));
+  const effectiveIgnoreBySrc = dc.mappings.map((m, i) =>
+    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
 
   // The effective-ignore list always contains SHADOWIGNORE_SELF_RE, so we
   // never short-circuit on "empty patterns" alone. Composite fingerprint
@@ -608,12 +662,14 @@ const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
 // Read .shadowignore files at every level from sourceDir up to the repo root
 // (gitignore-style: deeper files layer on top of root-level files). File
 // contents are read at the commit's snapshot so patterns can evolve through
-// history.
+// history. `extraPatterns` (e.g. auto-derived intra-pair nested-mapping
+// patterns) are prepended so the .shadowignore-file layer composes on top.
 function readShadowIgnorePatterns(
   commitHash: string,
   sourceDir: string,
+  extraPatterns: RegExp[] = [],
 ): RegExp[] {
-  const patterns: RegExp[] = [SHADOWIGNORE_SELF_RE];
+  const patterns: RegExp[] = [SHADOWIGNORE_SELF_RE, ...extraPatterns];
 
   const dirs: string[] = [];
   if (sourceDir) {
@@ -933,22 +989,49 @@ function composeSubtrees(baseTree: string, slices: Array<{ subdir: string; conte
   });
 }
 
+/** Return a new tree SHA equal to `treeSha` minus every path matching any of
+ *  `ignorePatterns` (paths are tested relative to the tree root). When no
+ *  patterns match, returns `treeSha` unchanged so the splice is a no-op. */
+function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
+  if (ignorePatterns.length === 0) return treeSha;
+  return withTmpIndex("autoignore", idxEnv => {
+    const readRes = git(["read-tree", treeSha], { env: idxEnv, safe: true });
+    if (!readRes.ok) return treeSha;
+    const ls = git(["ls-files"], { env: idxEnv, safe: true });
+    if (ls.ok && ls.stdout) {
+      const toRemove = ls.stdout.split("\n").filter(Boolean)
+        .filter(p => ignorePatterns.some(re => re.test(p)));
+      if (toRemove.length > 0) {
+        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
+      }
+    }
+    return git(["write-tree"], { env: idxEnv });
+  });
+}
+
 /** For each mapping, read `<fromHash>:<m[side]>` and splice it into `base` at
  *  `m.target`. Returns null if any slice ref fails to resolve — caller decides
- *  whether to fall back to bare `base` or halt. */
+ *  whether to fall back to bare `base` or halt. Each slice is filtered through
+ *  the per-mapping intra-pair auto-ignore patterns so paths owned by sibling
+ *  mappings (nested under this one's source/target dir) don't bleed into this
+ *  mapping's spliced region — the sibling's own splice covers them at the
+ *  correct target path. */
 function spliceMappings(
   base: string,
   fromHash: string,
   side: "source" | "target",
   dc: DirectionConfig,
 ): string | null {
+  const autoPatterns = side === "source" ? dc.autoIgnoreBySourceIdx : dc.autoIgnoreByTargetIdx;
   const slices: Array<{ subdir: string; content: string }> = [];
-  for (const m of dc.mappings) {
+  for (let i = 0; i < dc.mappings.length; i++) {
+    const m = dc.mappings[i];
     const sub = m[side];
     const ref = sub ? `${fromHash}:${sub}` : `${fromHash}^{tree}`;
     const res = git(["rev-parse", ref], { safe: true });
     if (!res.ok) return null;
-    slices.push({ subdir: m.target, content: res.stdout });
+    const filtered = filterTreeByIgnore(res.stdout, autoPatterns[i] ?? []);
+    slices.push({ subdir: m.target, content: filtered });
   }
   return composeSubtrees(base, slices);
 }
@@ -1451,8 +1534,8 @@ function replayCommits(opts: {
         }
       }
 
-      const shadowIgnoreBySourceIdx = dc.mappings.map(m =>
-        readShadowIgnorePatterns(commit.hash, m.source));
+      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
+        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,
