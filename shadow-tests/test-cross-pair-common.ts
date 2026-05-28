@@ -1,28 +1,40 @@
 /**
- * test-cross-pair-common.ts — two pairs sharing common/ on the monorepo.
+ * test-cross-pair-common.ts — full-circle propagation of one common/ commit.
  *
- * Pins behavior of the cross-pair filter in [filterNotReplayedCommits] when
- * two pairs sync the same `common/` subdir on mono via different external
- * remotes.
+ * Follows a single frontend commit (Ff1 by Fred, mutates common/util.ts at
+ * v1 → v2-fe) all the way around: frontend → mono → backend → mono → frontend.
+ * Asserts that Fred's authorship is preserved on every shadow ref the commit
+ * reaches, and that v2-fe lands at each repo's main after the integrating
+ * merge.
  *
- * Sub-tests, all run on a single timeline:
- *   1) pre-integration: --from a before the engineer's integration merge
- *      must NOT leak the cross-pair shadow commit onto the sibling pair's
- *      shadow (no premature replay).
- *   2) cross-pair filter assertion: after integration, Ff1'_mono (frontend
- *      pair's shadow commit, carrying Shadow-replayed-common-frontend-*)
- *      does NOT appear as a replay on the common-backend pair's shadow.
- *   3) content propagation: the common/ delta still reaches the backend
- *      pair's shadow via the diff applied during replay of the integration
- *      merge.
- *   4) topology collapse: the integration-merge replay on the cross-pair's
- *      shadow is a single-parent commit (second parent resolved via
- *      findEchoAnchor to the same target SHA as the first parent, then
- *      deduped). Pins the design choice — preserving cross-pair merge
- *      topology would require its own decision.
- *   5) round-trip: a subsequent backend-side change to common/ propagates
- *      back to frontend's shadow with no duplicate replays and no leak
- *      of the backend-side cross-pair commit.
+ * Two pairs share `common/` on mono via different external remotes:
+ *   common-frontend: origin/common <-> frontend/src/common
+ *   common-backend:  origin/common <-> backend/src/common
+ *
+ * Timeline:
+ *    1. Seed three repos at v1.
+ *    2. Bootstrap (--from b) to create the mono-side shadow refs.
+ *    3. Fred commits Ff1 on frontend (v2-fe).
+ *    4. --from b: Ff1'_mono appears on mono's shadow/common-frontend/main.
+ *       Pre-integration --from a must NOT leak Ff1 onto backend's shadow yet
+ *       (Ff1'_mono is not yet reachable from origin/main).
+ *    5. Mira merges shadow/common-frontend/main → mono/main as Mf1.
+ *    6. --from a: Ff1'_be appears on backend's shadow (Fred-authored — the
+ *       core authorship-preservation invariant). Mf1'_be is a 2-parent merge
+ *       by Mira whose 2nd parent IS Ff1'_be.
+ *    7. Bea merges shadow/common-backend/main → backend/main as Bm1.
+ *       backend/main now carries v2-fe.
+ *    8. --from b: Bm1'_mono appears on mono's shadow/common-backend/main
+ *       (Bea-authored). Mf1'_be is dropped as an echo (its origin-trailer
+ *       maps it back to Mf1).
+ *    9. Mira merges shadow/common-backend/main → mono/main as Mb1.
+ *   10. --from a: Mb1'_fe appears on frontend's shadow/common-frontend/main
+ *       (Mira-authored merge). Bm1'_mono replays onto frontend's shadow as
+ *       Bm1'_fe (Bea-authored — cross-pair, mirror of Ff1'_be's case).
+ *   11. Fred merges shadow/common-frontend/main → frontend/main as Fm1.
+ *       frontend/main now carries the full round-trip view at v2-fe.
+ *   12. --from b: Fm1'_mono appears on mono's shadow/common-frontend/main.
+ *       Cycle complete — no duplicate Ff1 anywhere along the way.
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -76,19 +88,6 @@ function commitFiles(repo: Repo, files: Record<string, string | null>, msg: stri
 function mergeRef(repo: Repo, ref: string, msg: string): string {
   git(`merge --no-ff ${ref} -m "${msg}"`, repo.working);
   return git("rev-parse HEAD", repo.working);
-}
-
-function getParents(repo: Repo, sha: string): string[] {
-  return git(`log -1 --format=%P ${sha}`, repo.working).split(/\s+/).filter(Boolean);
-}
-
-function refExists(repo: Repo, ref: string): boolean {
-  try {
-    git(`rev-parse --verify --quiet ${ref}`, repo.working);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Find a shadow replay by its trailer. Pair name parsed from branchRef. */
@@ -156,160 +155,228 @@ export default function run(): void {
     commitFiles(mono, { "README.md": "# Monorepo\n", "common/util.ts": "v1\n" }, "Mc0");
     git("push origin main", mono.working);
 
-    // ── Phase 2: initial sync --from b — establish shadow refs on origin ────
+    // ── Phase 2: initial sync --from b then --from a ────────────────────────
+    // Bootstrap creates the mono-side shadow refs; --from a follow-up creates
+    // them on backend & frontend so later round-trip syncs see prior state.
     {
       const r = runSync({ from: "b" });
-      assertEqual(r.exitCode, 0, `[init sync --from b] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[bootstrap --from b] ${r.stderr.slice(0, 300)}`);
     }
-    git("fetch origin", mono.working);
+    {
+      const r = runSync({ from: "a" });
+      assertEqual(r.exitCode, 0, `[bootstrap --from a] ${r.stderr.slice(0, 300)}`);
+    }
+    git("fetch origin",   mono.working);
+    git("fetch backend",  mono.working);
+    git("fetch frontend", mono.working);
 
-    // ── Phase 3: frontend dev pushes a common/ change ───────────────────────
+    // ── Phase 3: Fred commits Ff1 on a frontend feature branch ──────────────
+    // Ff1 is authored on a side branch (not in any filter), then folded into
+    // main via a merge — exercising the "branch not synced, but reachable via
+    // merge into a synced branch" path.
+    git("checkout -b feature-fred", frontend.working);
     const Ff1 = commitFiles(frontend, { "src/common/util.ts": "v2-fe\n" }, "Ff1: common bump");
+    git("checkout main", frontend.working);
+    mergeRef(frontend, "feature-fred", "fe: merge feature-fred into main");
     git("push origin main", frontend.working);
 
+    // ── Phase 4: --from b — Ff1 reaches mono's frontend-pair shadow ─────────
     {
       const r = runSync({ from: "b" });
-      assertEqual(r.exitCode, 0, `[after Ff1: sync --from b] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[Phase 4 sync --from b] ${r.stderr.slice(0, 300)}`);
     }
     git("fetch origin", mono.working);
 
     const Ff1_mono = findReplay(mono, "origin/shadow/common-frontend/main", "frontend", Ff1);
-    if (!Ff1_mono) throw new Error("Ff1'_mono replay not found on origin/shadow/common-frontend/main");
+    if (!Ff1_mono) throw new Error("Ff1'_mono not found on origin/shadow/common-frontend/main");
+    assertEqual(
+      git(`log -1 --format=%ae ${Ff1_mono}`, mono.working), "fred@example.com",
+      "[Phase 4] Ff1'_mono carries Fred's authorship on mono's common-frontend shadow",
+    );
 
-    // ── Sub-test 1: PRE-INTEGRATION sync --from a ───────────────────────────
-    // The engineer has NOT merged shadow/common-frontend → main yet. Ff1'_mono
-    // is only reachable from origin/shadow/common-frontend/main, not from
-    // origin/main, so the common-backend pair's path-filtered rev-list must
-    // not see it. The sync should be a clean Mc0-only bootstrap onto backend
-    // remote and frontend remote.
+    // Pre-integration check: backend's shadow must NOT yet see Ff1, because
+    // Ff1'_mono lives only on origin/shadow/common-frontend/main and not on
+    // origin/main. The branch-filter ["main"] rules out the shadow ref as a
+    // walk root.
     {
       const r = runSync({ from: "a" });
-      assertEqual(r.exitCode, 0, `[pre-integration sync --from a] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[Phase 4 pre-integration --from a] ${r.stderr.slice(0, 300)}`);
     }
-    git("fetch backend",  mono.working);
-    git("fetch frontend", mono.working);
-
-    assertEqual(
-      refExists(mono, "backend/shadow/common-backend/main"), true,
-      "[pre-integration] backend's shadow ref should be created with Mc0'_be",
-    );
+    git("fetch backend", mono.working);
     assertEqual(
       readAtRef(mono, "backend/shadow/common-backend/main", "src/common/util.ts"), "v1\n",
-      "[pre-integration] backend's shadow tip carries v1 only — no Ff1 leak before integration",
-    );
-    assertEqual(
-      readAtRef(mono, "frontend/shadow/common-frontend/main", "src/common/util.ts"), "v1\n",
-      "[pre-integration] frontend's shadow tip carries v1 only — Mf1 not yet on main",
+      "[Phase 4] backend's shadow tip stays at v1 before integration",
     );
     assertEqual(
       findReplay(mono, "backend/shadow/common-backend/main", "origin", Ff1_mono), null,
-      "[pre-integration] cross-pair Ff1'_mono must not replay onto backend's shadow",
+      "[Phase 4] Ff1'_mono must not leak onto backend's shadow before integration",
     );
 
-    // ── Phase 5: mono engineer integrates shadow/common-frontend → main ─────
-    const Mf1 = mergeRef(mono, "origin/shadow/common-frontend/main", "Mf1: pull in frontend common");
+    // ── Phase 5: Mira integrates frontend's view via a side branch ──────────
+    git("checkout -b pull-frontend", mono.working);
+    mergeRef(mono, "origin/shadow/common-frontend/main", "mira: merge frontend shadow");
+    git("checkout main", mono.working);
+    const Mf1 = mergeRef(mono, "pull-frontend", "Mf1: merge pull-frontend into main");
     git("push origin main", mono.working);
+    assertEqual(
+      readAtRef(mono, "main", "common/util.ts"), "v2-fe\n",
+      "[Phase 5] mono/main carries v2-fe after Mf1",
+    );
 
+    // ── Phase 6: --from a — Ff1 reaches backend with Fred's authorship ──────
     {
       const r = runSync({ from: "a" });
-      assertEqual(r.exitCode, 0, `[post-integration sync --from a] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[Phase 6 sync --from a] ${r.stderr.slice(0, 300)}`);
     }
     git("fetch backend",  mono.working);
     git("fetch frontend", mono.working);
 
-    // ── Sub-test 2: CROSS-PAIR FILTER ───────────────────────────────────────
-    // After integration, Mg1's rev-list reaches Ff1'_mono via the merge edge.
-    // The cross-pair filter must drop it: no commit on backend's shadow
-    // carries a trailer pointing to Ff1'_mono.
+    // Core authorship invariant: Ff1'_mono carries a sibling-pair trailer but
+    // is load-bearing for common-backend (touches common/), so it replays
+    // onto backend's shadow as Ff1'_be with Fred's authorship intact.
+    const Ff1_be = findReplay(mono, "backend/shadow/common-backend/main", "origin", Ff1_mono);
+    if (!Ff1_be) throw new Error("Ff1'_be must replay onto backend's shadow");
     assertEqual(
-      findReplay(mono, "backend/shadow/common-backend/main", "origin", Ff1_mono), null,
-      "[cross-pair filter] Ff1'_mono must not replay onto backend's shadow",
+      git(`log -1 --format=%ae ${Ff1_be}`, mono.working), "fred@example.com",
+      "[Phase 6] Ff1'_be carries Fred's authorship on backend's shadow",
     );
 
-    // ── Sub-test 3: CONTENT PROPAGATION ─────────────────────────────────────
-    // Mf1 is replayed and carries the common/util.ts diff to backend's shadow.
     const Mf1_be = findReplay(mono, "backend/shadow/common-backend/main", "origin", Mf1);
-    if (!Mf1_be) throw new Error("Mf1'_be (integration-merge replay) not found on backend's shadow");
+    if (!Mf1_be) throw new Error("Mf1'_be not found on backend's shadow");
     assertEqual(
       readAtRef(mono, Mf1_be, "src/common/util.ts"), "v2-fe\n",
-      "[content propagation] backend's shadow tip carries frontend's v2-fe via Mf1's diff",
+      "[Phase 6] backend shadow tip carries v2-fe",
     );
-
-    // ── Sub-test 4: TOPOLOGY COLLAPSE ───────────────────────────────────────
-    // Mf1.parents = [Mc0, Ff1'_mono]. resolveTargetParents maps:
-    //   Mc0       → Mc0'_be (via shaMapping)
-    //   Ff1'_mono → findEchoAnchor walks Fe_init'_mono → Mc0 → Mc0'_be
-    // Both map to the same target SHA; seen-dedup collapses to 1 parent.
-    // Pinning this asserts the design choice — cross-pair merge topology
-    // does NOT survive on the sibling pair's shadow.
-    const Mf1_be_parents = getParents(mono, Mf1_be);
     assertEqual(
-      Mf1_be_parents.length, 1,
-      `[topology collapse] Mf1'_be must have 1 parent (got ${Mf1_be_parents.length}: ${Mf1_be_parents.join(", ")})`,
+      git(`log -1 --format=%ae ${Mf1_be}`, mono.working), "mira@example.com",
+      "[Phase 6] Mf1'_be (integration merge) is authored by Mira",
     );
 
-    // Own-pair sanity: on the common-frontend side, Ff1'_mono matches the
-    // pair's own skipKey trailer, so it gets mapped to Ff1 (a distinct SHA on
-    // the frontend remote). Mf1'_fe therefore keeps 2 parents — the merge
-    // topology is preserved for the pair that originated the merge.
-    const Mf1_fe = findReplay(mono, "frontend/shadow/common-frontend/main", "origin", Mf1);
-    if (!Mf1_fe) throw new Error("Mf1'_fe not found on frontend's shadow");
-    const Mf1_fe_parents = getParents(mono, Mf1_fe);
-    assertEqual(
-      Mf1_fe_parents.length, 2,
-      `[own-pair sanity] Mf1'_fe should be a 2-parent merge (got ${Mf1_fe_parents.length})`,
-    );
-
-    // ── Sub-test 5: ROUND-TRIP ──────────────────────────────────────────────
-    // Backend dev first pulls down mono's integrated state via the shadow (so
-    // their next commit builds on top of v2-fe, not on top of v1). Then they
-    // modify common/util.ts to v3-be and push.
+    // ── Phase 7: Bea integrates via side branch + her own tweak ─────────────
+    // The tweak (Bb1) gives the round-trip a real content delta to ride on,
+    // so the rest of the cycle's merges aren't path-pruned as TREESAME.
     git("fetch origin shadow/common-backend/main", backend.working);
-    git('merge --no-ff origin/shadow/common-backend/main -m "be: pull in mono shadow"', backend.working);
-    const Bf1 = commitFiles(backend, { "src/common/util.ts": "v3-be\n" }, "Bf1: backend bumps common");
+    git("checkout -b pull-mono", backend.working);
+    mergeRef(backend, "origin/shadow/common-backend/main", "bea: merge mono shadow");
+    const Bb1 = commitFiles(backend, { "src/common/util.ts": "v2-fe\n// be-confirmed\n" }, "Bb1: backend confirms");
+    git("checkout main", backend.working);
+    const Bm1 = mergeRef(backend, "pull-mono", "Bm1: merge pull-mono into main");
     git("push origin main", backend.working);
+    assertEqual(
+      readAtRef(backend, "main", "src/common/util.ts"), "v2-fe\n// be-confirmed\n",
+      "[Phase 7] backend/main carries v2-fe + Bea's tweak",
+    );
+
+    // ── Phase 8: --from b — Bm1 + Bb1 return to mono via common-backend ─────
     {
       const r = runSync({ from: "b" });
-      assertEqual(r.exitCode, 0, `[round-trip sync --from b] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[Phase 8 sync --from b] ${r.stderr.slice(0, 300)}`);
     }
     git("fetch origin", mono.working);
-    const Bf1_mono = findReplay(mono, "origin/shadow/common-backend/main", "backend", Bf1);
-    if (!Bf1_mono) throw new Error("Bf1'_mono not found on origin/shadow/common-backend/main");
 
-    const Mg1 = mergeRef(mono, "origin/shadow/common-backend/main", "Mg1: pull in backend common");
+    const Bb1_mono = findReplay(mono, "origin/shadow/common-backend/main", "backend", Bb1);
+    if (!Bb1_mono) throw new Error("Bb1'_mono not found on origin/shadow/common-backend/main");
+    assertEqual(
+      git(`log -1 --format=%ae ${Bb1_mono}`, mono.working), "bea@example.com",
+      "[Phase 8] Bb1'_mono is authored by Bea",
+    );
+    assertEqual(
+      readAtRef(mono, "origin/shadow/common-backend/main", "common/util.ts"),
+      "v2-fe\n// be-confirmed\n",
+      "[Phase 8] mono's common-backend shadow tip carries Bea's tweak",
+    );
+
+    // ── Phase 9: Mira integrates backend's view back via side branch ────────
+    git("checkout -b pull-backend", mono.working);
+    mergeRef(mono, "origin/shadow/common-backend/main", "mira: merge backend shadow");
+    git("checkout main", mono.working);
+    const Mb1 = mergeRef(mono, "pull-backend", "Mb1: merge pull-backend into main");
     git("push origin main", mono.working);
+    assertEqual(
+      readAtRef(mono, "main", "common/util.ts"), "v2-fe\n// be-confirmed\n",
+      "[Phase 9] mono/main carries Bea's tweak after Mb1",
+    );
+
+    // ── Phase 10: --from a — Bb1 reaches frontend's shadow as cross-pair ────
     {
       const r = runSync({ from: "a" });
-      assertEqual(r.exitCode, 0, `[round-trip sync --from a] ${r.stderr.slice(0, 300)}`);
+      assertEqual(r.exitCode, 0, `[Phase 10 sync --from a] ${r.stderr.slice(0, 300)}`);
     }
-    git("fetch backend",  mono.working);
     git("fetch frontend", mono.working);
+    git("fetch backend",  mono.working);
 
-    const Mg1_fe = findReplay(mono, "frontend/shadow/common-frontend/main", "origin", Mg1);
-    if (!Mg1_fe) throw new Error("Mg1'_fe (round-trip integration-merge replay) not found");
+    // Cross-pair flow mirror of Phase 6: Bb1'_mono carries the common-backend
+    // sibling-pair trailer, replays onto frontend's shadow with Bea's author.
+    const Bb1_fe = findReplay(mono, "frontend/shadow/common-frontend/main", "origin", Bb1_mono);
+    if (!Bb1_fe) throw new Error("Bb1'_fe must replay onto frontend's shadow (cross-pair)");
     assertEqual(
-      readAtRef(mono, Mg1_fe, "src/common/util.ts"), "v3-be\n",
-      "[round-trip content] frontend's shadow tip carries backend's v3-be",
-    );
-
-    assertEqual(
-      findReplay(mono, "frontend/shadow/common-frontend/main", "origin", Bf1_mono), null,
-      "[round-trip cross-pair filter] Bf1'_mono must not replay onto frontend's shadow",
+      git(`log -1 --format=%ae ${Bb1_fe}`, mono.working), "bea@example.com",
+      "[Phase 10] Bb1'_fe carries Bea's authorship on frontend's shadow",
     );
 
-    // No duplicate replays: each shadow ref's commit history is SHA-unique.
-    const feShadowCommits = git("log frontend/shadow/common-frontend/main --format=%H", mono.working)
-      .split("\n").filter(Boolean);
-    const beShadowCommits = git("log backend/shadow/common-backend/main --format=%H",   mono.working)
-      .split("\n").filter(Boolean);
+    const Mb1_fe = findReplay(mono, "frontend/shadow/common-frontend/main", "origin", Mb1);
+    if (!Mb1_fe) throw new Error("Mb1'_fe not found on frontend's shadow");
     assertEqual(
-      new Set(feShadowCommits).size, feShadowCommits.length,
-      "[round-trip no-dup] frontend shadow has no duplicate commit SHAs",
+      readAtRef(mono, Mb1_fe, "src/common/util.ts"), "v2-fe\n// be-confirmed\n",
+      "[Phase 10] frontend shadow tip carries the round-trip content",
     );
     assertEqual(
-      new Set(beShadowCommits).size, beShadowCommits.length,
-      "[round-trip no-dup] backend shadow has no duplicate commit SHAs",
+      git(`log -1 --format=%ae ${Mb1_fe}`, mono.working), "mira@example.com",
+      "[Phase 10] Mb1'_fe is authored by Mira",
     );
+
+    // ── Phase 11: Fred integrates the round-trip via side branch ────────────
+    git("fetch origin shadow/common-frontend/main", frontend.working);
+    git("checkout -b pull-mono", frontend.working);
+    mergeRef(frontend, "origin/shadow/common-frontend/main", "fred: merge mono shadow");
+    git("checkout main", frontend.working);
+    const Fm1 = mergeRef(frontend, "pull-mono", "Fm1: merge pull-mono into main");
+    git("push origin main", frontend.working);
+    assertEqual(
+      readAtRef(frontend, "main", "src/common/util.ts"), "v2-fe\n// be-confirmed\n",
+      "[Phase 11] frontend/main carries the full round-trip content",
+    );
+
+    // ── Phase 12: --from b — Fm1 closes the circle on mono ──────────────────
+    {
+      const r = runSync({ from: "b" });
+      assertEqual(r.exitCode, 0, `[Phase 12 sync --from b] ${r.stderr.slice(0, 300)}`);
+    }
+    git("fetch origin", mono.working);
+
+    const Fm1_mono = findReplay(mono, "origin/shadow/common-frontend/main", "frontend", Fm1);
+    if (!Fm1_mono) throw new Error("Fm1'_mono not found on origin/shadow/common-frontend/main");
+    assertEqual(
+      git(`log -1 --format=%ae ${Fm1_mono}`, mono.working), "fred@example.com",
+      "[Phase 12] Fm1'_mono is authored by Fred (the integrator)",
+    );
+
+    // ── Cycle-wide invariants ───────────────────────────────────────────────
+    // Fred's original Ff1 must not be duplicated when the cycle returns to
+    // frontend: Ff1'_mono is an echo on the common-frontend pair (its trailer
+    // maps it back to Ff1), so re-syncing mono→frontend does not create a
+    // Ff1'_fe alias on frontend's shadow.
+    const Ff1_trailer = `Shadow-replayed-common-frontend-frontend: ${Ff1}`;
+    const feShadowLog = git("log frontend/shadow/common-frontend/main --format=%H%n%B%n---END---", mono.working);
+    const Ff1_aliases = feShadowLog.split("---END---").filter(b => b.includes(Ff1_trailer)).length;
+    assertEqual(
+      Ff1_aliases, 0,
+      `[cycle] Fred's original Ff1 must not be re-replayed onto frontend's shadow (found ${Ff1_aliases} alias(es))`,
+    );
+
+    // No duplicate commit SHAs on any shadow ref across the full cycle.
+    for (const ref of [
+      "frontend/shadow/common-frontend/main",
+      "backend/shadow/common-backend/main",
+      "origin/shadow/common-frontend/main",
+      "origin/shadow/common-backend/main",
+    ]) {
+      const commits = git(`log ${ref} --format=%H`, mono.working).split("\n").filter(Boolean);
+      assertEqual(
+        new Set(commits).size, commits.length,
+        `[cycle no-dup] ${ref} has no duplicate commit SHAs`,
+      );
+    }
   } finally {
     setBranchFiltersForTesting(new Map());
     fs.rmSync(tmpDir, { recursive: true, force: true });

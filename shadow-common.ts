@@ -517,18 +517,21 @@ function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>):
 
 
 /**
- * Drop already-replayed, echoed and foreign commits. Echoes get echo→original
- * recorded in shaMapping so parent resolution reuses the real target SHA
- * rather than re-replaying or falling back to the branch tip.
- * Cross-pair shadow commits are skipped - we don't want frontend branches on backend
- * Their change is flattened to the next monorepo merge with diff from mono ancestor.
+ * Drop already-replayed and echoed commits. Echoes get echo→original recorded
+ * in shaMapping so parent resolution reuses the real target SHA rather than
+ * re-replaying or falling back to the branch tip.
+ *
+ * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT
+ * dropped here: when two pairs share a source dir on mono (e.g. common/), a
+ * frontend-originated commit reaching backend's pair via the monorepo must
+ * replay onto backend's shadow so the original author's commit appears in
+ * backend's history rather than being flattened into the integrating merge.
  */
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
 ): TopoCommit[] {
-  const crossPairTrailerRe = new RegExp(`^${escapeRegex(REPLAYED_TRAILER)}-`, "m");
   const skipKey = targetTrailerKey(dc);
   const skipRe = targetTrailerRegex(dc);
   return allCommits.filter(c => {
@@ -543,7 +546,6 @@ function filterNotReplayedCommits(
       }
       return false;
     }
-    if (crossPairTrailerRe.test(meta.trailers)) return false;
     return true;
   });
 }
