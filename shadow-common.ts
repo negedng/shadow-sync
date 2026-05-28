@@ -931,6 +931,26 @@ function composeSubtrees(baseTree: string, slices: Array<{ subdir: string; conte
   });
 }
 
+/** For each mapping, read `<fromHash>:<m[side]>` and splice it into `base` at
+ *  `m.target`. Returns null if any slice ref fails to resolve — caller decides
+ *  whether to fall back to bare `base` or halt. */
+function spliceMappings(
+  base: string,
+  fromHash: string,
+  side: "source" | "target",
+  dc: DirectionConfig,
+): string | null {
+  const slices: Array<{ subdir: string; content: string }> = [];
+  for (const m of dc.mappings) {
+    const sub = m[side];
+    const ref = sub ? `${fromHash}:${sub}` : `${fromHash}^{tree}`;
+    const res = git(["rev-parse", ref], { safe: true });
+    if (!res.ok) return null;
+    slices.push({ subdir: m.target, content: res.stdout });
+  }
+  return composeSubtrees(base, slices);
+}
+
 /**
  * Build the base tree for replaying `commit` onto `mappedParents`.
  * buildReplayedTree later overlays the source-side diff on top, carrying the
@@ -971,6 +991,14 @@ function composeMergeBaseTree(opts: {
 }): string | null {
   const { commit, mappedParents, shaMapping, dc } = opts;
   const commitShort = commit.hash.slice(0, 8);
+  const confined = allTargetsConfined(dc);
+
+  const firstMappedTree = (): string => {
+    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
+    return treeRes.stdout;
+  };
+
   // allTargetsConfined fires iff every mapping target is a confined subdir
   // of the target tree (none of them is the target root). When any mapping
   // has target="", the synthetic spans the whole target — there's no outer
@@ -979,7 +1007,6 @@ function composeMergeBaseTree(opts: {
 
   // Cross-repo echo splice runs first — handles round-trip case even when
   // the commit has a single mapped parent that is itself the echo target.
-  const confined = allTargetsConfined(dc);
   if (confined) {
     const skipKey = targetTrailerKey(dc);
     const echoTargets: string[] = [];
@@ -1004,33 +1031,13 @@ function composeMergeBaseTree(opts: {
       // Round-trip: echo target in mappedParents → splice each mapping's
       // source-inner over Mm's outer.
       if (mappedParents.includes(echoTargetSHA)) {
-        const slices: Array<{ subdir: string; content: string }> = [];
-        for (let i = 0; i < dc.mappings.length; i++) {
-          const m = dc.mappings[i];
-          const ref = m.source ? `${commit.hash}:${m.source}` : `${commit.hash}^{tree}`;
-          const innerRes = git(["rev-parse", ref], { safe: true });
-          if (!innerRes.ok) return echoTreeRes.stdout;
-          slices.push({ subdir: m.target, content: innerRes.stdout });
-        }
-        return composeSubtrees(echoTreeRes.stdout, slices);
+        return spliceMappings(echoTreeRes.stdout, commit.hash, "source", dc);
       }
-
-      const slices: Array<{ subdir: string; content: string }> = [];
-      for (const m of dc.mappings) {
-        const ref = m.target ? `${mappedParents[0]}:${m.target}` : `${mappedParents[0]}^{tree}`;
-        const shadowRes = git(["rev-parse", ref], { safe: true });
-        if (!shadowRes.ok) return echoTreeRes.stdout;
-        slices.push({ subdir: m.target, content: shadowRes.stdout });
-      }
-      return composeSubtrees(echoTreeRes.stdout, slices);
+      return spliceMappings(echoTreeRes.stdout, mappedParents[0], "target", dc);
     }
   }
 
-  if (mappedParents.length === 1) {
-    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
-    return treeRes.stdout;
-  }
+  if (mappedParents.length === 1) return firstMappedTree();
 
   if (mappedParents.length === 2) {
     const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
@@ -1039,23 +1046,12 @@ function composeMergeBaseTree(opts: {
     }
   }
 
-  if (!confined) {
-    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
-    return treeRes.stdout;
-  }
+  if (!confined) return firstMappedTree();
 
   // Cross-repo, no echo, conflict / octopus: outer-agreement.
   const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDirsOf(dc)));
   if (outerTrees.every(t => t === outerTrees[0])) {
-    const slices: Array<{ subdir: string; content: string }> = [];
-    for (const m of dc.mappings) {
-      const ref = m.target ? `${mappedParents[0]}:${m.target}` : `${mappedParents[0]}^{tree}`;
-      const subdirRes = git(["rev-parse", ref], { safe: true });
-      if (!subdirRes.ok) return outerTrees[0];
-      slices.push({ subdir: m.target, content: subdirRes.stdout });
-    }
-    return composeSubtrees(outerTrees[0], slices);
+    return spliceMappings(outerTrees[0], mappedParents[0], "target", dc);
   }
 
   return null;
