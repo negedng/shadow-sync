@@ -293,8 +293,10 @@
  infra/...           (not synced)</div>
 <p>
   <strong>RepoA</strong> and <strong>RepoB</strong> are symmetric endpoints. Which one is "source" and which is "target"
-  depends on the direction flag at runtime (<code>--from a</code> or <code>--from b</code>). The <code>dir</code> field
-  in the config sets the path prefix per side (<code>"backend"</code> vs. <code>""</code> for root).
+  depends on the direction flag at runtime (<code>--from a</code> or <code>--from b</code>). The pair&rsquo;s
+  <code>mappings</code> array sets the path prefix per side per mapping (e.g.
+  <code>{ "a": "backend", "b": "" }</code> &mdash; <code>"backend"</code> on the a-side and root
+  on the b-side).
 </p>
 <p>
   The tool runs from a standalone <strong>orchestrator</strong> repo &mdash; neither RepoA nor RepoB.
@@ -530,7 +532,7 @@
   </tr>
   <tr>
     <td><code>npm test</code></td>
-    <td>Run the 16 automated test files (covers pull, push, merges, branches, echo mapping, multi-pair root files, edge cases, multi-repo).</td>
+    <td>Run the automated test suite in <code>shadow-tests/</code> (content, paths, branch-filter, merges, divergence, round-trip, multi-mapping, cross-pair common, push-merge, halt+round-trip recovery, and the combined end-to-end walkthrough).</td>
   </tr>
 </table>
 
@@ -643,13 +645,19 @@ npm install negedng/shadow-sync cross-env tsx</code></pre>
   "pairs": [
     {
       "name": "frontend",
-      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git", "dir": "frontend" },
-      "b": { "remote": "frontend-repo", "url": "https://github.com/org/frontend.git", "dir": "" }
+      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git" },
+      "b": { "remote": "frontend-repo", "url": "https://github.com/org/frontend.git" },
+      "mappings": [
+        { "a": "frontend", "b": "" }
+      ]
     },
     {
       "name": "backend",
-      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git", "dir": "backend" },
-      "b": { "remote": "backend-repo",  "url": "https://github.com/org/backend.git",  "dir": "" }
+      "a": { "remote": "main-repo",     "url": "https://github.com/org/monorepo.git" },
+      "b": { "remote": "backend-repo",  "url": "https://github.com/org/backend.git"  },
+      "mappings": [
+        { "a": "backend", "b": "" }
+      ]
     }
   ]
 }</code></pre>
@@ -722,8 +730,8 @@ manual commands above are just for first-time testing.</p>
 <p>
   Same mechanics, flipped. Start with a monorepo, create two empty target repos
   (<code>org/frontend</code>, <code>org/backend</code>), and run the first sync with
-  <code>--from a</code>. The monorepo&rsquo;s history under each <code>dir/</code> gets replayed
-  into the new repos. Sync flows both ways from day one.
+  <code>--from a</code>. The monorepo&rsquo;s history under each pair&rsquo;s mapping path gets
+  replayed into the new repos. Sync flows both ways from day one.
 </p>
 
 <!-- ── Configuration ──────────────────────────────────────────────────── -->
@@ -741,8 +749,11 @@ manual commands above are just for first-time testing.</p>
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "repo-a", "url": "https://github.com/org/repo-a.git", "dir": "backend" },
-      "b": { "remote": "repo-b", "url": "https://github.com/org/repo-b.git", "dir": "" }
+      "a": { "remote": "repo-a", "url": "https://github.com/org/repo-a.git" },
+      "b": { "remote": "repo-b", "url": "https://github.com/org/repo-b.git" },
+      "mappings": [
+        { "a": "backend", "b": "" }
+      ]
     }
   ],
   "trailers": { "replayed": "Shadow-replayed" },
@@ -763,12 +774,40 @@ manual commands above are just for first-time testing.</p>
   <tr><td><code>name</code></td><td>Pair identifier. Used in shadow branch names (<code>shadow/backend/main</code>).</td></tr>
   <tr><td><code>remote</code></td><td>Git remote name. Use <code>"origin"</code> if the tool runs inside that repo.</td></tr>
   <tr><td><code>url</code></td><td>Remote URL. Omit if the remote already exists (e.g. <code>origin</code>).</td></tr>
-  <tr><td><code>dir</code></td><td>Path prefix on that side. <code>"backend"</code> means files live under <code>backend/</code>; <code>""</code> means repo root.</td></tr>
-  <tr><td><code>trailers</code></td><td>Trailer key base. <code>replayed</code> becomes <code>Shadow-replayed-{remote}</code> on every replayed commit.</td></tr>
+  <tr><td><code>mappings</code></td><td>1..N folder mappings <code>{ a, b }</code>. Each <code>a</code>/<code>b</code> is the path prefix on that side (<code>"backend"</code> means files live under <code>backend/</code>; <code>""</code> means repo root). Two mappings on one pair let a single remote-pair carry both a primary mapping and a nested common-folder mapping.</td></tr>
+  <tr><td><code>trailers</code></td><td>Trailer key base. <code>replayed</code> becomes <code>Shadow-replayed-{pair}-{remote}</code> on every replayed commit.</td></tr>
   <tr><td><code>gitConfigOverrides</code></td><td>Per-command <code>-c key=value</code> overrides for every <code>git</code> invocation.</td></tr>
   <tr><td><code>maxBuffer</code></td><td>Max bytes for a single git subprocess output. Default 50&nbsp;MB; raise for large-diff commits.</td></tr>
   <tr><td><code>shadowBranchPrefix</code></td><td>First segment of shadow branch names. Default <code>"shadow"</code>.</td></tr>
 </table>
+</div>
+
+<div class="card">
+<h3>Multi-mapping pair (primary + nested common)</h3>
+<p>
+  A pair&rsquo;s <code>mappings</code> array can hold more than one entry. The common pattern is
+  a primary mapping at the leaf root plus a nested common-folder mapping under it, both on the
+  same remote pair:
+</p>
+<pre><code>{
+  "name": "backend",
+  "a": { "remote": "main-repo",    "url": "https://github.com/org/monorepo.git" },
+  "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git"  },
+  "mappings": [
+    { "a": "backend", "b": ""           },
+    { "a": "common",  "b": "src/common" }
+  ]
+}</code></pre>
+<p>
+  The second mapping&rsquo;s <code>b</code> path (<code>src/common</code>) is nested inside the
+  first mapping&rsquo;s <code>b</code> path (<code>""</code>, the leaf root). When the engine
+  builds <code>DirectionConfig.mappings</code> it computes <em>auto-ignore patterns</em> for the
+  outer mapping so the nested mapping&rsquo;s content (<code>src/common/**</code> on the leaf
+  side, <code>common/**</code> on the mono side) is stripped from the outer slice. Both
+  mappings are processed in the same replay pass; one trailer key
+  (<code>Shadow-replayed-backend-{remote}</code>) covers both mappings under the
+  <code>backend</code> pair.
+</p>
 </div>
 
 <h3>Deployment shape</h3>
@@ -932,8 +971,9 @@ manual commands above are just for first-time testing.</p>
 
 <p>
   Examples in the next section refer back to commits by name (e.g. <code>Mr1</code>, <code>Bt2</code>,
-  <code>Ft2</code>). The full step-by-step replay sequence is documented separately in
-  <code>scenario.md</code>; this section gives just the graph as a visual reference.
+  <code>Ft2</code>). The full step-by-step replay sequence runs end-to-end in
+  <code>shadow-tests/test-scenario.ts</code>; this section gives just the graph as a visual
+  reference.
 </p>
 
 <figure class="flow-figure">
@@ -962,8 +1002,9 @@ manual commands above are just for first-time testing.</p>
 <p>Replace module-level state (<code>PAIRS</code>, <code>_repoRoot</code>, prefix) for in-process test runs. Mutates &mdash; never call from production paths.</p>
 <pre><code>In:  { repoRoot: "/tmp/fixture",
        pairs: [{ name: "bk",
-         a: { remote: "origin",   url: "...", dir: "backend" },
-         b: { remote: "upstream", url: "...", dir: "" } }] }
+         a: { remote: "origin",   url: "..." },
+         b: { remote: "upstream", url: "..." },
+         mappings: [{ a: "backend", b: "" }] }] }
 Out: void; subsequent git() calls run in /tmp/fixture, PAIRS = [{name:"bk",...}]
 
 In:  { repoRoot: "/tmp/x", pairs: [], shadowBranchPrefix: "mirror" }
@@ -1031,7 +1072,7 @@ In:  (prefix configured to "mirror") shadowBranchName("bk", "main")
 <div class="card fn-card">
 <h4><code>ensureRemote(endpoint): void</code></h4>
 <p>Idempotent: add the remote if missing, update URL if drifted, no-op if correct.</p>
-<pre><code>In:  endpoint = { remote: "upstream", url: "https://github.com/o/r.git", dir: "" }
+<pre><code>In:  endpoint = { remote: "upstream", url: "https://github.com/o/r.git" }
      no remote named "upstream" exists
 Out: void; `git remote add upstream https://github.com/o/r.git` was run
 
@@ -1211,14 +1252,14 @@ Out: []</code></pre>
 
 <div class="card fn-card">
 <h4><code>collectSourceCommits(source, branches): TopoCommit[]</code></h4>
-<p>Runs <code>git rev-list --topo-order --reverse --full-history &lt;branches&gt; -- &lt;source.dir&gt;/</code> and attaches each commit&rsquo;s true (unsimplified) parent list via <code>fetchTrueParents</code>. The keep/drop discriminator now lives in <code>filterLoadBearingCommits</code>, which runs afterward.</p>
+<p>Runs <code>git rev-list --topo-order --reverse --full-history &lt;branches&gt; -- &lt;source-paths&gt;</code> &mdash; one pathspec per source-side mapping in <code>dc.mappings</code>, ANDed by rev-list. A pair with multiple mappings (e.g. primary + nested common) gets the union of their source-side paths in the pathspec. If any mapping has source path <code>""</code> (repo root) the pathspec is dropped entirely and every commit in scope is considered. <code>fetchTrueParents</code> reattaches each commit&rsquo;s true (unsimplified) parent list. The keep/drop discriminator lives in <code>filterLoadBearingCommits</code>, which runs afterward.</p>
 </div>
 
 <div class="card fn-card">
 <h4><code>filterLoadBearingCommits(commits, sourceDir, autoIgnorePatterns, samePairTrailerRe): TopoCommit[]</code></h4>
-<p>Applies <code>isLoadBearing</code> to each commit. Drops a commit iff its <em>effective</em> source tree (under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer. Covers consumer-merges that integrate this pair&rsquo;s own echoes (kept by the trailer carve-out), purely local TS-1st merges (dropped &mdash; Cases D/E), cross-pair-only noop merges (dropped &mdash; Case C noop), and ignore-only edits including non-merges (dropped at the source walk &mdash; Cases F/G). Non-TS-1st merges keep regardless of trailer &mdash; including TS-2nd-only content-propagation merges through a shared path (e.g. <code>mono.common/</code> in sht6). Idempotent across syncs because the drop is a deterministic function of source-side state.</p>
-<pre><code>In:  source = monorepo endpoint (dir = "backend"), branches = ["project"]
-     autoIgnorePatterns = [] (no sibling overlap)
+<p>Applies <code>isLoadBearing</code> to each commit. Drops a commit iff its <em>effective</em> source tree (under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer. Covers consumer-merges that integrate this pair&rsquo;s own echoes (kept by the trailer carve-out), purely local TS-1st merges (dropped &mdash; Cases D/E), cross-pair-only noop merges (dropped &mdash; Case C noop), and ignore-only edits including non-merges (dropped at the source walk &mdash; Cases F/G). Non-TS-1st merges keep regardless of trailer &mdash; including TS-2nd-only content-propagation merges through a shared path (e.g. <code>mono.common/</code> when two leaf pairs both carry a common-folder mapping; <code>test-cross-pair-common.ts</code>). Idempotent across syncs because the drop is a deterministic function of source-side state.</p>
+<pre><code>In:  source = monorepo endpoint, current mapping source = "backend",
+     branches = ["project"], autoIgnorePatterns = [] (no nested sibling)
      samePairTrailerRe = /^Shadow-replayed-backend-/m
 Out: [TopoCommit, ...]  every commit reachable from project where either
      (a) the effective tree differs from the first parent's effective tree,
@@ -1227,19 +1268,22 @@ Out: [TopoCommit, ...]  every commit reachable from project where either
      --full-history preserves merge ancestry even where TREESAME at backend/
      (so Mt2's frontend-side parent stays in the list — see fetchTrueParents)
 
-In:  source = backend repo endpoint (dir = ""), branches = ["main"]
-     autoIgnorePatterns = [/src\/common(\/|$)/, ...]
+In:  source = backend-repo endpoint, current mapping = primary (b = ""),
+     branches = ["main"]
+     autoIgnorePatterns = [/^src\/common$/, /^src\/common\/.*$/]
+       (derived from the sibling nested-common mapping b = "src/common")
      backend's main has Bcm5 which only edits src/common/util.ts
-Out: Bcm5 is dropped here — its effective tree (read-tree, strip
-     src/common/**, write-tree) equals its parent's effective
-     tree → Case F drop, no trailer-only synthetic emitted. (The sibling
-     "common-backend" pair handles that subtree on its own walk.)</code></pre>
+Out: Bcm5 is dropped on the primary mapping's walk — its effective tree
+     (read-tree, strip src/common/**, write-tree) equals its parent's
+     effective tree → Case F drop, no trailer-only synthetic emitted.
+     (The sibling nested-common mapping on the same pair handles that
+     subtree on its own walk.)</code></pre>
 </div>
 
 <div class="card fn-card">
 <h4><code>isLoadBearing(c, sourceDir, autoIgnorePatterns, samePairTrailerRe): boolean</code></h4>
 <p>The discriminator post-filter applied by <code>filterLoadBearingCommits</code>. Returns <code>false</code> (drop) iff <code>c</code>&rsquo;s effective source tree is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree under (<code>sourceDir/</code>, <code>autoIgnorePatterns</code>, <code>${c.hash}:${sourceDir}/.shadowignore</code>) AND, for merges (≥2 parents), no non-first parent&rsquo;s commit message carries <code>samePairTrailerRe</code> (which matches this pair&rsquo;s own <code>^Shadow-replayed-&lt;pair&gt;-</code> prefix). Otherwise <code>true</code> (keep). Effective trees are computed by <code>effectiveSourceTree</code>: <code>read-tree</code> the commit&rsquo;s subtree, <code>rm --cached</code> every path matching an ignore pattern, <code>write-tree</code> &mdash; two commits whose effective trees hash to the same SHA are TREESAME under the filter.</p>
-<p>The TS-1st check (not TS-to-some) separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and is kept regardless of trailer (the <code>common-backend</code> &harr; <code>common-frontend</code> bridge through <code>mono.common/</code> relies on this). The trailer check is strict (same pair only): a sibling-pair echo on the 2nd parent doesn&rsquo;t mark a TS-1st merge as load-bearing. See <a href="local_tests/keep_drop_test/full_history_explained.html">full_history_explained.html §3</a> for the design rationale, the §3.2 counterexample, and Type 5 for the Case C drop trade-off.</p>
+<p>The TS-1st check (not TS-to-some) separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and is kept regardless of trailer (the cross-pair common bridge through <code>mono.common/</code> &mdash; when two leaf pairs both carry a common-folder mapping rooted at <code>mono:common/</code> &mdash; relies on this). The trailer check is strict (same pair only): a sibling-pair echo on the 2nd parent doesn&rsquo;t mark a TS-1st merge as load-bearing. See <a href="local_tests/keep_drop_test/full_history_explained.html">full_history_explained.html §3</a> for the design rationale, the §3.2 counterexample, and Type 5 for the Case C drop trade-off.</p>
 <pre><code>In:  c = merge(Mira1, Bx'_mono) where Bx'_mono carries Shadow-replayed-backend
      sourceDir = "backend",  autoIgnorePatterns = []
      c's effective backend/ tree == Mira1's effective backend/ tree (TS-1)
@@ -1264,21 +1308,38 @@ In:  sourceDir === "" AND no ignore patterns       →  Out: true   (no filter)<
 <h3 class="fn-group">Tree composition</h3>
 
 <div class="card fn-card">
-<h4><code>computeAutoIgnorePatterns(source, target, pair, allPairs?): { patterns, reasons }</code></h4>
-<p>Derive implicit <code>.shadowignore</code> globs when sibling pairs share a remote and overlap on path. For every <em>other</em> pair in <code>allPairs</code> (defaults to <code>PAIRS</code>), if an endpoint sits on the same remote as <code>source</code> or <code>target</code> and its <code>dir</code> falls inside the current side's <code>dir</code>, emit <code>&lt;rel&gt;</code> and <code>&lt;rel&gt;/**</code> patterns so the engine doesn't replay the sibling's subtree into this pair's shadow. <code>reasons</code> maps the contributing pair name → the patterns it produced, used by <code>mirrorHistory</code> for the per-run "Auto-ignoring nested-pair paths from …" log line. Patterns are compiled by <code>compileIgnorePattern</code> and prepended to any file-based <code>.shadowignore</code> entries on a per-commit basis in <code>replayCommits</code>.</p>
-<pre><code>In:  pair "backend" (a: monorepo "" ⟷ b: backend-repo "");
-     sibling pair "frontend" (a: monorepo "frontend" ⟷ b: frontend-repo "");
-     direction = backend → monorepo (source: backend-repo, target: monorepo "")
-Out: { patterns: ["frontend", "frontend/**"],
-       reasons: Map { "frontend" → ["frontend", "frontend/**"] } }
-     (so backend→monorepo replays don't churn the frontend/ subtree the
-      frontend pair owns on the monorepo side)
+<h4><code>computeAutoIgnorePatterns(pair): { a: RegExp[]; b: RegExp[] }[]</code></h4>
+<p>Derive implicit ignore globs per mapping when one <code>pair</code> has multiple
+<code>mappings</code> and one mapping&rsquo;s path is the empty string or a strict prefix of
+another&rsquo;s. For each mapping, walk the sibling mappings: when sibling.a is nested under
+this.a, emit <code>&lt;rel&gt;</code> and <code>&lt;rel&gt;/.*$</code> patterns for the a-side;
+same on the b-side independently. Returns one entry per mapping with <code>a</code> and
+<code>b</code> pattern lists, indexed by mapping order. <code>buildDirectionConfig</code> then
+folds them into <code>autoIgnoreBySourceIdx</code> / <code>autoIgnoreByTargetIdx</code> based
+on <code>--from</code> direction. The patterns are compiled regex (no glob translation needed)
+and prepended to any file-based <code>.shadowignore</code> entries on a per-commit basis in
+<code>replayCommits</code>.</p>
+<pre><code>In:  pair "backend" with mappings
+       [{ a: "backend", b: "" },
+        { a: "common",  b: "src/common" }]
+Out: [
+       { // mapping 0 (primary backend slice)
+         a: [/^common$/, /^common\/.*$/],
+         b: [/^src\/common$/, /^src\/common\/.*$/]
+       },
+       { // mapping 1 (nested common slice) — sibling paths don't nest inside it
+         a: [], b: []
+       }
+     ]
+     (primary mapping strips "common" content on the a-side and
+      "src/common" content on the b-side, leaving them to the nested
+      mapping)
 
-In:  only one pair declared in PAIRS
-Out: { patterns: [], reasons: Map() }   (no sibling overlap possible)
+In:  pair with a single mapping
+Out: [{ a: [], b: [] }]   (no sibling nesting possible)
 
-In:  sibling endpoint sits on a different remote, or its dir is outside ours
-Out: { patterns: [], reasons: Map() }</code></pre>
+In:  two mappings with disjoint (non-nested) paths
+Out: [{ a: [], b: [] }, { a: [], b: [] }]</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1337,7 +1398,7 @@ Out: tree-SHA = baseTree's files + a new backend/ populated from subtreeContent<
 
 <div class="card fn-card">
 <h4><code>composeMergeBaseTree({ commit, mappedParents, shaMapping, dc }): string | null</code></h4>
-<p>Build the base tree for replaying <code>commit</code> onto <code>mappedParents</code>. <code>buildReplayedTree</code> later overlays the source-side diff on top, carrying the user&rsquo;s merge resolution into the replay. Branches on whether the sync has a <code>target.dir/</code>:</p>
+<p>Build the base tree for replaying <code>commit</code> onto <code>mappedParents</code>. <code>buildReplayedTree</code> later overlays the source-side diff on top, carrying the user&rsquo;s merge resolution into the replay. Branches on whether the mapping currently being replayed has a non-empty target path (the engine processes one mapping at a time within a pair, so &ldquo;<code>target.dir</code>&rdquo; below refers to the current mapping&rsquo;s target path):</p>
 <ul>
 <li><strong>Cross-repo (<code>target.dir</code> set)</strong>. Echo splice (≥1 source parent carries the target trailer) &rarr; splice the shadow chain&rsquo;s <code>target.dir/</code> over the echo&rsquo;d target&rsquo;s outer files, refreshing the shadow chain&rsquo;s outer state; multi-echo requires the echo outers to agree. Runs before the 1-parent shortcut so 1-parent commits on top of an echo still take the round-trip path. No echo + 1 parent &rarr; that tree. No echo + 2 parents with clean <code>merge-tree</code> &rarr; that. No echo + (merge-tree conflict / 3+ parents) &rarr; outer-agreement: mapped parents must agree outside <code>target.dir/</code>; splice <code>[0]</code>&rsquo;s inner over the shared outer. Outer divergence &rarr; null; caller halts.</li>
 <li><strong>Same-repo (no <code>target.dir</code>)</strong>. 1 parent &rarr; that tree. 2 parents with clean <code>merge-tree</code> &rarr; that. Else &rarr; <code>mappedParents[0]</code>&rsquo;s tree (source layout matches target, so the source diff already carries the resolution).</li>
@@ -1376,7 +1437,7 @@ In:  multi-echo octopus — Bm on team-backend directly merges two shadow
 Out: outerOnlyTree(Mc, "backend") == outerOnlyTree(Mp, "backend") →
      single-echo splice using echoTargets[0] = Mc.
      Outers differ → null; caller halts (see Walkthrough D /
-     sht7's multi-echo-octopus sub-tests).
+     the multi-echo-octopus halts in test-halt-recovery-variants.ts).
 
 In:  target.dir = "" (same-repo sync), mappedParents = [P']
 Out: P''s tree (1-parent shortcut, same as cross-repo)</code></pre>
@@ -1403,7 +1464,7 @@ Out: []
 <pre><code>In:  Bf1 lives only on backend-repo/bug/core-x/fix
 Out: "bug/core-x/fix"
 
-In:  Bc1 lives on backend-repo/core-dev, /core-x, /project, /bug/core-x/fix
+In:  Bc1 lives on backend-repo/main, /core-x, /project, /bug/core-x/fix
      (all four branches descend from Bc1)
 Out: null (ambiguous → no branch hint in the error message)
 
@@ -1458,10 +1519,10 @@ Out: null
 In:  parentHash itself is in the mapping
 Out: parentHash's own mapped value (the log walk includes the starting hash)
 
-In:  parentHash = Ff1'_mono on shadow/common-frontend/main — a cross-pair shadow
-     commit dropped by filterNotReplayedCommits when we're syncing the
-     common-backend pair. Its ancestry walks Ff1'_mono → Fe_init'_mono → Mc0
-     (mono's root). shaMapping has Mc0 → Mc0'_be.
+In:  parentHash = Ff1'_mono on shadow/frontend/main — a cross-pair shadow
+     commit reached via a mono merge while we're syncing the backend pair.
+     Its ancestry walks Ff1'_mono → Fe_init'_mono → Mc0 (mono's root).
+     shaMapping has Mc0 → Mc0'_be.
 Out: "Mc0'_be" — every shadow ref is anchored into mono's main lineage because
      resolveTargetParents falls back to targetInit (= mono root) for source
      roots during the very first --from b sync. So even cross-pair shadow
@@ -1485,17 +1546,19 @@ Out: [&lt;monorepo init SHA&gt;]
 In:  commit has 2 parents, both fall back to targetInit (no echo anchor on either)
 Out: [&lt;monorepo init SHA&gt;]  (deduped)
 
-In:  commit = Mf1 on monorepo→backend (common-backend pair), where
-     two pairs share common/ on mono and Mf1 = mono engineer's merge of
-     shadow/common-frontend/main into main.
+In:  commit = Mf1 on monorepo→backend (backend pair, syncing the nested
+     common mapping), where two leaf pairs both carry a "common"
+     mapping rooted at mono:common/ and Mf1 = mono engineer's merge of
+     shadow/frontend/main into main.
      Mf1.parents = [Mc0, Ff1'_mono]. Mc0 → Mc0'_be via shaMapping.
-     Ff1'_mono is cross-pair (dropped by filterNotReplayedCommits, not in
-     shaMapping); findEchoAnchor walks its ancestry through the shadow-ref
-     chain to Mc0 → returns Mc0'_be.
+     Ff1'_mono carries the frontend pair's trailer (cross-pair from the
+     backend pair's perspective); findEchoAnchor walks its ancestry through
+     the shadow-ref chain to Mc0 → returns Mc0'_be.
 Out: ["Mc0'_be"]  (both parents collapse to one via seen-dedup — Mf1'_be is
-     a single-parent commit on shadow/common-backend, even though Mf1 is a
-     two-parent merge on mono. The source merge's diff still propagates the
-     common/ delta via buildReplayedTree on top of Mc0'_be's tree.)</code></pre>
+     a single-parent commit on shadow/backend's common slice, even though
+     Mf1 is a two-parent merge on mono. The source merge's diff still
+     propagates the common/ delta via buildReplayedTree on top of Mc0'_be's
+     tree.)</code></pre>
 </div>
 
 <h3 class="fn-group">Mapping &amp; deduplication</h3>
@@ -1503,9 +1566,9 @@ Out: ["Mc0'_be"]  (both parents collapse to one via seen-dedup — Mf1'_be is
 <div class="card fn-card">
 <h4><code>loadReplayedMappings({ pair, target, branches, dc }): Map&lt;sourceHash, targetHash&gt;</code></h4>
 <p>One-shot scan of <code>target/shadow/&lt;pair&gt;/*</code> refs for <code>Shadow-replayed-&lt;source&gt;: &lt;hash&gt;</code> trailers. Pair-scoped (the trailer doesn&rsquo;t encode pair name, so a broader <code>--all</code> scan would cross-pollinate other pairs that share the source remote).</p>
-<pre><code>In:  pair = "backend", target.remote = "monorepo", branches = ["project","core-dev"]
+<pre><code>In:  pair = "backend", target.remote = "monorepo", branches = ["project","main"]
      monorepo/shadow/backend/project has Bt1'…Bt3' + intermediaries;
-     monorepo/shadow/backend/core-dev has Bc0'…Bc4'
+     monorepo/shadow/backend/main has Bc0'…Bc4'
 Out: Map of ~11 entries { Bc0→Bc0', Bc1→Bc1', …, Bt3→Bt3' }
 
 In:  no shadow/backend/* refs exist yet on the monorepo (first sync ever)
@@ -1514,37 +1577,50 @@ Out: Map {}  (skips the git log call entirely)</code></pre>
 
 <div class="card fn-card">
 <h4><code>filterNotReplayedCommits(allCommits, shaMapping, dc): TopoCommit[]</code></h4>
-<p>Drop (a) commits already mapped, (b) echo commits carrying the target&rsquo;s skip-trailer, and (c) cross-pair shadow commits with a <code>Shadow-replayed-*</code> key that isn&rsquo;t ours. Mutates <code>shaMapping</code> to record echo→original when the original is still locally reachable.</p>
-<pre><code>Direction: backend→monorepo (so dc.skipTrailerKey = Shadow-replayed-monorepo).
+<p>Drop (a) commits already mapped and (b) echo commits carrying the target&rsquo;s
+<code>dc.skipTrailerKey</code>. Mutates <code>shaMapping</code> to record echo&rarr;original when
+the original is still locally reachable. Commits carrying a <em>cross-pair</em>
+<code>Shadow-replayed-*</code> trailer (a sibling pair&rsquo;s key, not ours) are <strong>kept</strong>
+in the candidate list so the original author&rsquo;s commit replays onto the receiving pair&rsquo;s
+shadow with full author preservation &mdash; required for cross-pair common-content propagation
+when two pairs share a source directory (typically <code>mono:common/</code>). The
+noop-merge guard that used to drop them lives in <code>isLoadBearing</code>&rsquo;s TS-1st +
+same-pair-trailer rule now (see <code>filterLoadBearingCommits</code>).</p>
+<pre><code>Direction: backend→monorepo (so dc.skipTrailerKey = Shadow-replayed-backend-monorepo).
 
 In:  allCommits = [Bc3, Mr1', Bt2]
      Bc3 is already in shaMapping (replayed in a previous run)
-     Mr1' carries Shadow-replayed-monorepo: Mr1, and Mr1 exists locally on monorepo
+     Mr1' carries Shadow-replayed-backend-monorepo: Mr1, and Mr1 exists locally on monorepo
      Bt2 is new with no trailers
 Out: [Bt2]; shaMapping mutated to include { Mr1' → Mr1 }
      (subsequent replays whose parent is Mr1' will resolve to the literal Mr1)
 
-In:  Bt2 carries Shadow-replayed-frontend-repo: Ft2 (cross-pair shadow commit)
-Out: [] — Bt2 is filtered out, stays out of the candidate list
+In:  Bt2 carries Shadow-replayed-frontend-frontend-repo: Ft2 (cross-pair shadow commit)
+Out: [Bt2] — KEPT in the candidate list (cross-pair trailer is not ours);
+     Bt2 will replay onto the backend pair's shadow with Ft2 as the author's
+     original commit, preserving authorship across the cross-pair bridge.
+     isLoadBearing's TS-1st + same-pair-trailer rule drops the noop merge
+     case if Bt2 is a TS-1st merge whose only non-first parent carries the
+     cross-pair trailer.
 
 In:  Mr1' carries the trailer but Mr1 isn't present locally (e.g. monorepo wasn't fetched)
 Out: Mr1' is still dropped from output, but NOT recorded in shaMapping
      (no usable target-side anchor to point at)
 
-In:  Two pairs (common-backend, common-frontend) share common/ on mono. After a
+In:  Two pairs share mono:common/ via a nested-common mapping on each. After a
      frontend dev's change is integrated into mono main via Mf1 = merge(Mc0,
-     Ff1'_mono), the common-backend pair's path-filtered rev-list reaches
-     Ff1'_mono via Mf1's parent edge. Ff1'_mono carries
-     Shadow-replayed-common-frontend-frontend (the OTHER pair's trailer).
-     Direction: monorepo→backend, dc.skipTrailerKey = Shadow-replayed-common-backend-backend.
-Out: Ff1'_mono is filtered out as cross-pair (its trailer key isn't ours);
-     shaMapping unchanged for it. Mf1 stays in the candidate list — its
-     second parent Ff1'_mono is collapsed via findEchoAnchor in
-     resolveTargetParents, but the common/ delta still propagates via
-     buildReplayedTree applying Mf1's diff on top of Mc0'_be's tree.
-     (For the symmetric own-pair direction mono→frontend, Ff1'_mono matches
-     dc.skipTrailerKey instead and resolves via Walkthrough C; see
-     test-cross-pair-common.ts for both sides end-to-end.)</code></pre>
+     Ff1'_mono), the backend pair's path-filtered rev-list reaches Ff1'_mono
+     via Mf1's parent edge. Ff1'_mono carries Shadow-replayed-frontend-frontend
+     (the OTHER pair's trailer).
+     Direction: monorepo→backend, dc.skipTrailerKey = Shadow-replayed-backend-backend.
+Out: Ff1'_mono is KEPT in the candidate list (cross-pair trailer isn't ours);
+     it replays onto shadow/backend's common slice as Ff1'_mono'_be with the
+     original frontend dev's authorship preserved. Mf1 also stays in the
+     candidate list and replays as the integration merge; via isLoadBearing's
+     TS-1st + same-pair-trailer rule a noop sibling-merge variant would
+     drop, but the load-bearing common/ delta propagates via
+     buildReplayedTree. See test-cross-pair-common.ts for the end-to-end
+     trace including the symmetric --from a direction.</code></pre>
 </div>
 
 <div class="card fn-card">
@@ -1563,7 +1639,7 @@ In:  newCommits = [Bt2, Bc3]; Bt2 is on the tip-walk;
      Bc3 only reachable through Bt2's parent chain
 Out: [Bt2, Bc3]  — Bc3 included so resolveTargetParents wires Bt2's parent (pass 2)
 
-In:  scenario.md post-M9, sync --from a on the frontend pair:
+In:  test-scenario.ts post-M9, sync --from a on the frontend pair:
      newCommits includes Mt2 (now load-bearing on fe/ because M9 rewrote
      Bt2'_mono with spliced fe content). Walking origin/project newest-first,
      Ft2'_mono carries a Shadow-replayed-frontend skip-trailer and halts
@@ -1583,18 +1659,19 @@ Out: Map { "project" → "Bf1'" }
 In:  branches = ["core-x"] with zero commits ever mapped
 Out: Map {}  — entry omitted entirely (caller treats as "no shadow tip")
 
-In:  branches = ["project", "core-dev"], anchored at Bt3 and Bc4 respectively
-Out: Map { "project" → "Bt3'", "core-dev" → "Bc4'" }</code></pre>
+In:  branches = ["project", "main"], anchored at Bt3 and Bc4 respectively
+Out: Map { "project" → "Bt3'", "main" → "Bc4'" }</code></pre>
 </div>
 
 <h3 class="fn-group">Orchestration</h3>
 
 <div class="card fn-card">
 <h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns }): ReplayHalts</code></h4>
-<p>The replay loop. For each commit: <code>resolveHaltAwareParents</code> → <code>composeMergeBaseTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{source.dir}/.shadowignore</code> are appended to <code>autoIgnorePatterns</code> (the sibling-pair pre-computed list) before tree building.</p>
+<p>The replay loop. For each commit, for each mapping in <code>dc.mappings</code>: <code>resolveHaltAwareParents</code> → <code>composeMergeBaseTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{mapping.source}/.shadowignore</code> are appended to that mapping&rsquo;s entry in <code>autoIgnoreBySourceIdx</code> (the intra-pair nested-mapping pre-computed list) before tree building.</p>
 <p>When <code>composeMergeBaseTree</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatUnresolvableMergeError</code> into <code>haltReasons</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>mappedParents</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeMergeBaseTree</code>'s echo-splice branch recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltReasons }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
-     targetInit = monorepo's init; source.dir = ""; target.dir = "backend"
+     targetInit = monorepo's init;
+     dc.mappings = [{ source: "", target: "backend" }]   (single mapping)
 Out: { haltedSources: Set(), haltReasons: Map() };
      shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
      Bc3' rooted on its mapped parent; Bt2' has parents [Bc4', Br2']
@@ -1624,7 +1701,7 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
      (backend repo has commits Bc0..Bc4, Br1..Br2, Bt1..Bt3, Bf1;
       monorepo has no shadow/backend/* refs yet)
 Out: { mirrored: 11,
-       branchMapping: Map { "project" → "Bt3'", "core-dev" → "Bc4'",
+       branchMapping: Map { "project" → "Bt3'", "main" → "Bc4'",
                             "core-x" → "Br2'", "bug/core-x/fix" → "Bf1'" },
        shaMapping: 11 entries source→target,
        upToDate: false,
@@ -2073,15 +2150,15 @@ Out: { exitCode: 1,
 
 <p>
   <strong>Multi-echo variant.</strong> If the source merge is an octopus that directly merges
-  multiple shadow refs (e.g. <code>git merge --no-ff shadow/&lt;pair&gt;/core-dev shadow/&lt;pair&gt;/project</code>),
+  multiple shadow refs (e.g. <code>git merge --no-ff shadow/&lt;pair&gt;/main shadow/&lt;pair&gt;/project</code>),
   ≥2 of its direct parents carry <code>skipTrailerKey</code>. The echo-splice branch of
   <code>composeMergeBaseTree</code> collects all echo targets and gates the splice on their outer slices agreeing
   (<code>outerOnlyTree</code> per echo, hash compare). Agreement &rarr; fall through to the
   single-echo splice using <code>echoTargets[0]</code> &mdash; <code>buildReplayedTree</code>&rsquo;s
   diff against the first source parent fills in any inner the other echoes contributed.
   Divergence &rarr; return <code>null</code>; the engine cascades to Walkthrough D&rsquo;s halt
-  path. sht7&rsquo;s <code>multi-echo-octopus-halts</code> / <code>-recovery</code> sub-tests cover
-  both branches.
+  path. <code>test-halt-recovery-variants.ts</code>&rsquo;s
+  <code>multi-echo-octopus-halts</code> / <code>-recovery</code> sub-tests cover both branches.
 </p>
 
 <h3>Walkthrough D &mdash; Merge with unresolvable conflict</h3>
@@ -2162,7 +2239,7 @@ Out: { exitCode: 1,
 
 <ul class="call-tree">
   <li><em>operator action:</em> resolve the merge on the target&rsquo;s working branch as
-    <code>Mm</code> (e.g. <code>git checkout core-dev && git merge --no-ff project</code>); push.</li>
+    <code>Mm</code> (e.g. <code>git checkout main && git merge --no-ff project</code>); push.</li>
   <li><em>next CI cycle (<code>--from a</code>):</em> <code>Mm</code> is replayed onto
     <code>source.remote/shadow/&lt;pair&gt;/&lt;branch&gt;</code> as <code>Mm'_on_source</code>,
     carrying the <code>Shadow-replayed-&lt;pair&gt;-&lt;target.remote&gt;: Mm</code> trailer
@@ -2289,7 +2366,7 @@ Out: { exitCode: 1,
     merges. Future syncs that pivot through these via echo recognition can produce a replay tip on
     one branch of the sibling pair while the shadow currently points at the other. Trees match
     &rArr; <em>same-tree</em> path: skip silently. Covered by
-    <code>test-push-diverged-concurrent-merges.ts</code>.
+    <code>test-divergence.ts</code>.
   </li>
   <li>
     <strong>Force-push / history rewrite on the source branch.</strong> If someone rewrites source history
@@ -2299,7 +2376,7 @@ Out: { exitCode: 1,
     <code>targetInit</code> (or, if any of the rewritten commits&rsquo; ancestors still happen to be
     mapped via an echo, on that echo). The new chain has no ancestor relationship to the existing shadow
     tip and the trees genuinely differ &rArr; <em>different-tree</em> path: force-update.
-    Covered by <code>test-pull-force-rewrite.ts</code> phase 1 and <code>test-push-diverged.ts</code>.
+    Covered by <code>test-no-force-push-cases.ts</code> and <code>test-divergence.ts</code>.
   </li>
   <li>
     <strong>Manual intervention on the shadow branch.</strong> Against policy, but possible &mdash; a human
@@ -2406,7 +2483,7 @@ RepoB main now contains X', plus a merge commit M whose parents are
 <div class="highlight-box">
   Trailer matching is <strong>line-anchored</strong>: an identifier that happens to appear in a commit body
   (e.g. "see <code>Shadow-replayed-repo-a: abc1234</code> for context") is not treated as a real trailer &mdash;
-  only proper trailer lines at the end of the message count. See <code>test-push-content.ts</code>, phase 5.
+  only proper trailer lines at the end of the message count. See <code>test-content.ts</code>.
 </div>
 
 <!-- ── 9. .shadowignore ────────────────────────────────────────────────── -->
@@ -2419,10 +2496,17 @@ RepoB main now contains X', plus a merge commit M whose parents are
 </p>
 
 <table>
-  <tr><th>Repo</th><th>Config dir</th><th>File location</th></tr>
+  <tr><th>Repo</th><th>Mapping path</th><th>File location</th></tr>
   <tr><td>RepoA</td><td><code>"backend"</code></td><td><code>backend/.shadowignore</code></td></tr>
   <tr><td>RepoB</td><td><code>""</code> (root)</td><td><code>.shadowignore</code></td></tr>
 </table>
+
+<p>
+  When a pair has multiple <code>mappings</code>, each non-empty mapping path can carry its own
+  <code>.shadowignore</code> at that path. The engine reads the file from the source-side
+  mapping path it&rsquo;s currently replaying (e.g. <code>backend/.shadowignore</code> for the
+  primary mapping, <code>common/.shadowignore</code> for the nested common mapping).
+</p>
 
 <p>Patterns work like <code>.gitignore</code> basics:</p>
 <ul>
@@ -2442,31 +2526,32 @@ secrets/</code></pre>
   on the next sync &mdash; no config change required.
 </p>
 
-<h3>Auto-derived nested-pair ignores</h3>
+<h3>Auto-derived nested-mapping ignores</h3>
 
 <p>
-  When two pairs in <code>shadow-config.json</code> share a remote and one pair's
-  <code>dir</code> is nested inside the other's, the engine auto-derives an ignore pattern
-  at the start of <code>mirrorHistory</code> so the outer pair never carries the inner
-  pair's content (which would duplicate on the target).
+  When one pair&rsquo;s <code>mappings</code> array contains nested entries &mdash; one
+  mapping&rsquo;s a-path or b-path is the empty string or a strict prefix of another&rsquo;s
+  &mdash; the engine auto-derives ignore patterns per mapping so the outer slice never carries
+  the inner slice&rsquo;s content (which would duplicate on the target).
 </p>
 
 <p>
-  Example: a <code>backend</code> pair maps <code>mono:backend/</code> &harr;
-  <code>backend-repo:""</code>, and a <code>common-backend</code> pair maps
-  <code>mono:common/</code> &harr; <code>backend-repo:"src/common"</code>. The
-  <code>common-backend</code> b-side is nested inside <code>backend</code>'s b-side
-  (same remote, dir <code>src/common</code> inside <code>""</code>), so the
-  engine emits <code>src/common</code> and <code>src/common/**</code>
-  as auto-ignore patterns when replaying <code>backend</code>. The inner pair
-  (<code>common-backend</code>) is unaffected and carries the nested content normally.
+  Example: a <code>backend</code> pair with two mappings &mdash;
+  <code>{ "a": "backend", "b": "" }</code> (primary) and
+  <code>{ "a": "common", "b": "src/common" }</code> (nested common). On the b-side the second
+  mapping&rsquo;s path <code>src/common</code> is nested inside the first&rsquo;s
+  <code>""</code> (the leaf root), so when replaying the primary mapping from the leaf side the
+  engine emits <code>src/common</code> and <code>src/common/**</code> as auto-ignore patterns,
+  stripping the nested-mapping content from the primary slice. The nested mapping itself
+  carries that content through its own slice on the same pass. The same logic runs symmetrically
+  on the a-side (<code>common</code> nested inside the a-side root).
 </p>
 
 <p>
-  Detection is by <code>remote</code> name (matching how trailers are scoped). Manual
-  <code>.shadowignore</code> files are still honored and are unioned with auto-derived
-  patterns &mdash; useful for non-nested exclusions like <code>*.local</code> or
-  <code>**/CLAUDE.md</code>.
+  Detection is per-pair, comparing every <code>mapping</code> against its siblings in the same
+  pair (<code>computeAutoIgnorePatterns</code>). Manual <code>.shadowignore</code> files are
+  still honored and are unioned with auto-derived patterns &mdash; useful for non-nested
+  exclusions like <code>*.local</code> or <code>**/CLAUDE.md</code>.
 </p>
 
 <!-- ── 10. Preflight Checks ────────────────────────────────────────────── -->
@@ -2513,7 +2598,7 @@ secrets/</code></pre>
   <tr><td><code>shadow-sync.ts</code></td><td>Main entry point: argument parsing, branch loop, shadow-branch push, divergence handling (same-tree skip / force-with-lease). Also exports <code>runSync</code> for in-process use.</td></tr>
   <tr><td><code>shadow-config.example.json</code></td><td>Configuration template with all supported options</td></tr>
   <tr><td><code>.shadowignore</code></td><td>Per-repo file-exclusion patterns (auto-discovered from source tree)</td></tr>
-  <tr><td><code>shadow-tests/</code></td><td>16 consolidated test files: pull-content, pull-paths, pull-branches, pull-merge-topology, pull-force-rewrite, pull-warnings, pull-conflict, pull-echo-mapping, push-content, push-ops, push-merge, push-diverged, push-shadowignore, multi-repo, multi-pair-root-files, round-trip</td></tr>
+  <tr><td><code>shadow-tests/</code></td><td>Automated tests. Highlights: <code>test-scenario.ts</code> &mdash; combined end-to-end walkthrough (phases 0/setup &rarr; 1a/1b first <code>--from b</code> &rarr; 2 mono integration &rarr; 3 drop matrix + cross-pair common &rarr; 4 leaf round-trip &rarr; F1/F2 branch filter &rarr; 5 round-trip closure &rarr; release fan-out &rarr; hotfix &rarr; hotfix-roundtrip &rarr; halt-recovery; see file header for the per-phase index); <code>test-halt-recovery-variants.ts</code> &mdash; eight halt-recovery edge cases (happy-round-trip, idempotent-rerun, halt-persistence, approach-a-still-works, multi-commit-halt-absorption, multi-echo-octopus-halts, multi-echo-octopus-recovery, halted-partial-tip-first-parent); <code>test-multi-mapping.ts</code> &mdash; primary + nested-common mappings on one pair; <code>test-cross-pair-common.ts</code> &mdash; common-folder propagation between two pairs that share <code>mono:common/</code>; <code>test-branch-filter.ts</code> &mdash; allowlist behavior; <code>test-discriminator-*</code> &mdash; Cases A/B/C/F/G of <code>isLoadBearing</code>; <code>test-merges.ts</code> / <code>test-divergence.ts</code> / <code>test-roundtrip.ts</code> / <code>test-push-merge.ts</code> / <code>test-no-force-push-cases.ts</code> &mdash; merge topology, divergence, round-trip; <code>test-content.ts</code> / <code>test-paths.ts</code> / <code>test-pair-setup.ts</code> &mdash; core invariants. <code>run-all.ts</code> drives the full suite.</td></tr>
   <tr><td><code>.github/workflows/shadow-sync.yml</code></td><td>CI workflow: pull from B on schedule</td></tr>
   <tr><td><code>.github/workflows/shadow-forward.yml</code></td><td>CI workflow: push from A on schedule (needs PAT)</td></tr>
 </table>

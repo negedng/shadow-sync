@@ -327,6 +327,14 @@
     commit onto a common-pair shadow ref, failing the FF check (<a class="ref ref-c" href="#c6">C6</a>).
     Pair name in the trailer key isolates each pair&rsquo;s mapping cleanly.
   </p>
+  <p class="from">
+    <em>Implementation note (later):</em> the &ldquo;two pairs sharing a source remote&rdquo; shape
+    collapsed into the multi-mapping pair shape via commit <code>2884dae</code>
+    (<code>SyncPair.mappings: { a, b }[]</code>). Pair-name trailer scoping still applies, but the
+    shared-remote collision it defends against now arises within a single pair&rsquo;s mappings
+    rather than between two sibling pairs; the trailer key is unchanged and the dedup invariant
+    holds the same way.
+  </p>
 </div>
 
 <div class="card" id="c4">
@@ -418,6 +426,19 @@
     parent pair&rsquo;s replays appear in the common pair&rsquo;s shadow-ref history (via the
     monorepo merge that combines them) and pollute the dedup map.
   </p>
+  <p class="from">
+    <em>Implementation note (later):</em> collapsed into multi-mapping pairs via commit
+    <code>2884dae</code>; the same mechanism is now expressed as one pair carrying both mappings.
+    What used to be a <code>backend</code> pair plus a dedicated <code>common-backend</code> pair
+    (both rooted at the same leaf remote) is now a single <code>backend</code> pair with a
+    <code>mappings</code> array of two entries: the primary
+    (<code>mono:backend/</code> &harr; <code>backend-repo:""</code>) and the nested common
+    (<code>mono:common/</code> &harr; <code>backend-repo:src/common/</code>). Trailer scoping
+    no longer has a shared-remote ambiguity to defend against at the pair boundary, but the
+    pair-name key still guards <a class="ref ref-r" href="#r1">R1</a>&rsquo;s general
+    multi-pair invariant. The nested-mapping form drives auto-ignore through commit
+    <code>0d3c55c</code> (see <a href="#m9">M9</a>&rsquo;s implementation note).
+  </p>
 </div>
 
 <h3 class="subsection">Minor choices</h3>
@@ -443,9 +464,9 @@
 
 <div class="card compact" id="c11">
   <h3><span class="ref ref-c">C11</span> TS-1st + same-pair trailer discriminator (drop noop sibling merges, keep content propagation)</h3>
-  <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> loose any-pair rule (keep iff TS-some AND any non-first parent carries any <code>Shadow-replayed-*</code> trailer &mdash; produces a noop synthetic per cross-pair merge that&rsquo;s only load-bearing for non-standard workflows); strict TS-some + same-pair rule (drops cross-pair content-propagation merges through shared paths like <code>mono.common/</code>, breaking sht6&rsquo;s common-backend &harr; common-frontend bridge); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case A and Case B); parent-position rules like "drop iff TS-1st" without the trailer carve-out (breaks Case B).</p>
+  <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> loose any-pair rule (keep iff TS-some AND any non-first parent carries any <code>Shadow-replayed-*</code> trailer &mdash; produces a noop synthetic per cross-pair merge that&rsquo;s only load-bearing for non-standard workflows); strict TS-some + same-pair rule (drops cross-pair content-propagation merges through shared paths like <code>mono.common/</code>, breaking the common &harr; common bridge between two leaf pairs that both carry a common mapping); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case A and Case B); parent-position rules like "drop iff TS-1st" without the trailer carve-out (breaks Case B).</p>
   <p>
-    <code>filterLoadBearingCommits</code>&rsquo;s <code>isLoadBearing</code> drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer (either direction). The TS-1st check (not TS-to-some) is what separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and keeps regardless of trailer &mdash; including the sibling-pair shadow merge that propagates content through a shared path (e.g. <code>mono.common/</code> shared between <code>common-backend</code> and <code>common-frontend</code> pairs). The same-pair trailer carve-out keeps Cases A (non-TS-1st same-pair) and B (TS-1st same-pair) and drops Case C noop (TS-1st with only a cross-pair trailer).
+    <code>filterLoadBearingCommits</code>&rsquo;s <code>isLoadBearing</code> drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer (either direction). The TS-1st check (not TS-to-some) is what separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and keeps regardless of trailer &mdash; including the cross-pair shadow merge that propagates content through a shared path (e.g. <code>mono.common/</code> shared between two leaf pairs that both carry a common mapping). The same-pair trailer carve-out keeps Cases A (non-TS-1st same-pair) and B (TS-1st same-pair) and drops Case C noop (TS-1st with only a cross-pair trailer).
   </p>
   <p>
     Dropping Case C noop means <code>composeMergeBaseTree</code> on subsequent <code>--from b</code> runs takes outer state from the most recent <em>this-pair</em> bridge on the shadow chain &mdash; potentially pre-dating the sibling-pair merge. The replay lands on the target with stale outer. In the standard workflow (mono engineer merges shadow ref into core-dev once per release), git&rsquo;s 3-way merge resolves cleanly because the base agrees with the stale side; core-dev keeps the up-to-date sibling-pair content. Non-standard workflows (project branches merging the shadow ref directly, back-to-back round-trips without mono sync, reading the shadow ref&rsquo;s tree as a snapshot) can surface the stale outer as conflicts. The chosen rule prioritises a tighter shadow chain over defending against unusual workflows; if a project starts hitting Case C drift, switching to the loose any-pair rule is a one-line revert in <code>isLoadBearing</code>. Effective TREESAME (using <code>effectiveSourceTree</code>: <code>read-tree</code> &rarr; <code>rm --cached</code> ignored paths &rarr; <code>write-tree</code>) is what extends the same rule from merges to non-merges, dropping ignore-only edits (Cases F/G) at the source walk so they never emit trailer-only target commits &mdash; idempotent across syncs because the drop is a deterministic function of source-side state. See <a href="local_tests/keep_drop_test/full_history_explained.html">local_tests/keep_drop_test/full_history_explained.html</a> for the discriminator analysis, including the Case B counterexample where parent-position-only rules break, the Type 5/5b split for Case C noop vs. content propagation, and the Type 6 narrative for Cases A and B.
@@ -566,9 +587,9 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <code>git merge --no-ff stale-feature</code> with no shadow trailer drops (Case D); a non-merge
     whose only changes are <code>.shadowignore</code>- or <code>autoIgnore</code>-filtered also
     drops (Case F) without emitting a trailer-only target commit. The TS-1st check (not TS-to-any)
-    is what keeps non-TS-1st content-propagation merges like the <code>common-backend</code>
-    &harr; <code>common-frontend</code> bridge: even with only a cross-pair trailer on the 2nd
-    parent, a merge that took the 2nd parent&rsquo;s in-scope tree is kept by the main rule. See
+    is what keeps non-TS-1st content-propagation merges like the cross-pair common bridge between
+    two leaf pairs that both carry a common mapping: even with only a cross-pair trailer on the
+    2nd parent, a merge that took the 2nd parent&rsquo;s in-scope tree is kept by the main rule. See
     <a href="local_tests/keep_drop_test/full_history_explained.html"><code>local_tests/keep_drop_test/full_history_explained.html</code></a>
     for the discriminator design, the effective-TREESAME mechanism, and counterexamples it
     rejects.
@@ -901,6 +922,31 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     mapping. Their content is already accounted for via the originally-authored commit&rsquo;s
     own echo (<a class="ref ref-c" href="#c3">C3</a>).
   </p>
+  <p class="from">
+    <em>Implementation note (later, commit <code>cac2a2c</code>):</em>
+    <code>filterNotReplayedCommits</code> no longer drops every commit with a sibling-pair
+    <code>Shadow-replayed-*</code> trailer. When two pairs share a source directory (typically a
+    common-folder mapping that both leaves carry), the originally-authored commit on the source
+    side ends up with the <em>other</em> pair&rsquo;s trailer once it round-trips through that
+    pair first. Dropping it would lose the original author&rsquo;s commit on this pair&rsquo;s
+    shadow. The filter now keeps cross-pair-trailer commits in the candidate list so the
+    original author&rsquo;s work replays onto the receiving pair&rsquo;s shadow with full
+    fidelity; the noop-merge guard against foreign ancestry has been folded into
+    <code>isLoadBearing</code>&rsquo;s TS-1st + same-pair-trailer rule
+    (<a class="ref ref-c" href="#c11">C11</a>), which drops the noop sibling-merge without
+    losing the propagation.
+  </p>
+  <p class="from">
+    <em>Implementation note (later, commits <code>9f9f6cf</code> + <code>0d3c55c</code>):</em>
+    the auto-ignore trigger flipped from &ldquo;two pairs share a remote with overlapping
+    <code>dir</code>&rdquo; to &ldquo;one pair&rsquo;s <code>mappings</code> array has nested
+    entries, where one mapping&rsquo;s source path (or target path) is the empty string or a
+    strict prefix of another&rsquo;s.&rdquo; The engine&rsquo;s purpose is unchanged
+    &mdash; strip the inner mapping&rsquo;s content from the outer slice so the target
+    doesn&rsquo;t carry two copies &mdash; but the config shape that drives it is now
+    intra-pair, matching <a class="ref ref-c" href="#c7">C7</a>&rsquo;s collapsed
+    multi-mapping form.
+  </p>
   <p>
     <strong>Companion: skip replays that no branch tip would resolve to.</strong> M9&rsquo;s
     splice changes TREESAME semantics on the source side. A merge that pre-M9 was all-TREESAME
@@ -1052,17 +1098,18 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   <h3><span class="tag tag-red">!</span> Commits that touch only non-pair paths are silently skipped (monorepo &rarr; external direction only)</h3>
   <p class="from">From <a class="ref ref-m" href="#m4">M4</a></p>
   <p>
-    When the source endpoint has a <code>dir</code> prefix (i.e., the source is the monorepo side),
-    the engine uses <code>git rev-list main -- dir/</code> to collect commits, so any commit that
-    doesn&rsquo;t touch a file under <code>dir/</code> never enters the replay queue. Correct by
-    design &mdash; a commit that edits only <code>.github/workflows/</code> or another pair&rsquo;s
-    directory has nothing to send to the external repo &mdash; but users periodically ask &ldquo;where
-    did my merge commit go?&rdquo; The answer is usually &ldquo;it had no files in the pair&rsquo;s
-    <code>dir</code>.&rdquo;
+    When the source endpoint has a non-empty mapping prefix (i.e., the source is the monorepo side),
+    the engine uses <code>git rev-list main -- &lt;source-paths&gt;/</code> to collect commits, so
+    any commit that doesn&rsquo;t touch a file under one of the pair&rsquo;s source-side mapping
+    paths never enters the replay queue. Correct by design &mdash; a commit that edits only
+    <code>.github/workflows/</code> or another pair&rsquo;s directory has nothing to send to the
+    external repo &mdash; but users periodically ask &ldquo;where did my merge commit go?&rdquo;
+    The answer is usually &ldquo;it had no files in any of the pair&rsquo;s source mappings.&rdquo;
   </p>
   <p>
-    The other direction (external &rarr; monorepo, where the source has no prefix) replays every
-    commit on the source branch &mdash; there&rsquo;s no path filter to skip anything. So this
+    The other direction (external &rarr; monorepo, where at least one source mapping is at the
+    repo root) replays every commit on the source branch &mdash; the root mapping&rsquo;s
+    empty-string path means there&rsquo;s no rev-list pathspec to skip anything. So this
     asymmetry only bites monorepo developers wondering why a root-only commit didn&rsquo;t propagate.
   </p>
 </div>
