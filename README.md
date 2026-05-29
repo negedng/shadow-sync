@@ -40,15 +40,19 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "main-repo", "url": "https://github.com/org/monorepo.git", "dir": "backend" },
-      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git", "dir": "" }
+      "a": { "remote": "main-repo",    "url": "https://github.com/org/monorepo.git" },
+      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git"  },
+      "mappings": [
+        { "a": "backend", "b": "" }
+      ]
     }
   ]
 }
 ```
 
 - `a` and `b` are symmetric — direction is chosen at runtime with `--from`
-- `dir` is the path prefix in that repo (`""` for root, `"backend"` for a subdirectory)
+- `mappings` lists the folder pairs to sync. Each mapping's `a` and `b` are path prefixes on the respective sides (`""` for repo root, `"backend"` for a subdirectory)
+- One pair can carry multiple mappings — e.g. a `backend` mapping for the primary slice plus a `common` mapping for a shared folder that lives at different paths on each side
 - `url` tells the tool how to reach the repo
 
 ## Usage
@@ -130,7 +134,7 @@ CLAUDE.md
 **/*.local
 ```
 
-**Nested pairs are auto-excluded.** When two pairs in `shadow-config.json` share a remote and one pair's `dir` is nested inside the other's, the engine auto-derives ignore patterns at replay time so the outer pair never carries the inner pair's content. Example: a `backend` pair (`backend-repo` dir=``) and a `common-backend` pair (`backend-repo` dir=`src/common`) both target the same backend repo; the engine skips `src/common/**` when replaying the `backend` pair without any `.shadowignore` file. Manual `.shadowignore` files still work and are unioned with auto-derived patterns.
+**Nested mappings within a pair are auto-excluded.** When one pair carries multiple `mappings` and one mapping's path nests under another's on the same side, the engine auto-derives ignore patterns at replay time so the outer mapping never carries the inner mapping's content. Example: a `backend` pair with `{ a: "backend", b: "" }` (primary) plus `{ a: "common", b: "src/common" }` (nested common slice) — the engine skips `src/common/**` when replaying through the primary mapping without any `.shadowignore` file, so the common content lands on mono's `common/` via the longer-prefix mapping only. Manual `.shadowignore` files still work and are unioned with auto-derived patterns.
 
 ## GitHub Actions
 
@@ -236,6 +240,6 @@ Automated tests covering pull, push, merge, branching, binary files, LFS, symlin
 | `shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `.shadowignore` | Ignore patterns (auto-discovered from source commit, like `.gitignore`) |
 | `shadow-sync-explained.html` | Detailed technical documentation |
-| `shadow-tests/` | 16 automated tests |
+| `shadow-tests/` | 19 automated tests |
 | `.github/workflows/shadow-sync.yml` | CI pull workflow (cron) |
 | `.github/workflows/shadow-forward.yml` | CI push workflow (on shadow branch push) |

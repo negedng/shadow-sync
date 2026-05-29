@@ -328,8 +328,8 @@
     Pair name in the trailer key isolates each pair&rsquo;s mapping cleanly.
   </p>
   <p class="from">
-    <em>Implementation note (later):</em> the &ldquo;two pairs sharing a source remote&rdquo; shape
-    collapsed into the multi-mapping pair shape via commit <code>2884dae</code>
+    <em>Implementation note:</em> the &ldquo;two pairs sharing a source remote&rdquo; shape
+    has since collapsed into the multi-mapping pair shape
     (<code>SyncPair.mappings: { a, b }[]</code>). Pair-name trailer scoping still applies, but the
     shared-remote collision it defends against now arises within a single pair&rsquo;s mappings
     rather than between two sibling pairs; the trailer key is unchanged and the dedup invariant
@@ -427,17 +427,17 @@
     monorepo merge that combines them) and pollute the dedup map.
   </p>
   <p class="from">
-    <em>Implementation note (later):</em> collapsed into multi-mapping pairs via commit
-    <code>2884dae</code>; the same mechanism is now expressed as one pair carrying both mappings.
-    What used to be a <code>backend</code> pair plus a dedicated <code>common-backend</code> pair
-    (both rooted at the same leaf remote) is now a single <code>backend</code> pair with a
-    <code>mappings</code> array of two entries: the primary
+    <em>Implementation note:</em> the dedicated common-pair shape has since collapsed into
+    multi-mapping pairs; the same mechanism is now expressed as one pair carrying both
+    mappings. What used to be a <code>backend</code> pair plus a dedicated
+    <code>common-backend</code> pair (both rooted at the same leaf remote) is now a single
+    <code>backend</code> pair with a <code>mappings</code> array of two entries: the primary
     (<code>mono:backend/</code> &harr; <code>backend-repo:""</code>) and the nested common
     (<code>mono:common/</code> &harr; <code>backend-repo:src/common/</code>). Trailer scoping
     no longer has a shared-remote ambiguity to defend against at the pair boundary, but the
     pair-name key still guards <a class="ref ref-r" href="#r1">R1</a>&rsquo;s general
-    multi-pair invariant. The nested-mapping form drives auto-ignore through commit
-    <code>0d3c55c</code> (see <a href="#m9">M9</a>&rsquo;s implementation note).
+    multi-pair invariant. The nested-mapping form drives auto-ignore (see
+    <a href="#m9">M9</a>&rsquo;s implementation note).
   </p>
 </div>
 
@@ -923,7 +923,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     own echo (<a class="ref ref-c" href="#c3">C3</a>).
   </p>
   <p class="from">
-    <em>Implementation note (later, commit <code>cac2a2c</code>):</em>
+    <em>Implementation note:</em>
     <code>filterNotReplayedCommits</code> no longer drops every commit with a sibling-pair
     <code>Shadow-replayed-*</code> trailer. When two pairs share a source directory (typically a
     common-folder mapping that both leaves carry), the originally-authored commit on the source
@@ -937,7 +937,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     losing the propagation.
   </p>
   <p class="from">
-    <em>Implementation note (later, commits <code>9f9f6cf</code> + <code>0d3c55c</code>):</em>
+    <em>Implementation note:</em>
     the auto-ignore trigger flipped from &ldquo;two pairs share a remote with overlapping
     <code>dir</code>&rdquo; to &ldquo;one pair&rsquo;s <code>mappings</code> array has nested
     entries, where one mapping&rsquo;s source path (or target path) is the empty string or a
