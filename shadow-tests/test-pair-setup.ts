@@ -42,8 +42,11 @@ function readFileText(root: string, rel: string): string | null {
 }
 
 // ── A. multi-repo: two pairs sync independently ─────────────────────────────
+// Runs on a `core-dev` mainline (no `main` anywhere) to exercise
+// RepoEndpoint.anchorBranch: the orphan-parent anchor must come from each
+// side's core-dev init commit, so mergeShadow still finds a real merge base.
 function runMultiRepo(): void {
-  const env1 = createTestEnv("multi-repo-env1", "frontend");
+  const env1 = createTestEnv("multi-repo-env1", "frontend", "shadow", "", "core-dev");
   const backend = addRemote(env1, "backend", "backend");
   try {
     // phase 1: pull from both remotes
@@ -89,8 +92,8 @@ function runMultiRepo(): void {
     env1.cleanup();
   }
 
-  // env2: no-cascade (single remote, trailer direction)
-  const env2 = createTestEnv("multi-repo-no-cascade");
+  // env2: no-cascade (single remote, trailer direction) — also on core-dev.
+  const env2 = createTestEnv("multi-repo-no-cascade", "frontend", "shadow", "", "core-dev");
   try {
     commitOnRemote(env2, { "feature.ts": "from b\n" }, "Add feature from B");
     const r4a = runCiSync(env2);

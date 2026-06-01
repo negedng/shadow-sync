@@ -9,6 +9,7 @@ import * as os from "os";
 export interface RepoEndpoint {
   remote: string;
   url: string;
+  anchorBranch?: string;
 }
 
 /** One folder pair: a.dir on side a ↔ b.dir on side b. "" = repo root. */
@@ -1622,11 +1623,12 @@ export function mirrorHistory(opts: {
   console.log(`Found ${usefulNewCommits.length} new commit(s) to replay.\n`);
 
   // Fallback root for orphan parents (see resolveTargetParents).
+  const anchorBranch = dc.target.anchorBranch ?? "main";
   let targetInit: string | null = null;
-  if (refExists(`${dc.target.remote}/main`)) {
-    const initRes = git(["log", "--max-parents=0", "--format=%H", `${dc.target.remote}/main`], { safe: true });
+  if (refExists(`${dc.target.remote}/${anchorBranch}`)) {
+    const initRes = git(["log", "--max-parents=0", "--format=%H", `${dc.target.remote}/${anchorBranch}`], { safe: true });
     if (!initRes.ok) {
-      fail(`Failed to find init commit on ${dc.target.remote}/main: ${initRes.stderr}`);
+      fail(`Failed to find init commit on ${dc.target.remote}/${anchorBranch}: ${initRes.stderr}`);
     }
     targetInit = initRes.stdout.split("\n")[0] || null;
   }

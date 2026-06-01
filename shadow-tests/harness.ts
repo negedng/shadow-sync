@@ -25,6 +25,8 @@ export interface TestEnv {
   remoteName: string;
   /** Shadow branch prefix (default "shadow"). */
   branchPrefix: string;
+  /** Mainline branch name (default "main"). Drives push/pull + shadow ref suffix. */
+  mainBranch: string;
   /** All remotes registered in this env (including the primary one). */
   remotes: RemoteInfo[];
   cleanup: () => void;
@@ -49,7 +51,7 @@ function writeRepoConfig(workDir: string, identity: { email: string; name: strin
 /** Create an isolated test environment with three git repos.
  *  `remoteSubdir` (default "") places B-side files under a subdir so both
  *  A and B use non-root directories. */
-export function createTestEnv(name: string, subdir = "frontend", branchPrefix = "shadow", remoteSubdir = ""): TestEnv {
+export function createTestEnv(name: string, subdir = "frontend", branchPrefix = "shadow", remoteSubdir = "", mainBranch = "main"): TestEnv {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `shadow-test-${name}-`));
   const remoteBare = path.join(tmpDir, "remote-bare").replace(/\\/g, "/");
   const remoteWorking = path.join(tmpDir, "remote-working").replace(/\\/g, "/");
@@ -64,10 +66,11 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   // 2) Working clone of remote — create initial commit so branch exists
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
   writeRepoConfig(remoteWorking, { email: "team@test.com", name: "Team Member" });
+  git(`symbolic-ref HEAD refs/heads/${mainBranch}`, remoteWorking);
   fs.writeFileSync(path.join(remoteWorking, "README.md"), "# Remote Repo\n");
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
-  git("push origin main", remoteWorking);
+  git(`push origin ${mainBranch}`, remoteWorking);
 
   // 3) Bare "origin" (internal repo on GitHub — target for shadow branches)
   fs.mkdirSync(originBare);
@@ -77,6 +80,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   fs.mkdirSync(localRepo);
   git("init", localRepo);
   writeRepoConfig(localRepo, { email: "local@test.com", name: "Local Dev" });
+  git(`symbolic-ref HEAD refs/heads/${mainBranch}`, localRepo);
   fs.writeFileSync(path.join(localRepo, "mono.txt"), "internal repo root\n");
   fs.mkdirSync(path.join(localRepo, subdir), { recursive: true });
   git("add -A", localRepo);
@@ -85,7 +89,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
   git(`remote add ${remoteName} "${remoteBare}"`, localRepo);
   git(`fetch ${remoteName}`, localRepo);
   git(`remote add origin "${originBare}"`, localRepo);
-  git("push origin main", localRepo);
+  git(`push origin ${mainBranch}`, localRepo);
 
   const primary: RemoteInfo = { remoteName, subdir, remoteBare, remoteWorking, remoteSubdir };
 
@@ -93,7 +97,7 @@ export function createTestEnv(name: string, subdir = "frontend", branchPrefix = 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   };
 
-  return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, branchPrefix, remotes: [primary], cleanup };
+  return { tmpDir, localRepo, remoteWorking, remoteBare, originBare, subdir, remoteName, branchPrefix, mainBranch, remotes: [primary], cleanup };
 }
 
 /**
@@ -122,10 +126,11 @@ export function addRemote(env: TestEnv, remoteName: string, subdir: string): Rem
   // Working clone
   execSync(`git clone "${remoteBare}" "${remoteWorking}"`, { encoding: "utf8", stdio: "pipe" });
   writeRepoConfig(remoteWorking, { email: "team@test.com", name: "Team Member" });
+  git(`symbolic-ref HEAD refs/heads/${env.mainBranch}`, remoteWorking);
   fs.writeFileSync(path.join(remoteWorking, "README.md"), `# ${remoteName}\n`);
   git("add -A", remoteWorking);
   git('commit -m "Initial commit"', remoteWorking);
-  git("push origin main", remoteWorking);
+  git(`push origin ${env.mainBranch}`, remoteWorking);
 
   // Add to local repo
   git(`remote add ${remoteName} "${remoteBare}"`, env.localRepo);
@@ -163,7 +168,7 @@ export function commitOnRemote(
   // other untracked files in the working tree alone (tests rely on that).
   git(`add -A -- ${paths.map(p => `"${p}"`).join(" ")}`, workDir);
   git(`commit -m "${message}"`, workDir);
-  git("push origin main", workDir);
+  git(`push origin ${env.mainBranch}`, workDir);
 }
 
 /** Commit files in the local repo under a subdir. null value = delete.
@@ -233,10 +238,13 @@ export interface RunResult {
 
 /** Build the SyncPair array for a test env's remotes. */
 function buildPairs(env: TestEnv): SyncPair[] {
+  // Only set anchorBranch when the mainline isn't "main" — leaving it unset on
+  // the default keeps the `?? "main"` fallback path covered by every other test.
+  const anchor = env.mainBranch !== "main" ? { anchorBranch: env.mainBranch } : {};
   return env.remotes.map(r => ({
     name: r.subdir,
-    a: { remote: "origin", url: env.originBare },
-    b: { remote: r.remoteName, url: r.remoteBare },
+    a: { remote: "origin", url: env.originBare, ...anchor },
+    b: { remote: r.remoteName, url: r.remoteBare, ...anchor },
     mappings: [{ a: r.subdir, b: r.remoteSubdir }],
   }));
 }
@@ -286,7 +294,7 @@ export function runPush(env: TestEnv, _message?: string, _extraArgs: string[] = 
 /** Pull latest from bare remote into the remote working copy. */
 export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
   const workDir = remote?.remoteWorking ?? env.remoteWorking;
-  git("pull origin main", workDir);
+  git(`pull origin ${env.mainBranch}`, workDir);
 }
 
 /**
@@ -295,7 +303,7 @@ export function pullRemoteWorking(env: TestEnv, remote?: RemoteInfo): void {
  */
 export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
     const content = execSync(`git show origin/${shadowBranch}:${subdir}/${rel}`, {
@@ -310,7 +318,7 @@ export function readShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): 
 /** Get the commit log from the shadow branch on origin. */
 export function getShadowLog(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --oneline -${n}`, env.localRepo);
@@ -322,7 +330,7 @@ export function getShadowLog(env: TestEnv, n = 20, remote?: RemoteInfo): string 
 /** Get commit authors from the shadow branch on origin (format: "Name <email>"). */
 export function getShadowAuthors(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --format="%an <%ae>" -${n}`, env.localRepo);
@@ -334,7 +342,7 @@ export function getShadowAuthors(env: TestEnv, n = 20, remote?: RemoteInfo): str
 /** Get full commit messages from the shadow branch on origin. */
 export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log origin/${shadowBranch} --format="%B" -${n}`, env.localRepo);
@@ -351,7 +359,7 @@ export function readExternalShadowFile(env: TestEnv, rel: string, remote?: Remot
   const remoteName = remote?.remoteName ?? env.remoteName;
   const subdir = remote?.subdir ?? env.subdir;
   const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
     const content = execSync(`git show ${remoteName}/${shadowBranch}:${prefix ? `${prefix}/${rel}` : rel}`, {
@@ -367,7 +375,7 @@ export function readExternalShadowFile(env: TestEnv, rel: string, remote?: Remot
 export function getExternalShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const remoteName = remote?.remoteName ?? env.remoteName;
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log ${remoteName}/${shadowBranch} --format="%B" -${n}`, env.localRepo);
@@ -379,7 +387,7 @@ export function getExternalShadowLogFull(env: TestEnv, n = 20, remote?: RemoteIn
 /** Get the --name-only diff of the latest shadow commit on origin. */
 export function getShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): string[] {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch origin ${shadowBranch}`, env.localRepo); } catch { return []; }
   try {
     return git(`diff-tree --no-commit-id -r --name-only origin/${shadowBranch}`, env.localRepo)
@@ -391,7 +399,7 @@ export function getShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): string[] 
 export function getExternalShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): string[] {
   const remoteName = remote?.remoteName ?? env.remoteName;
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return []; }
   try {
     return git(`diff-tree --no-commit-id -r --name-only ${remoteName}/${shadowBranch}`, env.localRepo)
@@ -407,7 +415,7 @@ export function getExternalShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): s
  */
 export function mergeShadow(env: TestEnv, remote?: RemoteInfo): void {
   const subdir = remote?.subdir ?? env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const shadowBranch = `${env.branchPrefix}/${subdir}/${env.mainBranch}`;
   git(`fetch origin ${shadowBranch}`, env.localRepo);
   git(`merge --no-ff origin/${shadowBranch}`, env.localRepo);
 }
