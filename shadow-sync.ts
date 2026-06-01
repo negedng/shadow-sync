@@ -10,6 +10,7 @@
  *   npx tsx shadow-sync.ts --pair backend --from b          # pull from b → a
  *   npx tsx shadow-sync.ts --pair backend --from a          # push from a → b
  *   npx tsx shadow-sync.ts --pair backend --from a -b main  # push specific branch
+ *   npx tsx shadow-sync.ts --pair backend --from b -n       # dry run, push nothing
  */
 import { parseArgs } from "util";
 import {
@@ -26,6 +27,7 @@ export interface SyncOptions {
   pair?: string;
   from?: "a" | "b";
   branch?: string;
+  dryRun?: boolean;
 }
 
 export interface SyncResult {
@@ -72,6 +74,9 @@ function _runSyncCore(options: SyncOptions): number {
   if (fromSide !== "a" && fromSide !== "b") {
     fail(`--from must be "a" or "b", got "${options.from}".`);
   }
+
+  const dryRun = options.dryRun ?? false;
+  if (dryRun) console.log("[DRY RUN] No branches or tags will be pushed.");
 
   let failed = 0;
 
@@ -199,6 +204,11 @@ function _runSyncCore(options: SyncOptions): number {
           }
         }
 
+        if (dryRun) {
+          console.log(`  [DRY RUN] would push ${replayedSHA} → ${target.remote}/${shadow}`);
+          continue;
+        }
+
         console.log(`  Pushing to ${target.remote}/${shadow}...`);
         git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`]);
         console.log(`  ✓ Pushed.`);
@@ -209,7 +219,11 @@ function _runSyncCore(options: SyncOptions): number {
       // tags get a fresh tag object (same name/tagger/message); lightweight
       // tags become refs/tags/<name> pointing at the replay. Tags whose
       // source commit was dropped (no shaMapping entry) are skipped.
-      syncTags({ source, target, shaMapping: result.shaMapping });
+      if (dryRun) {
+        console.log(`\n[DRY RUN] Skipping tag sync.`);
+      } else {
+        syncTags({ source, target, shaMapping: result.shaMapping });
+      }
     } catch (err: any) {
       console.error(`  ✘ Failed to sync ${pair.name}: ${err.message}`);
       failed++;
@@ -246,10 +260,11 @@ function _runSyncCore(options: SyncOptions): number {
 if (require.main === module) {
   const { values } = parseArgs({
     options: {
-      pair:   { type: "string", short: "p" },
-      remote: { type: "string", short: "r" },  // alias for --pair
-      from:   { type: "string", short: "f" },
-      branch: { type: "string", short: "b" },
+      pair:      { type: "string",  short: "p" },
+      remote:    { type: "string",  short: "r" },  // alias for --pair
+      from:      { type: "string",  short: "f" },
+      branch:    { type: "string",  short: "b" },
+      "dry-run": { type: "boolean", short: "n" },
     },
     strict: true,
   });
@@ -258,6 +273,7 @@ if (require.main === module) {
     pair: values.pair ?? values.remote,
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch,
+    dryRun: values["dry-run"] ?? false,
   });
 
   if (result.stdout) process.stdout.write(result.stdout + "\n");
