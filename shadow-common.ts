@@ -582,6 +582,26 @@ function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>):
  * replay onto backend's shadow so the original author's commit appears in
  * backend's history rather than being flattened into the integrating merge.
  */
+// Batched trailer fetch (one `git log` per ~500 commits, NUL-separated).
+function fetchTrailersBatch(hashes: string[]): Map<string, string> {
+  const map = new Map<string, string>();
+  if (hashes.length === 0) return map;
+  const CHUNK = 500;
+  for (let i = 0; i < hashes.length; i += CHUNK) {
+    const chunk = hashes.slice(i, i + CHUNK);
+    const res = git(["log", "--no-walk", "-z", "--format=%H%n%(trailers:only,unfold=true)", ...chunk],
+      { safe: true, raw: true });
+    if (!res.ok) fail(`Failed to fetch trailers for ${chunk.length} commit(s): ${res.stderr}`);
+    for (const rec of res.stdout.split("\0")) {
+      if (!rec) continue;
+      const nl = rec.indexOf("\n");
+      const hash = (nl < 0 ? rec : rec.slice(0, nl)).trim();
+      if (hash) map.set(hash, nl < 0 ? "" : rec.slice(nl + 1));
+    }
+  }
+  return map;
+}
+
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
@@ -589,11 +609,12 @@ function filterNotReplayedCommits(
 ): TopoCommit[] {
   const skipKey = targetTrailerKey(dc);
   const skipRe = targetTrailerRegex(dc);
+  const trailersByHash = fetchTrailersBatch(allCommits.filter(c => !shaMapping.has(c.hash)).map(c => c.hash));
   return allCommits.filter(c => {
     if (shaMapping.has(c.hash)) return false;
-    const meta = getCommitMeta(c.hash);
-    if (hasTrailer(meta.trailers, skipKey)) {
-      const match = meta.trailers.split("\n")
+    const trailers = trailersByHash.get(c.hash) ?? "";
+    if (hasTrailer(trailers, skipKey)) {
+      const match = trailers.split("\n")
         .map(l => l.match(skipRe))
         .find(m => m);
       if (match && refExists(match[1])) {
@@ -679,8 +700,17 @@ function readShadowIgnorePatterns(
   }
   dirs.push("");
 
-  for (const dir of dirs) {
-    const ignorePath = dir ? `${dir}/.shadowignore` : ".shadowignore";
+  // One probe for all candidate .shadowignore paths; usually none exist.
+  const ignorePaths = dirs.map(d => d ? `${d}/.shadowignore` : ".shadowignore");
+  const probe = git(["ls-tree", "-z", commitHash, ...ignorePaths], { safe: true, raw: true });
+  if (!probe.ok || !probe.stdout) return patterns;
+
+  for (const entry of probe.stdout.split("\0")) {
+    if (!entry) continue;
+    const tab = entry.indexOf("\t");
+    if (tab < 0) continue;
+    const ignorePath = entry.slice(tab + 1);
+    const dir = ignorePath === ".shadowignore" ? "" : ignorePath.slice(0, -"/.shadowignore".length);
     const res = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
     if (!res.ok || !res.stdout) continue;
     for (const raw of res.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"))) {
@@ -801,26 +831,44 @@ export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): v
 // that differs at the source but is identical post-filter. Returns "" if the
 // source subdir doesn't exist at this commit — caller treats that as
 // "source content missing" and load-bears the commit.
+// Memo of effective-source fingerprints. Scan computes each commit's slice
+// once as itself and once as its child's 1st parent → cache ~halves the work.
+const _effectiveTreeCache = new Map<string, string>();
+
+function ignoreSignature(ignorePatterns: RegExp[]): string {
+  return ignorePatterns.map(r => r.source).join("");
+}
+
+// Equality-only fingerprint of a commit's ignore-filtered source slice. Built
+// from one `ls-tree -r` + JS filter (was read-tree/ls-files/rm/write-tree,
+// 3-4 spawns) — never fed back to git, so a hash of the surviving entries
+// suffices. "" when the source dir is absent (preserves the missing-source
+// load-bearing escape).
 function effectiveSourceTreeOne(
   hash: string,
   sourceDir: string,
   ignorePatterns: RegExp[],
 ): string {
-  const treeRef = sourceDir ? `${hash}:${sourceDir}` : `${hash}^{tree}`;
-  return withTmpIndex("effective", idxEnv => {
-    const readRes = git(["read-tree", treeRef], { env: idxEnv, safe: true });
-    if (!readRes.ok) return "";
-    if (ignorePatterns.length === 0) return git(["write-tree"], { env: idxEnv });
-    const ls = git(["ls-files"], { env: idxEnv, safe: true });
-    if (ls.ok && ls.stdout) {
-      const toRemove = ls.stdout.split("\n").filter(Boolean)
-        .filter(p => ignorePatterns.some(re => re.test(p)));
-      if (toRemove.length > 0) {
-        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
-      }
+  const key = `${hash} ${sourceDir} ${ignoreSignature(ignorePatterns)}`;
+  const cached = _effectiveTreeCache.get(key);
+  if (cached !== undefined) return cached;
+
+  const treeRef = sourceDir ? `${hash}:${sourceDir}` : hash;
+  const ls = git(["ls-tree", "-r", "-z", treeRef], { safe: true, raw: true });
+  let result = "";
+  if (ls.ok) {
+    const kept: string[] = [];
+    for (const entry of ls.stdout.split("\0")) {
+      if (!entry) continue;
+      const tab = entry.indexOf("\t"); // "<mode> <type> <object>\t<path>"
+      if (tab < 0) continue;
+      if (ignorePatterns.some(re => re.test(entry.slice(tab + 1)))) continue;
+      kept.push(entry);
     }
-    return git(["write-tree"], { env: idxEnv });
-  });
+    result = crypto.createHash("sha1").update(kept.join("\n")).digest("hex");
+  }
+  _effectiveTreeCache.set(key, result);
+  return result;
 }
 
 // Direction-wide effective-tree fingerprint: concatenated per-mapping tree
@@ -1493,7 +1541,10 @@ function replayCommits(opts: {
   const haltReasons = new Map<string, HaltReason>();
 
   try {
+    const total = newCommits.length;
+    let idx = 0;
     for (const commit of newCommits) {
+      idx++;
       const meta = getCommitMeta(commit.hash);
 
       if (isHaltPropagated(commit, haltedSources, shaMapping)) {
@@ -1504,15 +1555,16 @@ function replayCommits(opts: {
       // Carries our own trailer → forwarded earlier and merged back; record only.
       const isEcho = hasTrailer(meta.trailers, addKey);
 
+      const progress = `[${idx}/${total}]`;
       if (isEcho) {
-        console.log(`  Skipping ${meta.short} (echo from other direction).`);
+        console.log(`  ${progress} Skipping ${meta.short} (echo from other direction).`);
       } else {
         const label = commit.parents.length > 1
           ? `merge commit ${meta.short}`
           : commit.parents.length === 0
             ? `root commit ${meta.short}`
             : meta.short;
-        console.log(`  Replaying ${label}...`);
+        console.log(`  ${progress} Replaying ${label}...`);
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
@@ -1606,7 +1658,9 @@ export function mirrorHistory(opts: {
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const sourceCommits = collectSourceCommits(dc, branches);
+  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes...`);
   const relevantCommits = filterLoadBearingCommits(sourceCommits, dc);
+  console.log(`${relevantCommits.length} load-bearing; checking which are already replayed...`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote);
 

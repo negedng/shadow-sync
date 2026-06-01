@@ -28,6 +28,7 @@ export interface SyncOptions {
   from?: "a" | "b";
   branch?: string;
   dryRun?: boolean;
+  stream?: boolean;
 }
 
 export interface SyncResult {
@@ -41,9 +42,10 @@ export function runSync(options: SyncOptions = {}): SyncResult {
   const stderrBuf: string[] = [];
   const origLog = console.log;
   const origErr = console.error;
+  const stream = options.stream ?? false;
 
-  console.log = (...args: unknown[]) => stdoutBuf.push(args.map(String).join(" "));
-  console.error = (...args: unknown[]) => stderrBuf.push(args.map(String).join(" "));
+  console.log = (...args: unknown[]) => { const s = args.map(String).join(" "); stdoutBuf.push(s); if (stream) origLog(s); };
+  console.error = (...args: unknown[]) => { const s = args.map(String).join(" "); stderrBuf.push(s); if (stream) origErr(s); };
 
   try {
     const exitCode = _runSyncCore(options);
@@ -274,9 +276,8 @@ if (require.main === module) {
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch,
     dryRun: values["dry-run"] ?? false,
+    stream: true,
   });
 
-  if (result.stdout) process.stdout.write(result.stdout + "\n");
-  if (result.stderr) process.stderr.write(result.stderr + "\n");
   process.exit(result.exitCode);
 }
