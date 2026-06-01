@@ -250,6 +250,32 @@
   .call-tree li { margin-bottom: 0.35rem; position: relative; padding-left: 0.3rem; }
   .call-tree > li { padding-left: 0; }
 
+  /* Call-graph figures (§13) — keep SVG at natural size, scroll if wider. */
+  .callgraph { overflow-x: auto; padding-bottom: 1rem; }
+  .callgraph svg { display: block; margin: 0.4rem auto 0.2rem; }
+  .callgraph .cg-title {
+    font-weight: 700;
+    color: var(--accent);
+    text-align: left;
+    margin: 0 0 0.4rem;
+    font-size: 0.98rem;
+  }
+  .cg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.2rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin: 0.4rem 0 1.2rem;
+  }
+  .cg-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .cg-swatch {
+    width: 0.95rem; height: 0.95rem;
+    border-radius: 3px;
+    border: 1.5px solid;
+    flex-shrink: 0;
+  }
+
   /* Show nested sub-call lists inside step-list items as a tree, too. */
   .step-list ul {
     list-style: none;
@@ -566,6 +592,8 @@
   <li><a href="#shadowignore">.shadowignore</a></li>
   <li><a href="#preflight">Preflight Checks</a></li>
   <li><a href="#files">File Reference</a></li>
+  <li><a href="#git">Git Command Reference</a></li>
+  <li><a href="#callgraphs">Function Call Graphs</a></li>
 </ol>
 </nav>
 
@@ -993,6 +1021,8 @@ manual commands above are just for first-time testing.</p>
   purpose. Trivial one-line helpers (regex escapes, the <code>fail()</code> thrower, internal struct
   builders) are omitted &mdash; the signature is the documentation. Each entry shows the signature plus
   2&ndash;3 concrete <code>In:</code>/<code>Out:</code> examples including at least one edge case.
+  For the <em>call</em> relationships between these functions, see the
+  <a href="#callgraphs">call graphs in §13</a>.
 </p>
 
 <h3 class="fn-group">Module setup &amp; primitives</h3>
@@ -2602,6 +2632,1856 @@ secrets/</code></pre>
   <tr><td><code>.github/workflows/shadow-sync.yml</code></td><td>CI workflow: pull from B on schedule</td></tr>
   <tr><td><code>.github/workflows/shadow-forward.yml</code></td><td>CI workflow: push from A on schedule (needs PAT)</td></tr>
 </table>
+
+<!-- ── 12. Git Command Reference ─────────────────────────────────────────── -->
+
+<h2 id="git">12. Git Command Reference</h2>
+
+<p>
+  Every git invocation the engine makes, grouped by purpose, with what the command does and
+  why shadow-sync reaches for it. All of them go through the single <code>git()</code> wrapper in
+  <code>shadow-common.ts</code> (<a href="#api">§5</a>) &mdash; <code>spawnSync("git", &hellip;)</code>
+  with <code>cwd</code> pinned to the orchestrator repo root, never the process cwd. Unless
+  <code>{ plain: true }</code> is passed, the <code>-c key=value</code> overrides below are prepended
+  to every call.
+</p>
+
+<div class="highlight-box">
+  Shadow-sync never runs porcelain that mutates a working tree (no <code>checkout</code>,
+  <code>merge</code>, <code>commit</code>, <code>rebase</code>, <code>reset</code>). It builds trees
+  and commits entirely with plumbing against a throwaway index, then moves refs with
+  <code>push</code>. The orchestrator clone's working tree and real index are never touched.
+</div>
+
+<h3 class="fn-group">Invocation &amp; configuration</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr>
+    <td><code>git -c &lt;key&gt;=&lt;value&gt; &hellip;</code></td>
+    <td>Sets one-shot config for the duration of the command.</td>
+    <td>Prepended to every non-<code>plain</code> call from <code>gitConfigOverrides</code> (e.g. <code>core.autocrlf</code>, <code>core.ignorecase</code>). Pins line-ending/case behavior so blob and tree SHAs are byte-identical across Windows/macOS/Linux runners &mdash; otherwise dedup by SHA breaks.</td>
+  </tr>
+  <tr>
+    <td><code>rev-parse --show-toplevel</code></td>
+    <td>Prints the working-tree root of the current repo.</td>
+    <td>Run once at module load to capture the orchestrator repo root, which becomes the <code>cwd</code> for all later git calls.</td>
+  </tr>
+</table>
+
+<h3 class="fn-group">Remotes &amp; fetching</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>remote get-url &lt;remote&gt;</code></td><td>Prints a remote's configured URL (fails if absent).</td><td><code>ensureRemote</code>: probe whether the pair's endpoint is already wired up.</td></tr>
+  <tr><td><code>remote add &lt;remote&gt; &lt;url&gt;</code></td><td>Registers a new remote.</td><td><code>ensureRemote</code>: add the endpoint when it is missing.</td></tr>
+  <tr><td><code>remote set-url &lt;remote&gt; &lt;url&gt;</code></td><td>Repoints an existing remote.</td><td><code>ensureRemote</code>: correct a stale URL so both endpoints match the config.</td></tr>
+  <tr><td><code>fetch &lt;source.remote&gt;</code></td><td>Downloads source objects + refs.</td><td>Mandatory before replay &mdash; source history must be local to walk it. Hard-fails (no <code>safe</code>) since nothing can proceed without it.</td></tr>
+  <tr><td><code>fetch &lt;target.remote&gt;</code> <span class="tag tag-orange">safe</span></td><td>Downloads target objects + refs.</td><td>Brings existing shadow branches (for the dedup scan) and the fallback parent local. Degrades to a warning on failure &mdash; the run continues against possibly-stale tracking refs.</td></tr>
+  <tr><td><code>fetch &lt;remote&gt; --tags</code></td><td>Downloads tags from a remote.</td><td><code>syncTags</code>: pull the source's tags before recreating them on the target.</td></tr>
+</table>
+
+<h3 class="fn-group">Ref &amp; branch inspection</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>rev-parse --verify &lt;ref&gt;</code> <span class="tag tag-orange">safe</span></td><td>Resolves a ref, nonzero exit if it doesn't exist.</td><td><code>refExists</code>: no-throw existence probe.</td></tr>
+  <tr><td><code>rev-parse &lt;rev&gt;</code></td><td>Resolves a revision expression to a SHA.</td><td>The universal resolver: <code>&lt;hash&gt;^</code> (first parent), <code>&lt;sha&gt;^{tree}</code> (a commit's tree), <code>&lt;hash&gt;:&lt;subdir&gt;</code> (a subtree), <code>refs/tags/&lt;name&gt;^{commit}</code> (peel a tag). Used all through tree composition and divergence checks.</td></tr>
+  <tr><td><code>rev-parse --is-shallow-repository</code> <span class="tag tag-orange">safe</span></td><td>Reports whether the clone is shallow.</td><td>Preflight: a shallow clone lacks the full history replay needs &mdash; flagged as a fatal <code>SHALLOW_CLONE</code> error.</td></tr>
+  <tr><td><code>for-each-ref --format=%(refname) refs/remotes/&lt;r&gt;&hellip;</code> <span class="tag tag-orange">safe</span></td><td>Lists matching refs in one call.</td><td><code>filterExistingRefs</code>: cheaply keep only the candidate shadow refs that exist locally.</td></tr>
+  <tr><td><code>for-each-ref --contains &lt;hash&gt; refs/remotes/&lt;remote&gt;/</code> <span class="tag tag-orange">safe</span></td><td>Lists refs whose history contains a commit.</td><td><code>inferSourceBranch</code>: identify which source branch a halted commit lives on, to point the halt diagnostic at the right shadow ref.</td></tr>
+  <tr><td><code>branch -r</code></td><td>Lists remote-tracking branches.</td><td><code>listRemoteBranches</code> (enumerate syncable branches, excluding <code>shadow/*</code>) and stale-shadow detection at the end of a sync.</td></tr>
+</table>
+
+<h3 class="fn-group">History traversal &amp; commit collection</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>log --topo-order --reverse --full-history --format=%H &lt;branches&gt; [-- &lt;dirs&gt;/]</code> <span class="tag tag-orange">safe</span></td><td>In-scope commits, oldest-first.</td><td><code>collectSourceCommits</code>: the candidate set to replay. <code>--full-history</code> retains merges that path-filter simplification would drop; the <code>-- dir/</code> pathspec is omitted when any mapping is rooted at <code>""</code> (whole graph in scope).</td></tr>
+  <tr><td><code>log --no-walk --format=%H %P &lt;hashes&hellip;&gt;</code> <span class="tag tag-orange">safe</span></td><td>Each listed commit with its true parents.</td><td><code>fetchTrueParents</code>: get real parents, bypassing the parent-rewriting that path-filtered <code>log</code> does (which would hide TREESAME merge parents). Chunked at 500 for argv limits.</td></tr>
+  <tr><td><code>log -1 --format=%P &lt;hash&gt;</code> <span class="tag tag-orange">safe</span></td><td>One commit's parents.</td><td>Orphan-drop walk and absorbed-halt walk, chasing parent edges one hop at a time.</td></tr>
+  <tr><td><code>log --first-parent --format=%H &lt;remote&gt;/&lt;branch&gt;</code> <span class="tag tag-orange">safe</span></td><td>Mainline history, newest-first.</td><td><code>dropOrphanedCommits</code> and <code>mapBranchesToTargetTips</code>: walk a branch's first-parent line until the most recent already-mapped ancestor.</td></tr>
+  <tr><td><code>log --format=%H &lt;pi&gt; ^&lt;p1&gt;</code> <span class="tag tag-orange">safe</span></td><td>Commits reachable from Pi but not P1.</td><td><code>hasKeptExclusiveAncestor</code>: decide whether a merge is load-bearing by checking if a non-first parent contributes any kept commit.</td></tr>
+  <tr><td><code>log --topo-order --format=%H &lt;hash&gt;</code> <span class="tag tag-orange">safe</span></td><td>Full ancestry, newest-first.</td><td><code>findEchoAnchor</code>: walk an out-of-scope parent until a mapped ancestor turns up to anchor the replay.</td></tr>
+  <tr><td><code>log --max-parents=0 --format=%H &lt;remote&gt;/main</code> <span class="tag tag-orange">safe</span></td><td>Root commit(s) of a branch.</td><td>Find the target's init commit, used as the fallback parent for orphaned source roots.</td></tr>
+  <tr><td><code>log -1 --format=&lt;NUL-joined fields&gt; &lt;hash&gt;</code></td><td>All metadata for one commit in a single read.</td><td><code>getCommitMeta</code>: author/committer identity, dates, subject, body, and unfolded trailers. Fields are NUL-separated with <code>%B</code> last so message newlines can't shift columns.</td></tr>
+</table>
+
+<h3 class="fn-group">Trailers (deduplication)</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>interpret-trailers --trailer &lt;trailer&gt;</code> <span class="tag tag-orange">safe</span></td><td>Appends a trailer to a message per git's trailer rules.</td><td><code>appendTrailer</code>: stamp the <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> mapping onto a replayed message (falls back to manual append if git errors). See <a href="#dedup">§8</a>.</td></tr>
+  <tr><td><code>log &lt;refs&gt; --grep=&hellip; --format=%H %(trailers:key=&hellip;,valueonly)</code> <span class="tag tag-orange">safe</span></td><td>Emits each commit's SHA plus selected trailer values.</td><td><code>extractTrailerMapping</code> / <code>loadReplayedMappings</code>: rebuild the source&rarr;target SHA map straight from the trailers on this pair's shadow refs.</td></tr>
+</table>
+
+<h3 class="fn-group">Tree plumbing</h3>
+<p>
+  These build the replayed tree object by object. Each runs against a private throwaway index
+  (<code>GIT_INDEX_FILE</code> pointing at a temp file, allocated by <code>withTmpIndex</code>) so the
+  orchestrator's real index and working tree are never disturbed.
+</p>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>read-tree &lt;tree&gt;</code></td><td>Loads a tree into the index.</td><td>Establish the base before splicing/diffing (parent tree, echo target, slice base).</td></tr>
+  <tr><td><code>read-tree --empty</code></td><td>Clears the index.</td><td><code>buildReplayedTree</code> for a root commit with no parent tree.</td></tr>
+  <tr><td><code>read-tree --prefix=&lt;dir&gt;/ &lt;tree&gt;</code></td><td>Loads a tree into a subdirectory of the index.</td><td><code>composeSubtrees</code>: place each mapping's content at its <code>target.dir/</code>.</td></tr>
+  <tr><td><code>write-tree</code></td><td>Hashes the current index into a tree object, prints its SHA.</td><td>The output of every compose step &mdash; the replayed tree itself.</td></tr>
+  <tr><td><code>ls-files</code> <span class="tag tag-orange">safe</span></td><td>Lists paths in the index.</td><td>Enumerate entries to test against ignore patterns before removing them.</td></tr>
+  <tr><td><code>rm --cached -f --quiet -- &lt;paths&hellip;&gt;</code> <span class="tag tag-orange">safe</span></td><td>Removes paths from the index only.</td><td>Strip <code>.shadowignore</code>-matched files and replayed deletions from the tree.</td></tr>
+  <tr><td><code>rm -rf --cached -q --ignore-unmatch -- &lt;dirs&hellip;&gt;</code> <span class="tag tag-orange">safe</span></td><td>Removes whole subtrees from the index, tolerating misses.</td><td><code>outerOnlyTree</code> (strip every mapped <code>target.dir/</code> to leave the "outer" state) and pre-splice cleanup in <code>composeSubtrees</code>.</td></tr>
+  <tr><td><code>update-index --index-info</code></td><td>Adds <code>mode hash\tpath</code> entries from stdin.</td><td><code>buildReplayedTree</code>: bulk-apply the additions/modifications side of a replayed diff.</td></tr>
+  <tr><td><code>diff-tree -r &lt;parent&gt; &lt;commit&gt; [-- &lt;dirs&gt;/]</code> <span class="tag tag-orange">safe</span></td><td>Lists per-file changes between two trees.</td><td><code>buildReplayedTree</code>: the commit's change set vs its first parent, reshaped into index ops. No <code>-M/-C</code>, so renames surface as delete+add.</td></tr>
+  <tr><td><code>ls-tree -r &lt;commit&gt; [-- &lt;dirs&gt;/]</code> <span class="tag tag-orange">safe</span></td><td>Recursively lists a tree's entries.</td><td>Root commit (no parent to diff) &mdash; every file becomes an "A" addition. Also used with <code>--name-only</code> in the case-conflict preflight.</td></tr>
+  <tr><td><code>show &lt;commit&gt;:&lt;path&gt;</code> <span class="tag tag-orange">safe</span></td><td>Prints a blob's contents at a commit.</td><td><code>readShadowIgnorePatterns</code>: read <code>.shadowignore</code> files at the commit's snapshot so patterns track history. See <a href="#shadowignore">§9</a>.</td></tr>
+  <tr><td><code>mktree</code></td><td>Builds a tree object from stdin entries.</td><td><code>outerOnlyTree</code> with empty input &rarr; the canonical empty tree when every mapping is rooted (no outer state).</td></tr>
+  <tr><td><code>merge-tree --write-tree &lt;p0&gt; &lt;p1&gt;</code> <span class="tag tag-orange">safe</span></td><td>In-memory 3-way merge of two commits, prints the result tree.</td><td><code>composeMergeBaseTree</code>: try a clean merge of two mapped parents. A 40-hex SHA means success; anything else means conflict &rarr; fall through to outer-agreement or halt.</td></tr>
+</table>
+
+<h3 class="fn-group">Commit &amp; tag object creation</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>commit-tree &lt;tree&gt; -p &lt;parent&gt;&hellip; -m &lt;msg&gt;</code></td><td>Creates a commit object from a tree + parents, prints its SHA.</td><td><code>replayCommits</code>: synthesize the replayed commit directly &mdash; no checkout/commit. <code>GIT_AUTHOR_*</code>/<code>GIT_COMMITTER_*</code> env preserves the original identity and timestamps.</td></tr>
+  <tr><td><code>cat-file tag refs/tags/&lt;name&gt;</code> <span class="tag tag-orange">safe</span></td><td>Prints an annotated tag object's body.</td><td><code>syncTags</code>: read the original tag to clone its tagger/message.</td></tr>
+  <tr><td><code>mktag</code> <span class="tag tag-orange">safe</span></td><td>Creates a tag object from stdin, prints its SHA.</td><td><code>syncTags</code>: rebuild the annotated tag with its <code>object</code> line repointed at the replayed commit.</td></tr>
+</table>
+
+<h3 class="fn-group">Pushing &amp; divergence</h3>
+<table>
+  <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>merge-base --is-ancestor &lt;a&gt; &lt;b&gt;</code> <span class="tag tag-orange">safe</span></td><td>Exit 0 iff a is an ancestor of b.</td><td>Divergence checks in <code>shadow-sync.ts</code>: skip when the replay is already contained in the target tip, and confirm a push is a fast-forward before doing it. See <a href="#merge">§7</a>.</td></tr>
+  <tr><td><code>push &lt;remote&gt; &lt;sha&gt;:refs/heads/&lt;shadow&gt;</code></td><td>Pushes a SHA to a shadow branch.</td><td>Advance the shadow branch to the newly replayed tip. Fast-forward only &mdash; never forced; a non-FF divergence with a different tree halts instead.</td></tr>
+  <tr><td><code>push &lt;remote&gt; +&lt;pushSHA&gt;:refs/tags/&lt;name&gt;</code></td><td>Force-pushes a tag ref.</td><td><code>syncTags</code>: the source is the source of truth for tags, so target tags are overwritten when the source moves them (the leading <code>+</code> forces it).</td></tr>
+</table>
+
+<h3 class="fn-group">Environment variables passed to git</h3>
+<table>
+  <tr><th>Variable(s)</th><th>What it does</th><th>Why here</th></tr>
+  <tr><td><code>GIT_AUTHOR_NAME/EMAIL/DATE</code>, <code>GIT_COMMITTER_NAME/EMAIL/DATE</code></td><td>Override the identity/dates git stamps on a new commit.</td><td><code>buildCommitEnv</code> feeds these to <code>commit-tree</code> so the replay carries the original commit's author, committer, and timestamps verbatim.</td></tr>
+  <tr><td><code>GIT_INDEX_FILE</code></td><td>Points git at an alternate index file.</td><td><code>withTmpIndex</code> sets it to a temp path so all tree plumbing runs against a private index, isolated from the orchestrator's real one.</td></tr>
+</table>
+
+<div class="highlight-box">
+  <strong>Operator-only commands.</strong> The halt diagnostic (<code>formatUnresolvableMergeError</code>) also
+  <em>prints</em> a suggested recovery sequence &mdash; <code>git checkout&nbsp;-b</code>,
+  <code>merge&nbsp;--no-ff</code>, <code>write-tree</code>, <code>commit-tree</code>,
+  <code>update-ref</code>, <code>push</code> &mdash; for a human to run by hand. Those are
+  instructional text, not commands the engine executes.
+</div>
+
+
+<!-- ── 13. Function Call Graphs ──────────────────────────────────────────── -->
+
+<h2 id="callgraphs">13. Function Call Graphs</h2>
+
+<p>
+  Directed call graphs for every function in <code>shadow-common.ts</code> and
+  <code>shadow-sync.ts</code> &mdash; the visual companion to the
+  <a href="#api">Function Reference (§5)</a>. An arrow <code>f &rarr; g</code> means
+  <em>f calls g</em>. The set is split into eight subsystem clusters that follow a sync
+  top-down: orchestration drives the others, and each box is the entry point of (or a worker
+  within) the cluster it appears in. Shared primitives (<code>git</code>, <code>fail</code>,
+  <code>spawnSync</code>) and small utilities repeat across clusters so each graph reads on its
+  own; the <code>git</code> wrapper and its callers are charted in full in cluster&nbsp;H.
+</p>
+
+<div class="cg-legend">
+  <span><span class="cg-swatch" style="background:#dbeafe;border-color:#2563eb"></span> exported / cluster entry point</span>
+  <span><span class="cg-swatch" style="background:#ffffff;border-color:#64748b"></span> internal worker</span>
+  <span><span class="cg-swatch" style="background:#f3e8ff;border-color:#7c3aed"></span> pure helper (no I/O)</span>
+  <span><span class="cg-swatch" style="background:#f1f5f9;border-color:#94a3b8"></span> shared primitive / util</span>
+</div>
+
+<!-- generated by gen-callgraphs.js -->
+<figure class="flow-figure callgraph" id="cg-orchestration">
+<figcaption class="cg-title">A · Orchestration &amp; entry</figcaption>
+<svg width="530pt" height="906pt"
+ viewBox="0.00 0.00 530.00 906.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 902.48)">
+<title>cg&#45;orchestration</title>
+<!-- runSync -->
+<g id="node1" class="node">
+<title>runSync</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M45.84,-277.48C45.84,-277.48 8.16,-277.48 8.16,-277.48 4.08,-277.48 0,-273.4 0,-269.32 0,-269.32 0,-261.16 0,-261.16 0,-257.08 4.08,-253 8.16,-253 8.16,-253 45.84,-253 45.84,-253 49.92,-253 54,-257.08 54,-261.16 54,-261.16 54,-269.32 54,-269.32 54,-273.4 49.92,-277.48 45.84,-277.48"/>
+<text xml:space="preserve" text-anchor="middle" x="27" y="-261.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">runSync</text>
+</g>
+<!-- _runSyncCore -->
+<g id="node2" class="node">
+<title>_runSyncCore</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M166.67,-277.48C166.67,-277.48 102.16,-277.48 102.16,-277.48 98.08,-277.48 94,-273.4 94,-269.32 94,-269.32 94,-261.16 94,-261.16 94,-257.08 98.08,-253 102.16,-253 102.16,-253 166.67,-253 166.67,-253 170.75,-253 174.83,-257.08 174.83,-261.16 174.83,-261.16 174.83,-269.32 174.83,-269.32 174.83,-273.4 170.75,-277.48 166.67,-277.48"/>
+<text xml:space="preserve" text-anchor="middle" x="134.41" y="-261.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">_runSyncCore</text>
+</g>
+<!-- runSync&#45;&gt;_runSyncCore -->
+<g id="edge1" class="edge">
+<title>runSync&#45;&gt;_runSyncCore</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M54.87,-265.24C63.93,-265.24 74.33,-265.24 84.55,-265.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="84.38,-267.69 91.38,-265.24 84.38,-262.79 84.38,-267.69"/>
+</g>
+<!-- mirrorHistory -->
+<g id="node3" class="node">
+<title>mirrorHistory</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M310.4,-622.48C310.4,-622.48 248.33,-622.48 248.33,-622.48 244.25,-622.48 240.17,-618.4 240.17,-614.32 240.17,-614.32 240.17,-606.16 240.17,-606.16 240.17,-602.08 244.25,-598 248.33,-598 248.33,-598 310.4,-598 310.4,-598 314.48,-598 318.56,-602.08 318.56,-606.16 318.56,-606.16 318.56,-614.32 318.56,-614.32 318.56,-618.4 314.48,-622.48 310.4,-622.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-606.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">mirrorHistory</text>
+</g>
+<!-- _runSyncCore&#45;&gt;mirrorHistory -->
+<g id="edge10" class="edge">
+<title>_runSyncCore&#45;&gt;mirrorHistory</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M139.34,-278.37C149.96,-313.3 180.7,-411.17 214.83,-489.24 230.71,-525.57 252.93,-566.03 266.45,-589.75"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="264.24,-590.82 269.85,-595.67 268.49,-588.38 264.24,-590.82"/>
+</g>
+<!-- ensureRemote -->
+<g id="node4" class="node">
+<title>ensureRemote</title>
+<path fill="#ffffff" stroke="#64748b" d="M311.31,-346.48C311.31,-346.48 247.42,-346.48 247.42,-346.48 243.34,-346.48 239.26,-342.4 239.26,-338.32 239.26,-338.32 239.26,-330.16 239.26,-330.16 239.26,-326.08 243.34,-322 247.42,-322 247.42,-322 311.31,-322 311.31,-322 315.39,-322 319.47,-326.08 319.47,-330.16 319.47,-330.16 319.47,-338.32 319.47,-338.32 319.47,-342.4 315.39,-346.48 311.31,-346.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-330.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">ensureRemote</text>
+</g>
+<!-- _runSyncCore&#45;&gt;ensureRemote -->
+<g id="edge3" class="edge">
+<title>_runSyncCore&#45;&gt;ensureRemote</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M155.77,-278.38C171.5,-288.2 194.03,-301.55 214.83,-311.24 220.31,-313.8 226.16,-316.25 232.01,-318.55"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="230.98,-320.78 238.4,-320.99 232.73,-316.2 230.98,-320.78"/>
+</g>
+<!-- validateName -->
+<g id="node5" class="node">
+<title>validateName</title>
+<path fill="#ffffff" stroke="#64748b" d="M310.39,-300.48C310.39,-300.48 248.35,-300.48 248.35,-300.48 244.27,-300.48 240.19,-296.4 240.19,-292.32 240.19,-292.32 240.19,-284.16 240.19,-284.16 240.19,-280.08 244.27,-276 248.35,-276 248.35,-276 310.39,-276 310.39,-276 314.47,-276 318.55,-280.08 318.55,-284.16 318.55,-284.16 318.55,-292.32 318.55,-292.32 318.55,-296.4 314.47,-300.48 310.39,-300.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-284.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">validateName</text>
+</g>
+<!-- _runSyncCore&#45;&gt;validateName -->
+<g id="edge2" class="edge">
+<title>_runSyncCore&#45;&gt;validateName</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M175.61,-271.71C193.09,-274.52 213.67,-277.83 231.8,-280.75"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="231,-283.1 238.3,-281.79 231.78,-278.26 231,-283.1"/>
+</g>
+<!-- filterBranchesForRemote -->
+<g id="node6" class="node">
+<title>filterBranchesForRemote</title>
+<path fill="#ffffff" stroke="#64748b" d="M335.74,-254.48C335.74,-254.48 222.99,-254.48 222.99,-254.48 218.91,-254.48 214.83,-250.4 214.83,-246.32 214.83,-246.32 214.83,-238.16 214.83,-238.16 214.83,-234.08 218.91,-230 222.99,-230 222.99,-230 335.74,-230 335.74,-230 339.82,-230 343.9,-234.08 343.9,-238.16 343.9,-238.16 343.9,-246.32 343.9,-246.32 343.9,-250.4 339.82,-254.48 335.74,-254.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-238.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterBranchesForRemote</text>
+</g>
+<!-- _runSyncCore&#45;&gt;filterBranchesForRemote -->
+<g id="edge5" class="edge">
+<title>_runSyncCore&#45;&gt;filterBranchesForRemote</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M175.61,-258.77C185.13,-257.24 195.56,-255.56 206.02,-253.88"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="206.23,-256.33 212.75,-252.8 205.45,-251.49 206.23,-256.33"/>
+</g>
+<!-- listRemoteBranches -->
+<g id="node7" class="node">
+<title>listRemoteBranches</title>
+<path fill="#ffffff" stroke="#64748b" d="M324.14,-208.48C324.14,-208.48 234.59,-208.48 234.59,-208.48 230.51,-208.48 226.43,-204.4 226.43,-200.32 226.43,-200.32 226.43,-192.16 226.43,-192.16 226.43,-188.08 230.51,-184 234.59,-184 234.59,-184 324.14,-184 324.14,-184 328.22,-184 332.3,-188.08 332.3,-192.16 332.3,-192.16 332.3,-200.32 332.3,-200.32 332.3,-204.4 328.22,-208.48 324.14,-208.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-192.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">listRemoteBranches</text>
+</g>
+<!-- _runSyncCore&#45;&gt;listRemoteBranches -->
+<g id="edge6" class="edge">
+<title>_runSyncCore&#45;&gt;listRemoteBranches</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M155.77,-252.1C171.5,-242.28 194.03,-228.93 214.83,-219.24 220.31,-216.68 226.16,-214.23 232.01,-211.93"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="232.73,-214.28 238.4,-209.49 230.98,-209.7 232.73,-214.28"/>
+</g>
+<!-- runPreflightChecks -->
+<g id="node8" class="node">
+<title>runPreflightChecks</title>
+<path fill="#ffffff" stroke="#64748b" d="M322.62,-162.48C322.62,-162.48 236.12,-162.48 236.12,-162.48 232.04,-162.48 227.96,-158.4 227.96,-154.32 227.96,-154.32 227.96,-146.16 227.96,-146.16 227.96,-142.08 232.04,-138 236.12,-138 236.12,-138 322.62,-138 322.62,-138 326.7,-138 330.78,-142.08 330.78,-146.16 330.78,-146.16 330.78,-154.32 330.78,-154.32 330.78,-158.4 326.7,-162.48 322.62,-162.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-146.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">runPreflightChecks</text>
+</g>
+<!-- _runSyncCore&#45;&gt;runPreflightChecks -->
+<g id="edge8" class="edge">
+<title>_runSyncCore&#45;&gt;runPreflightChecks</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M143.55,-252.08C156.4,-232.33 183.2,-195.02 214.83,-173.24 218.42,-170.77 222.31,-168.53 226.33,-166.5"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="227.35,-168.73 232.68,-163.58 225.29,-164.28 227.35,-168.73"/>
+</g>
+<!-- printPreflightResults -->
+<g id="node9" class="node">
+<title>printPreflightResults</title>
+<path fill="#ffffff" stroke="#64748b" d="M325.68,-116.48C325.68,-116.48 233.05,-116.48 233.05,-116.48 228.97,-116.48 224.89,-112.4 224.89,-108.32 224.89,-108.32 224.89,-100.16 224.89,-100.16 224.89,-96.08 228.97,-92 233.05,-92 233.05,-92 325.68,-92 325.68,-92 329.76,-92 333.84,-96.08 333.84,-100.16 333.84,-100.16 333.84,-108.32 333.84,-108.32 333.84,-112.4 329.76,-116.48 325.68,-116.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-100.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">printPreflightResults</text>
+</g>
+<!-- _runSyncCore&#45;&gt;printPreflightResults -->
+<g id="edge9" class="edge">
+<title>_runSyncCore&#45;&gt;printPreflightResults</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M139.47,-252.21C148.57,-225.09 173.1,-162.24 214.83,-127.24 217.68,-124.84 220.81,-122.69 224.1,-120.75"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="224.98,-123.05 230.03,-117.62 222.7,-118.72 224.98,-123.05"/>
+</g>
+<!-- syncTags -->
+<g id="node10" class="node">
+<title>syncTags</title>
+<path fill="#ffffff" stroke="#64748b" d="M300.62,-70.48C300.62,-70.48 258.11,-70.48 258.11,-70.48 254.03,-70.48 249.95,-66.4 249.95,-62.32 249.95,-62.32 249.95,-54.16 249.95,-54.16 249.95,-50.08 254.03,-46 258.11,-46 258.11,-46 300.62,-46 300.62,-46 304.7,-46 308.78,-50.08 308.78,-54.16 308.78,-54.16 308.78,-62.32 308.78,-62.32 308.78,-66.4 304.7,-70.48 300.62,-70.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-54.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">syncTags</text>
+</g>
+<!-- _runSyncCore&#45;&gt;syncTags -->
+<g id="edge12" class="edge">
+<title>_runSyncCore&#45;&gt;syncTags</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M137.43,-252.06C143.21,-218.71 162.9,-130.14 214.83,-81.24 222.3,-74.2 232.09,-69.29 241.73,-65.87"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="242.23,-68.28 248.16,-63.84 240.75,-63.61 242.23,-68.28"/>
+</g>
+<!-- shadowBranchName -->
+<g id="node11" class="node">
+<title>shadowBranchName</title>
+<path fill="#ffffff" stroke="#64748b" d="M325.66,-24.48C325.66,-24.48 233.07,-24.48 233.07,-24.48 228.99,-24.48 224.91,-20.4 224.91,-16.32 224.91,-16.32 224.91,-8.16 224.91,-8.16 224.91,-4.08 228.99,0 233.07,0 233.07,0 325.66,0 325.66,0 329.74,0 333.82,-4.08 333.82,-8.16 333.82,-8.16 333.82,-16.32 333.82,-16.32 333.82,-20.4 329.74,-24.48 325.66,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="279.37" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">shadowBranchName</text>
+</g>
+<!-- _runSyncCore&#45;&gt;shadowBranchName -->
+<g id="edge11" class="edge">
+<title>_runSyncCore&#45;&gt;shadowBranchName</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M136.13,-252.03C138.95,-213.26 152.42,-98.58 214.83,-35.24 217.01,-33.02 219.43,-31.01 222.01,-29.2"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="223.03,-31.44 227.73,-25.7 220.48,-27.26 223.03,-31.44"/>
+</g>
+<!-- refExists -->
+<g id="node21" class="node">
+<title>refExists</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M472.75,-484.48C472.75,-484.48 432.69,-484.48 432.69,-484.48 428.61,-484.48 424.53,-480.4 424.53,-476.32 424.53,-476.32 424.53,-468.16 424.53,-468.16 424.53,-464.08 428.61,-460 432.69,-460 432.69,-460 472.75,-460 472.75,-460 476.83,-460 480.91,-464.08 480.91,-468.16 480.91,-468.16 480.91,-476.32 480.91,-476.32 480.91,-480.4 476.83,-484.48 472.75,-484.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-468.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">refExists</text>
+</g>
+<!-- _runSyncCore&#45;&gt;refExists -->
+<g id="edge7" class="edge">
+<title>_runSyncCore&#45;&gt;refExists</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M137.79,-278.06C144.19,-308.8 164.82,-386.99 214.83,-425.24 274.05,-470.54 365.29,-475.58 415.5,-474.44"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="415.5,-476.89 422.42,-474.23 415.35,-471.99 415.5,-476.89"/>
+</g>
+<!-- git -->
+<g id="node22" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M471.56,-438.48C471.56,-438.48 433.88,-438.48 433.88,-438.48 429.8,-438.48 425.72,-434.4 425.72,-430.32 425.72,-430.32 425.72,-422.16 425.72,-422.16 425.72,-418.08 429.8,-414 433.88,-414 433.88,-414 471.56,-414 471.56,-414 475.64,-414 479.72,-418.08 479.72,-422.16 479.72,-422.16 479.72,-430.32 479.72,-430.32 479.72,-434.4 475.64,-438.48 471.56,-438.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-422.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- _runSyncCore&#45;&gt;git -->
+<g id="edge4" class="edge">
+<title>_runSyncCore&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M139.68,-278.37C148.85,-304.31 173.07,-362 214.83,-389.24 277.15,-429.9 367.95,-431.82 417.06,-429.27"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="416.94,-431.73 423.78,-428.87 416.65,-426.84 416.94,-431.73"/>
+</g>
+<!-- fail -->
+<g id="node23" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M471.56,-392.48C471.56,-392.48 433.88,-392.48 433.88,-392.48 429.8,-392.48 425.72,-388.4 425.72,-384.32 425.72,-384.32 425.72,-376.16 425.72,-376.16 425.72,-372.08 429.8,-368 433.88,-368 433.88,-368 471.56,-368 471.56,-368 475.64,-368 479.72,-372.08 479.72,-376.16 479.72,-376.16 479.72,-384.32 479.72,-384.32 479.72,-388.4 475.64,-392.48 471.56,-392.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-376.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- _runSyncCore&#45;&gt;fail -->
+<g id="edge13" class="edge">
+<title>_runSyncCore&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M142.35,-278.4C154.13,-299.24 180.16,-339.29 214.83,-357.24 279.94,-390.95 368.61,-388.98 416.89,-384.59"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="417.04,-387.04 423.76,-383.92 416.56,-382.17 417.04,-387.04"/>
+</g>
+<!-- buildDirectionConfig -->
+<g id="node12" class="node">
+<title>buildDirectionConfig</title>
+<path fill="#ffffff" stroke="#64748b" d="M500.55,-898.48C500.55,-898.48 404.88,-898.48 404.88,-898.48 400.8,-898.48 396.72,-894.4 396.72,-890.32 396.72,-890.32 396.72,-882.16 396.72,-882.16 396.72,-878.08 400.8,-874 404.88,-874 404.88,-874 500.55,-874 500.55,-874 504.63,-874 508.71,-878.08 508.71,-882.16 508.71,-882.16 508.71,-890.32 508.71,-890.32 508.71,-894.4 504.63,-898.48 500.55,-898.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-882.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">buildDirectionConfig</text>
+</g>
+<!-- mirrorHistory&#45;&gt;buildDirectionConfig -->
+<g id="edge14" class="edge">
+<title>mirrorHistory&#45;&gt;buildDirectionConfig</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M281.91,-623.39C287.49,-664.83 310.26,-793.99 383.9,-863.24 386.4,-865.59 389.15,-867.7 392.06,-869.59"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="390.37,-871.45 397.67,-872.8 392.81,-867.2 390.37,-871.45"/>
+</g>
+<!-- loadReplayedMappings -->
+<g id="node13" class="node">
+<title>loadReplayedMappings</title>
+<path fill="#ffffff" stroke="#64748b" d="M505.44,-852.48C505.44,-852.48 400,-852.48 400,-852.48 395.92,-852.48 391.84,-848.4 391.84,-844.32 391.84,-844.32 391.84,-836.16 391.84,-836.16 391.84,-832.08 395.92,-828 400,-828 400,-828 505.44,-828 505.44,-828 509.52,-828 513.6,-832.08 513.6,-836.16 513.6,-836.16 513.6,-844.32 513.6,-844.32 513.6,-848.4 509.52,-852.48 505.44,-852.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-836.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">loadReplayedMappings</text>
+</g>
+<!-- mirrorHistory&#45;&gt;loadReplayedMappings -->
+<g id="edge15" class="edge">
+<title>mirrorHistory&#45;&gt;loadReplayedMappings</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M283.21,-623.29C291.79,-659.5 320.75,-762.19 383.9,-817.24 386.59,-819.58 389.53,-821.69 392.63,-823.58"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="391.31,-825.66 398.64,-826.84 393.65,-821.35 391.31,-825.66"/>
+</g>
+<!-- collectSourceCommits -->
+<g id="node14" class="node">
+<title>collectSourceCommits</title>
+<path fill="#ffffff" stroke="#64748b" d="M503.3,-806.48C503.3,-806.48 402.14,-806.48 402.14,-806.48 398.06,-806.48 393.98,-802.4 393.98,-798.32 393.98,-798.32 393.98,-790.16 393.98,-790.16 393.98,-786.08 398.06,-782 402.14,-782 402.14,-782 503.3,-782 503.3,-782 507.38,-782 511.46,-786.08 511.46,-790.16 511.46,-790.16 511.46,-798.32 511.46,-798.32 511.46,-802.4 507.38,-806.48 503.3,-806.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-790.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">collectSourceCommits</text>
+</g>
+<!-- mirrorHistory&#45;&gt;collectSourceCommits -->
+<g id="edge16" class="edge">
+<title>mirrorHistory&#45;&gt;collectSourceCommits</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M285.18,-623.19C297.12,-653.56 331,-729.92 383.9,-771.24 387.05,-773.69 390.46,-775.89 394.04,-777.86"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="392.71,-779.94 400.07,-780.86 394.89,-775.55 392.71,-779.94"/>
+</g>
+<!-- filterLoadBearingCommits -->
+<g id="node15" class="node">
+<title>filterLoadBearingCommits</title>
+<path fill="#ffffff" stroke="#64748b" d="M512.77,-760.48C512.77,-760.48 392.67,-760.48 392.67,-760.48 388.59,-760.48 384.51,-756.4 384.51,-752.32 384.51,-752.32 384.51,-744.16 384.51,-744.16 384.51,-740.08 388.59,-736 392.67,-736 392.67,-736 512.77,-736 512.77,-736 516.85,-736 520.93,-740.08 520.93,-744.16 520.93,-744.16 520.93,-752.32 520.93,-752.32 520.93,-756.4 516.85,-760.48 512.77,-760.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-744.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterLoadBearingCommits</text>
+</g>
+<!-- mirrorHistory&#45;&gt;filterLoadBearingCommits -->
+<g id="edge17" class="edge">
+<title>mirrorHistory&#45;&gt;filterLoadBearingCommits</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M288.71,-623.26C304.51,-646.89 341.05,-697.02 383.9,-725.24 387.73,-727.76 391.87,-730.03 396.14,-732.08"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="395.01,-734.26 402.41,-734.84 396.99,-729.78 395.01,-734.26"/>
+</g>
+<!-- filterNotReplayedCommits -->
+<g id="node16" class="node">
+<title>filterNotReplayedCommits</title>
+<path fill="#ffffff" stroke="#64748b" d="M513.08,-714.48C513.08,-714.48 392.36,-714.48 392.36,-714.48 388.28,-714.48 384.2,-710.4 384.2,-706.32 384.2,-706.32 384.2,-698.16 384.2,-698.16 384.2,-694.08 388.28,-690 392.36,-690 392.36,-690 513.08,-690 513.08,-690 517.16,-690 521.24,-694.08 521.24,-698.16 521.24,-698.16 521.24,-706.32 521.24,-706.32 521.24,-710.4 517.16,-714.48 513.08,-714.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-698.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterNotReplayedCommits</text>
+</g>
+<!-- mirrorHistory&#45;&gt;filterNotReplayedCommits -->
+<g id="edge18" class="edge">
+<title>mirrorHistory&#45;&gt;filterNotReplayedCommits</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M297.12,-623.41C316.93,-638.51 351.34,-663.21 383.9,-679.24 389.27,-681.88 395.02,-684.34 400.81,-686.6"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="399.73,-688.81 407.15,-688.96 401.45,-684.22 399.73,-688.81"/>
+</g>
+<!-- dropOrphanedCommits -->
+<g id="node17" class="node">
+<title>dropOrphanedCommits</title>
+<path fill="#ffffff" stroke="#64748b" d="M505.14,-668.48C505.14,-668.48 400.3,-668.48 400.3,-668.48 396.22,-668.48 392.14,-664.4 392.14,-660.32 392.14,-660.32 392.14,-652.16 392.14,-652.16 392.14,-648.08 396.22,-644 400.3,-644 400.3,-644 505.14,-644 505.14,-644 509.22,-644 513.3,-648.08 513.3,-652.16 513.3,-652.16 513.3,-660.32 513.3,-660.32 513.3,-664.4 509.22,-668.48 505.14,-668.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-652.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">dropOrphanedCommits</text>
+</g>
+<!-- mirrorHistory&#45;&gt;dropOrphanedCommits -->
+<g id="edge19" class="edge">
+<title>mirrorHistory&#45;&gt;dropOrphanedCommits</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M319.25,-620.68C341.96,-626.77 371,-634.57 396.1,-641.31"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="395.44,-643.67 402.83,-643.12 396.71,-638.94 395.44,-643.67"/>
+</g>
+<!-- replayCommits -->
+<g id="node18" class="node">
+<title>replayCommits</title>
+<path fill="#ffffff" stroke="#64748b" d="M487.11,-622.48C487.11,-622.48 418.32,-622.48 418.32,-622.48 414.24,-622.48 410.16,-618.4 410.16,-614.32 410.16,-614.32 410.16,-606.16 410.16,-606.16 410.16,-602.08 414.24,-598 418.32,-598 418.32,-598 487.11,-598 487.11,-598 491.19,-598 495.27,-602.08 495.27,-606.16 495.27,-606.16 495.27,-614.32 495.27,-614.32 495.27,-618.4 491.19,-622.48 487.11,-622.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-606.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">replayCommits</text>
+</g>
+<!-- mirrorHistory&#45;&gt;replayCommits -->
+<g id="edge20" class="edge">
+<title>mirrorHistory&#45;&gt;replayCommits</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M319.25,-610.24C343.47,-610.24 374.88,-610.24 401.04,-610.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="401.03,-612.69 408.03,-610.24 401.03,-607.79 401.03,-612.69"/>
+</g>
+<!-- mapBranchesToTargetTips -->
+<g id="node19" class="node">
+<title>mapBranchesToTargetTips</title>
+<path fill="#ffffff" stroke="#64748b" d="M513.37,-576.48C513.37,-576.48 392.06,-576.48 392.06,-576.48 387.98,-576.48 383.9,-572.4 383.9,-568.32 383.9,-568.32 383.9,-560.16 383.9,-560.16 383.9,-556.08 387.98,-552 392.06,-552 392.06,-552 513.37,-552 513.37,-552 517.45,-552 521.53,-556.08 521.53,-560.16 521.53,-560.16 521.53,-568.32 521.53,-568.32 521.53,-572.4 517.45,-576.48 513.37,-576.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-560.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">mapBranchesToTargetTips</text>
+</g>
+<!-- mirrorHistory&#45;&gt;mapBranchesToTargetTips -->
+<g id="edge21" class="edge">
+<title>mirrorHistory&#45;&gt;mapBranchesToTargetTips</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M319.25,-599.8C341.96,-593.71 371,-585.91 396.1,-579.17"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="396.71,-581.54 402.83,-577.36 395.44,-576.81 396.71,-581.54"/>
+</g>
+<!-- inferSourceBranch -->
+<g id="node20" class="node">
+<title>inferSourceBranch</title>
+<path fill="#ffffff" stroke="#64748b" d="M494.73,-530.48C494.73,-530.48 410.7,-530.48 410.7,-530.48 406.62,-530.48 402.54,-526.4 402.54,-522.32 402.54,-522.32 402.54,-514.16 402.54,-514.16 402.54,-510.08 406.62,-506 410.7,-506 410.7,-506 494.73,-506 494.73,-506 498.81,-506 502.89,-510.08 502.89,-514.16 502.89,-514.16 502.89,-522.32 502.89,-522.32 502.89,-526.4 498.81,-530.48 494.73,-530.48"/>
+<text xml:space="preserve" text-anchor="middle" x="452.72" y="-514.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">inferSourceBranch</text>
+</g>
+<!-- mirrorHistory&#45;&gt;inferSourceBranch -->
+<g id="edge22" class="edge">
+<title>mirrorHistory&#45;&gt;inferSourceBranch</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M297.12,-597.07C316.93,-581.97 351.34,-557.27 383.9,-541.24 389.27,-538.6 395.02,-536.14 400.81,-533.88"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="401.45,-536.26 407.15,-531.52 399.73,-531.67 401.45,-536.26"/>
+</g>
+<!-- mirrorHistory&#45;&gt;refExists -->
+<g id="edge23" class="edge">
+<title>mirrorHistory&#45;&gt;refExists</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M288.71,-597.22C304.51,-573.59 341.05,-523.46 383.9,-495.24 393.58,-488.86 405.21,-484.08 416.08,-480.58"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="416.6,-482.98 422.6,-478.62 415.19,-478.29 416.6,-482.98"/>
+</g>
+<!-- mirrorHistory&#45;&gt;git -->
+<g id="edge24" class="edge">
+<title>mirrorHistory&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M285.18,-597.29C297.12,-566.92 331,-490.56 383.9,-449.24 393.52,-441.73 405.74,-436.59 417.14,-433.12"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="417.56,-435.55 423.65,-431.32 416.25,-430.83 417.56,-435.55"/>
+</g>
+<!-- mirrorHistory&#45;&gt;fail -->
+<g id="edge25" class="edge">
+<title>mirrorHistory&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M283.21,-597.19C291.79,-560.98 320.75,-458.29 383.9,-403.24 393.26,-395.09 405.62,-389.8 417.23,-386.38"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="417.73,-388.77 423.88,-384.62 416.49,-384.04 417.73,-388.77"/>
+</g>
+</g>
+</svg>
+<figcaption>CLI / in-process entry down to the subsystem entry points. Each callee below is expanded in its own graph.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-collection">
+<figcaption class="cg-title">B · Commit collection &amp; load-bearing filter</figcaption>
+<svg width="1146pt" height="290pt"
+ viewBox="0.00 0.00 1146.00 290.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 286.4)">
+<title>cg&#45;collection</title>
+<!-- collectSourceCommits -->
+<g id="node1" class="node">
+<title>collectSourceCommits</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M222.9,-153.44C222.9,-153.44 121.73,-153.44 121.73,-153.44 117.65,-153.44 113.57,-149.36 113.57,-145.28 113.57,-145.28 113.57,-137.12 113.57,-137.12 113.57,-133.04 117.65,-128.96 121.73,-128.96 121.73,-128.96 222.9,-128.96 222.9,-128.96 226.98,-128.96 231.06,-133.04 231.06,-137.12 231.06,-137.12 231.06,-145.28 231.06,-145.28 231.06,-149.36 226.98,-153.44 222.9,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="172.31" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">collectSourceCommits</text>
+</g>
+<!-- fetchTrueParents -->
+<g id="node5" class="node">
+<title>fetchTrueParents</title>
+<path fill="#ffffff" stroke="#64748b" d="M210.36,-88.96C210.36,-88.96 134.27,-88.96 134.27,-88.96 130.19,-88.96 126.11,-84.88 126.11,-80.8 126.11,-80.8 126.11,-72.64 126.11,-72.64 126.11,-68.56 130.19,-64.48 134.27,-64.48 134.27,-64.48 210.36,-64.48 210.36,-64.48 214.44,-64.48 218.52,-68.56 218.52,-72.64 218.52,-72.64 218.52,-80.8 218.52,-80.8 218.52,-84.88 214.44,-88.96 210.36,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="172.31" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">fetchTrueParents</text>
+</g>
+<!-- collectSourceCommits&#45;&gt;fetchTrueParents -->
+<g id="edge3" class="edge">
+<title>collectSourceCommits&#45;&gt;fetchTrueParents</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M172.31,-128.15C172.31,-119.57 172.31,-107.84 172.31,-97.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="174.77,-97.97 172.31,-90.97 169.87,-97.97 174.77,-97.97"/>
+</g>
+<!-- anyRootSource -->
+<g id="node13" class="node">
+<title>anyRootSource</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M95.71,-88.96C95.71,-88.96 26.92,-88.96 26.92,-88.96 22.84,-88.96 18.76,-84.88 18.76,-80.8 18.76,-80.8 18.76,-72.64 18.76,-72.64 18.76,-68.56 22.84,-64.48 26.92,-64.48 26.92,-64.48 95.71,-64.48 95.71,-64.48 99.79,-64.48 103.87,-68.56 103.87,-72.64 103.87,-72.64 103.87,-80.8 103.87,-80.8 103.87,-84.88 99.79,-88.96 95.71,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="61.31" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">anyRootSource</text>
+</g>
+<!-- collectSourceCommits&#45;&gt;anyRootSource -->
+<g id="edge1" class="edge">
+<title>collectSourceCommits&#45;&gt;anyRootSource</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M150.65,-128C133.13,-118.14 108.33,-104.18 89.3,-93.47"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="90.55,-91.37 83.25,-90.07 88.15,-95.64 90.55,-91.37"/>
+</g>
+<!-- sourceDirsOf -->
+<g id="node14" class="node">
+<title>sourceDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M308.42,-88.96C308.42,-88.96 248.21,-88.96 248.21,-88.96 244.13,-88.96 240.05,-84.88 240.05,-80.8 240.05,-80.8 240.05,-72.64 240.05,-72.64 240.05,-68.56 244.13,-64.48 248.21,-64.48 248.21,-64.48 308.42,-64.48 308.42,-64.48 312.5,-64.48 316.58,-68.56 316.58,-72.64 316.58,-72.64 316.58,-80.8 316.58,-80.8 316.58,-84.88 312.5,-88.96 308.42,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="278.31" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceDirsOf</text>
+</g>
+<!-- collectSourceCommits&#45;&gt;sourceDirsOf -->
+<g id="edge2" class="edge">
+<title>collectSourceCommits&#45;&gt;sourceDirsOf</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M193,-128C209.66,-118.19 233.21,-104.31 251.35,-93.62"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="252.53,-95.76 257.32,-90.1 250.04,-91.54 252.53,-95.76"/>
+</g>
+<!-- git -->
+<g id="node19" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M513.15,-24.48C513.15,-24.48 475.47,-24.48 475.47,-24.48 471.39,-24.48 467.31,-20.4 467.31,-16.32 467.31,-16.32 467.31,-8.16 467.31,-8.16 467.31,-4.08 471.39,0 475.47,0 475.47,0 513.15,0 513.15,0 517.23,0 521.31,-4.08 521.31,-8.16 521.31,-8.16 521.31,-16.32 521.31,-16.32 521.31,-20.4 517.23,-24.48 513.15,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="494.31" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- collectSourceCommits&#45;&gt;git -->
+<g id="edge4" class="edge">
+<title>collectSourceCommits&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M231.81,-137.28C308.63,-132.3 436.61,-119.57 471.31,-88.96 487.11,-75.03 492.23,-50.63 493.81,-33.3"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="496.23,-33.78 494.23,-26.63 491.34,-33.46 496.23,-33.78"/>
+</g>
+<!-- fail -->
+<g id="node20" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M191.15,-24.48C191.15,-24.48 153.47,-24.48 153.47,-24.48 149.39,-24.48 145.31,-20.4 145.31,-16.32 145.31,-16.32 145.31,-8.16 145.31,-8.16 145.31,-4.08 149.39,0 153.47,0 153.47,0 191.15,0 191.15,0 195.23,0 199.31,-4.08 199.31,-8.16 199.31,-8.16 199.31,-16.32 199.31,-16.32 199.31,-20.4 195.23,-24.48 191.15,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="172.31" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- collectSourceCommits&#45;&gt;fail -->
+<g id="edge5" class="edge">
+<title>collectSourceCommits&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M112.67,-138.53C75.9,-134.03 31.33,-121.56 7.31,-88.96 -27.89,-41.17 78,-22.71 136.45,-16.3"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="136.68,-18.74 143.39,-15.57 136.17,-13.86 136.68,-18.74"/>
+</g>
+<!-- filterLoadBearingCommits -->
+<g id="node2" class="node">
+<title>filterLoadBearingCommits</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M648.37,-282.4C648.37,-282.4 528.26,-282.4 528.26,-282.4 524.18,-282.4 520.1,-278.32 520.1,-274.24 520.1,-274.24 520.1,-266.08 520.1,-266.08 520.1,-262 524.18,-257.92 528.26,-257.92 528.26,-257.92 648.37,-257.92 648.37,-257.92 652.45,-257.92 656.53,-262 656.53,-266.08 656.53,-266.08 656.53,-274.24 656.53,-274.24 656.53,-278.32 652.45,-282.4 648.37,-282.4"/>
+<text xml:space="preserve" text-anchor="middle" x="588.31" y="-266.86" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterLoadBearingCommits</text>
+</g>
+<!-- isLoadBearing -->
+<g id="node6" class="node">
+<title>isLoadBearing</title>
+<path fill="#ffffff" stroke="#64748b" d="M621.17,-217.92C621.17,-217.92 555.46,-217.92 555.46,-217.92 551.38,-217.92 547.3,-213.84 547.3,-209.76 547.3,-209.76 547.3,-201.6 547.3,-201.6 547.3,-197.52 551.38,-193.44 555.46,-193.44 555.46,-193.44 621.17,-193.44 621.17,-193.44 625.25,-193.44 629.33,-197.52 629.33,-201.6 629.33,-201.6 629.33,-209.76 629.33,-209.76 629.33,-213.84 625.25,-217.92 621.17,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="588.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">isLoadBearing</text>
+</g>
+<!-- filterLoadBearingCommits&#45;&gt;isLoadBearing -->
+<g id="edge8" class="edge">
+<title>filterLoadBearingCommits&#45;&gt;isLoadBearing</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M588.31,-257.11C588.31,-248.53 588.31,-236.8 588.31,-226.81"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="590.77,-226.93 588.31,-219.93 585.87,-226.93 590.77,-226.93"/>
+</g>
+<!-- filterNotReplayedCommits -->
+<g id="node3" class="node">
+<title>filterNotReplayedCommits</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M952.67,-282.4C952.67,-282.4 831.96,-282.4 831.96,-282.4 827.88,-282.4 823.8,-278.32 823.8,-274.24 823.8,-274.24 823.8,-266.08 823.8,-266.08 823.8,-262 827.88,-257.92 831.96,-257.92 831.96,-257.92 952.67,-257.92 952.67,-257.92 956.75,-257.92 960.83,-262 960.83,-266.08 960.83,-266.08 960.83,-274.24 960.83,-274.24 960.83,-278.32 956.75,-282.4 952.67,-282.4"/>
+<text xml:space="preserve" text-anchor="middle" x="892.31" y="-266.86" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterNotReplayedCommits</text>
+</g>
+<!-- getCommitMeta -->
+<g id="node11" class="node">
+<title>getCommitMeta</title>
+<path fill="#ffffff" stroke="#64748b" d="M732.85,-217.92C732.85,-217.92 659.78,-217.92 659.78,-217.92 655.7,-217.92 651.62,-213.84 651.62,-209.76 651.62,-209.76 651.62,-201.6 651.62,-201.6 651.62,-197.52 655.7,-193.44 659.78,-193.44 659.78,-193.44 732.85,-193.44 732.85,-193.44 736.93,-193.44 741.01,-197.52 741.01,-201.6 741.01,-201.6 741.01,-209.76 741.01,-209.76 741.01,-213.84 736.93,-217.92 732.85,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="696.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">getCommitMeta</text>
+</g>
+<!-- filterNotReplayedCommits&#45;&gt;getCommitMeta -->
+<g id="edge16" class="edge">
+<title>filterNotReplayedCommits&#45;&gt;getCommitMeta</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M854.06,-256.96C821.57,-246.61 774.92,-231.74 740.77,-220.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="741.82,-218.61 734.4,-218.82 740.33,-223.28 741.82,-218.61"/>
+</g>
+<!-- hasTrailer -->
+<g id="node15" class="node">
+<title>hasTrailer</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M817.09,-217.92C817.09,-217.92 771.54,-217.92 771.54,-217.92 767.46,-217.92 763.38,-213.84 763.38,-209.76 763.38,-209.76 763.38,-201.6 763.38,-201.6 763.38,-197.52 767.46,-193.44 771.54,-193.44 771.54,-193.44 817.09,-193.44 817.09,-193.44 821.17,-193.44 825.25,-197.52 825.25,-201.6 825.25,-201.6 825.25,-209.76 825.25,-209.76 825.25,-213.84 821.17,-217.92 817.09,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="794.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">hasTrailer</text>
+</g>
+<!-- filterNotReplayedCommits&#45;&gt;hasTrailer -->
+<g id="edge17" class="edge">
+<title>filterNotReplayedCommits&#45;&gt;hasTrailer</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M873.42,-257.11C858.04,-247.31 836.2,-233.39 819.37,-222.65"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="821.11,-220.86 813.89,-219.16 818.48,-224.99 821.11,-220.86"/>
+</g>
+<!-- targetTrailerKey -->
+<g id="node16" class="node">
+<title>targetTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M929.44,-217.92C929.44,-217.92 855.19,-217.92 855.19,-217.92 851.11,-217.92 847.03,-213.84 847.03,-209.76 847.03,-209.76 847.03,-201.6 847.03,-201.6 847.03,-197.52 851.11,-193.44 855.19,-193.44 855.19,-193.44 929.44,-193.44 929.44,-193.44 933.52,-193.44 937.6,-197.52 937.6,-201.6 937.6,-201.6 937.6,-209.76 937.6,-209.76 937.6,-213.84 933.52,-217.92 929.44,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="892.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetTrailerKey</text>
+</g>
+<!-- filterNotReplayedCommits&#45;&gt;targetTrailerKey -->
+<g id="edge19" class="edge">
+<title>filterNotReplayedCommits&#45;&gt;targetTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M892.31,-257.11C892.31,-248.53 892.31,-236.8 892.31,-226.81"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="894.77,-226.93 892.31,-219.93 889.87,-226.93 894.77,-226.93"/>
+</g>
+<!-- targetTrailerRegex -->
+<g id="node17" class="node">
+<title>targetTrailerRegex</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M1051.33,-217.92C1051.33,-217.92 967.3,-217.92 967.3,-217.92 963.22,-217.92 959.14,-213.84 959.14,-209.76 959.14,-209.76 959.14,-201.6 959.14,-201.6 959.14,-197.52 963.22,-193.44 967.3,-193.44 967.3,-193.44 1051.33,-193.44 1051.33,-193.44 1055.41,-193.44 1059.49,-197.52 1059.49,-201.6 1059.49,-201.6 1059.49,-209.76 1059.49,-209.76 1059.49,-213.84 1055.41,-217.92 1051.33,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="1009.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetTrailerRegex</text>
+</g>
+<!-- filterNotReplayedCommits&#45;&gt;targetTrailerRegex -->
+<g id="edge20" class="edge">
+<title>filterNotReplayedCommits&#45;&gt;targetTrailerRegex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M915.15,-256.96C933.7,-247.06 959.99,-233.02 980.08,-222.29"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="981.23,-224.45 986.25,-219 978.92,-220.13 981.23,-224.45"/>
+</g>
+<!-- refExists -->
+<g id="node18" class="node">
+<title>refExists</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M1129.35,-217.92C1129.35,-217.92 1089.28,-217.92 1089.28,-217.92 1085.2,-217.92 1081.12,-213.84 1081.12,-209.76 1081.12,-209.76 1081.12,-201.6 1081.12,-201.6 1081.12,-197.52 1085.2,-193.44 1089.28,-193.44 1089.28,-193.44 1129.35,-193.44 1129.35,-193.44 1133.43,-193.44 1137.51,-197.52 1137.51,-201.6 1137.51,-201.6 1137.51,-209.76 1137.51,-209.76 1137.51,-213.84 1133.43,-217.92 1129.35,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="1109.31" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">refExists</text>
+</g>
+<!-- filterNotReplayedCommits&#45;&gt;refExists -->
+<g id="edge18" class="edge">
+<title>filterNotReplayedCommits&#45;&gt;refExists</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M934.75,-256.95C970.82,-246.57 1023.96,-231.27 1070.31,-217.92 1071.06,-217.71 1071.8,-217.49 1072.56,-217.27"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="1073.13,-219.66 1079.17,-215.37 1071.77,-214.95 1073.13,-219.66"/>
+</g>
+<!-- dropOrphanedCommits -->
+<g id="node4" class="node">
+<title>dropOrphanedCommits</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M451.73,-88.96C451.73,-88.96 346.9,-88.96 346.9,-88.96 342.82,-88.96 338.74,-84.88 338.74,-80.8 338.74,-80.8 338.74,-72.64 338.74,-72.64 338.74,-68.56 342.82,-64.48 346.9,-64.48 346.9,-64.48 451.73,-64.48 451.73,-64.48 455.81,-64.48 459.89,-68.56 459.89,-72.64 459.89,-72.64 459.89,-80.8 459.89,-80.8 459.89,-84.88 455.81,-88.96 451.73,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="399.31" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">dropOrphanedCommits</text>
+</g>
+<!-- dropOrphanedCommits&#45;&gt;git -->
+<g id="edge21" class="edge">
+<title>dropOrphanedCommits&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M417.63,-63.67C432.41,-53.96 453.33,-40.19 469.59,-29.5"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="470.8,-31.64 475.31,-25.74 468.11,-27.54 470.8,-31.64"/>
+</g>
+<!-- dropOrphanedCommits&#45;&gt;fail -->
+<g id="edge22" class="edge">
+<title>dropOrphanedCommits&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M355.01,-63.52C312.09,-51.71 247.84,-34.03 208.08,-23.08"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="208.75,-20.73 201.35,-21.23 207.45,-25.45 208.75,-20.73"/>
+</g>
+<!-- fetchTrueParents&#45;&gt;git -->
+<g id="edge6" class="edge">
+<title>fetchTrueParents&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M218.97,-66.5C222.47,-65.82 225.95,-65.14 229.31,-64.48 311.27,-48.48 407.52,-29.93 458.47,-20.13"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="458.79,-22.56 465.21,-18.83 457.87,-17.75 458.79,-22.56"/>
+</g>
+<!-- fetchTrueParents&#45;&gt;fail -->
+<g id="edge7" class="edge">
+<title>fetchTrueParents&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M172.31,-64.26C172.31,-55.54 172.31,-43.33 172.31,-33.04"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="174.77,-33.29 172.31,-26.29 169.87,-33.29 174.77,-33.29"/>
+</g>
+<!-- effectiveSourceFingerprint -->
+<g id="node7" class="node">
+<title>effectiveSourceFingerprint</title>
+<path fill="#ffffff" stroke="#64748b" d="M806.05,-153.44C806.05,-153.44 686.58,-153.44 686.58,-153.44 682.5,-153.44 678.42,-149.36 678.42,-145.28 678.42,-145.28 678.42,-137.12 678.42,-137.12 678.42,-133.04 682.5,-128.96 686.58,-128.96 686.58,-128.96 806.05,-128.96 806.05,-128.96 810.13,-128.96 814.21,-133.04 814.21,-137.12 814.21,-137.12 814.21,-145.28 814.21,-145.28 814.21,-149.36 810.13,-153.44 806.05,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="746.31" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">effectiveSourceFingerprint</text>
+</g>
+<!-- isLoadBearing&#45;&gt;effectiveSourceFingerprint -->
+<g id="edge10" class="edge">
+<title>isLoadBearing&#45;&gt;effectiveSourceFingerprint</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M617.66,-193.07C643.41,-182.89 680.99,-168.03 708.9,-157"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="709.7,-159.31 715.31,-154.46 707.9,-154.76 709.7,-159.31"/>
+</g>
+<!-- hasKeptExclusiveAncestor -->
+<g id="node9" class="node">
+<title>hasKeptExclusiveAncestor</title>
+<path fill="#ffffff" stroke="#64748b" d="M490.36,-153.44C490.36,-153.44 370.27,-153.44 370.27,-153.44 366.19,-153.44 362.11,-149.36 362.11,-145.28 362.11,-145.28 362.11,-137.12 362.11,-137.12 362.11,-133.04 366.19,-128.96 370.27,-128.96 370.27,-128.96 490.36,-128.96 490.36,-128.96 494.44,-128.96 498.52,-133.04 498.52,-137.12 498.52,-137.12 498.52,-145.28 498.52,-145.28 498.52,-149.36 494.44,-153.44 490.36,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="430.31" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">hasKeptExclusiveAncestor</text>
+</g>
+<!-- isLoadBearing&#45;&gt;hasKeptExclusiveAncestor -->
+<g id="edge11" class="edge">
+<title>isLoadBearing&#45;&gt;hasKeptExclusiveAncestor</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M558.97,-193.07C533.22,-182.89 495.64,-168.03 467.73,-157"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="468.73,-154.76 461.32,-154.46 466.93,-159.31 468.73,-154.76"/>
+</g>
+<!-- readShadowIgnorePatterns -->
+<g id="node10" class="node">
+<title>readShadowIgnorePatterns</title>
+<path fill="#ffffff" stroke="#64748b" d="M648.05,-153.44C648.05,-153.44 528.58,-153.44 528.58,-153.44 524.5,-153.44 520.42,-149.36 520.42,-145.28 520.42,-145.28 520.42,-137.12 520.42,-137.12 520.42,-133.04 524.5,-128.96 528.58,-128.96 528.58,-128.96 648.05,-128.96 648.05,-128.96 652.13,-128.96 656.21,-133.04 656.21,-137.12 656.21,-137.12 656.21,-145.28 656.21,-145.28 656.21,-149.36 652.13,-153.44 648.05,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="588.31" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">readShadowIgnorePatterns</text>
+</g>
+<!-- isLoadBearing&#45;&gt;readShadowIgnorePatterns -->
+<g id="edge9" class="edge">
+<title>isLoadBearing&#45;&gt;readShadowIgnorePatterns</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M588.31,-193.22C588.31,-184.5 588.31,-172.29 588.31,-162"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="590.77,-162.25 588.31,-155.25 585.87,-162.25 590.77,-162.25"/>
+</g>
+<!-- effectiveSourceTreeOne -->
+<g id="node8" class="node">
+<title>effectiveSourceTreeOne</title>
+<path fill="#ffffff" stroke="#64748b" d="M745.54,-88.96C745.54,-88.96 637.09,-88.96 637.09,-88.96 633.01,-88.96 628.93,-84.88 628.93,-80.8 628.93,-80.8 628.93,-72.64 628.93,-72.64 628.93,-68.56 633.01,-64.48 637.09,-64.48 637.09,-64.48 745.54,-64.48 745.54,-64.48 749.62,-64.48 753.7,-68.56 753.7,-72.64 753.7,-72.64 753.7,-80.8 753.7,-80.8 753.7,-84.88 749.62,-88.96 745.54,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="691.31" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">effectiveSourceTreeOne</text>
+</g>
+<!-- effectiveSourceFingerprint&#45;&gt;effectiveSourceTreeOne -->
+<g id="edge12" class="edge">
+<title>effectiveSourceFingerprint&#45;&gt;effectiveSourceTreeOne</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M736.23,-128.74C728.01,-119.4 716.27,-106.06 706.85,-95.37"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="708.9,-93.99 702.44,-90.36 705.23,-97.23 708.9,-93.99"/>
+</g>
+<!-- withTmpIndex -->
+<g id="node12" class="node">
+<title>withTmpIndex</title>
+<path fill="#ffffff" stroke="#64748b" d="M724.48,-24.48C724.48,-24.48 658.15,-24.48 658.15,-24.48 654.07,-24.48 649.99,-20.4 649.99,-16.32 649.99,-16.32 649.99,-8.16 649.99,-8.16 649.99,-4.08 654.07,0 658.15,0 658.15,0 724.48,0 724.48,0 728.56,0 732.64,-4.08 732.64,-8.16 732.64,-8.16 732.64,-16.32 732.64,-16.32 732.64,-20.4 728.56,-24.48 724.48,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="691.31" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">withTmpIndex</text>
+</g>
+<!-- effectiveSourceTreeOne&#45;&gt;withTmpIndex -->
+<g id="edge13" class="edge">
+<title>effectiveSourceTreeOne&#45;&gt;withTmpIndex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M691.31,-64.26C691.31,-55.54 691.31,-43.33 691.31,-33.04"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="693.77,-33.29 691.31,-26.29 688.87,-33.29 693.77,-33.29"/>
+</g>
+<!-- effectiveSourceTreeOne&#45;&gt;git -->
+<g id="edge14" class="edge">
+<title>effectiveSourceTreeOne&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M654.72,-64.11C618.98,-52.78 564.94,-35.64 529.64,-24.44"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="530.53,-22.15 523.11,-22.37 529.04,-26.82 530.53,-22.15"/>
+</g>
+<!-- hasKeptExclusiveAncestor&#45;&gt;git -->
+<g id="edge15" class="edge">
+<title>hasKeptExclusiveAncestor&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M463.11,-128.57C480.79,-120.43 501.04,-107.62 511.31,-88.96 521.14,-71.11 513.43,-47.92 505.46,-31.93"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="507.85,-31.21 502.39,-26.19 503.53,-33.51 507.85,-31.21"/>
+</g>
+</g>
+</svg>
+<figcaption>Build the candidate commit list, fetch true parents, then keep only load-bearing and not-yet-replayed commits.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-replay">
+<figcaption class="cg-title">C · Replay loop &amp; tree composition</figcaption>
+<svg width="674pt" height="889pt"
+ viewBox="0.00 0.00 674.00 889.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 884.73)">
+<title>cg&#45;replay</title>
+<!-- replayCommits -->
+<g id="node1" class="node">
+<title>replayCommits</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M76.95,-369.48C76.95,-369.48 8.16,-369.48 8.16,-369.48 4.08,-369.48 0,-365.4 0,-361.32 0,-361.32 0,-353.16 0,-353.16 0,-349.08 4.08,-345 8.16,-345 8.16,-345 76.95,-345 76.95,-345 81.03,-345 85.11,-349.08 85.11,-353.16 85.11,-353.16 85.11,-361.32 85.11,-361.32 85.11,-365.4 81.03,-369.48 76.95,-369.48"/>
+<text xml:space="preserve" text-anchor="middle" x="42.55" y="-353.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">replayCommits</text>
+</g>
+<!-- composeMergeBaseTree -->
+<g id="node2" class="node">
+<title>composeMergeBaseTree</title>
+<path fill="#ffffff" stroke="#64748b" d="M248.16,-576.48C248.16,-576.48 137.86,-576.48 137.86,-576.48 133.78,-576.48 129.7,-572.4 129.7,-568.32 129.7,-568.32 129.7,-560.16 129.7,-560.16 129.7,-556.08 133.78,-552 137.86,-552 137.86,-552 248.16,-552 248.16,-552 252.24,-552 256.32,-556.08 256.32,-560.16 256.32,-560.16 256.32,-568.32 256.32,-568.32 256.32,-572.4 252.24,-576.48 248.16,-576.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-560.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">composeMergeBaseTree</text>
+</g>
+<!-- replayCommits&#45;&gt;composeMergeBaseTree -->
+<g id="edge6" class="edge">
+<title>replayCommits&#45;&gt;composeMergeBaseTree</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M46.15,-370.28C53.2,-402.49 75.57,-486.71 125.11,-535.24 130.11,-540.14 136.08,-544.28 142.36,-547.76"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="141,-549.81 148.35,-550.79 143.21,-545.44 141,-549.81"/>
+</g>
+<!-- buildReplayedTree -->
+<g id="node3" class="node">
+<title>buildReplayedTree</title>
+<path fill="#ffffff" stroke="#64748b" d="M235.64,-783.48C235.64,-783.48 150.38,-783.48 150.38,-783.48 146.3,-783.48 142.22,-779.4 142.22,-775.32 142.22,-775.32 142.22,-767.16 142.22,-767.16 142.22,-763.08 146.3,-759 150.38,-759 150.38,-759 235.64,-759 235.64,-759 239.72,-759 243.8,-763.08 243.8,-767.16 243.8,-767.16 243.8,-775.32 243.8,-775.32 243.8,-779.4 239.72,-783.48 235.64,-783.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-767.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">buildReplayedTree</text>
+</g>
+<!-- replayCommits&#45;&gt;buildReplayedTree -->
+<g id="edge9" class="edge">
+<title>replayCommits&#45;&gt;buildReplayedTree</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M44.85,-370.41C49.73,-416.11 69.7,-571.25 125.11,-685.24 137.59,-710.92 158.61,-736.22 173.76,-752.66"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="171.74,-754.08 178.31,-757.5 175.31,-750.72 171.74,-754.08"/>
+</g>
+<!-- resolveHaltAwareParents -->
+<g id="node8" class="node">
+<title>resolveHaltAwareParents</title>
+<path fill="#ffffff" stroke="#64748b" d="M249.69,-438.48C249.69,-438.48 136.33,-438.48 136.33,-438.48 132.25,-438.48 128.17,-434.4 128.17,-430.32 128.17,-430.32 128.17,-422.16 128.17,-422.16 128.17,-418.08 132.25,-414 136.33,-414 136.33,-414 249.69,-414 249.69,-414 253.77,-414 257.85,-418.08 257.85,-422.16 257.85,-422.16 257.85,-430.32 257.85,-430.32 257.85,-434.4 253.77,-438.48 249.69,-438.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-422.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">resolveHaltAwareParents</text>
+</g>
+<!-- replayCommits&#45;&gt;resolveHaltAwareParents -->
+<g id="edge5" class="edge">
+<title>replayCommits&#45;&gt;resolveHaltAwareParents</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M64.46,-370.44C80.62,-380.29 103.76,-393.64 125.11,-403.24 130.93,-405.86 137.16,-408.36 143.37,-410.69"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="142.23,-412.88 149.65,-412.97 143.91,-408.28 142.23,-412.88"/>
+</g>
+<!-- collectAbsorbedHalted -->
+<g id="node9" class="node">
+<title>collectAbsorbedHalted</title>
+<path fill="#ffffff" stroke="#64748b" d="M244.19,-392.48C244.19,-392.48 141.82,-392.48 141.82,-392.48 137.74,-392.48 133.66,-388.4 133.66,-384.32 133.66,-384.32 133.66,-376.16 133.66,-376.16 133.66,-372.08 137.74,-368 141.82,-368 141.82,-368 244.19,-368 244.19,-368 248.27,-368 252.35,-372.08 252.35,-376.16 252.35,-376.16 252.35,-384.32 252.35,-384.32 252.35,-388.4 248.27,-392.48 244.19,-392.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-376.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">collectAbsorbedHalted</text>
+</g>
+<!-- replayCommits&#45;&gt;collectAbsorbedHalted -->
+<g id="edge10" class="edge">
+<title>replayCommits&#45;&gt;collectAbsorbedHalted</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M86.09,-363.83C98.3,-365.72 111.91,-367.83 125.2,-369.89"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="124.48,-372.26 131.77,-370.91 125.23,-367.41 124.48,-372.26"/>
+</g>
+<!-- haltCommit -->
+<g id="node10" class="node">
+<title>haltCommit</title>
+<path fill="#ffffff" stroke="#64748b" d="M219.76,-346.48C219.76,-346.48 166.25,-346.48 166.25,-346.48 162.17,-346.48 158.09,-342.4 158.09,-338.32 158.09,-338.32 158.09,-330.16 158.09,-330.16 158.09,-326.08 162.17,-322 166.25,-322 166.25,-322 219.76,-322 219.76,-322 223.84,-322 227.92,-326.08 227.92,-330.16 227.92,-330.16 227.92,-338.32 227.92,-338.32 227.92,-342.4 223.84,-346.48 219.76,-346.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-330.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">haltCommit</text>
+</g>
+<!-- replayCommits&#45;&gt;haltCommit -->
+<g id="edge7" class="edge">
+<title>replayCommits&#45;&gt;haltCommit</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M86.09,-350.65C105.95,-347.57 129.52,-343.92 149.38,-340.84"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="149.75,-343.27 156.29,-339.77 149,-338.42 149.75,-343.27"/>
+</g>
+<!-- readShadowIgnorePatterns -->
+<g id="node11" class="node">
+<title>readShadowIgnorePatterns</title>
+<path fill="#ffffff" stroke="#64748b" d="M252.74,-300.48C252.74,-300.48 133.27,-300.48 133.27,-300.48 129.19,-300.48 125.11,-296.4 125.11,-292.32 125.11,-292.32 125.11,-284.16 125.11,-284.16 125.11,-280.08 129.19,-276 133.27,-276 133.27,-276 252.74,-276 252.74,-276 256.82,-276 260.9,-280.08 260.9,-284.16 260.9,-284.16 260.9,-292.32 260.9,-292.32 260.9,-296.4 256.82,-300.48 252.74,-300.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-284.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">readShadowIgnorePatterns</text>
+</g>
+<!-- replayCommits&#45;&gt;readShadowIgnorePatterns -->
+<g id="edge8" class="edge">
+<title>replayCommits&#45;&gt;readShadowIgnorePatterns</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M64.46,-344.04C80.62,-334.19 103.76,-320.84 125.11,-311.24 130.93,-308.62 137.16,-306.12 143.37,-303.79"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="143.91,-306.2 149.65,-301.51 142.23,-301.6 143.91,-306.2"/>
+</g>
+<!-- getCommitMeta -->
+<g id="node12" class="node">
+<title>getCommitMeta</title>
+<path fill="#ffffff" stroke="#64748b" d="M388.53,-415.48C388.53,-415.48 315.47,-415.48 315.47,-415.48 311.39,-415.48 307.31,-411.4 307.31,-407.32 307.31,-407.32 307.31,-399.16 307.31,-399.16 307.31,-395.08 311.39,-391 315.47,-391 315.47,-391 388.53,-391 388.53,-391 392.61,-391 396.69,-395.08 396.69,-399.16 396.69,-399.16 396.69,-407.32 396.69,-407.32 396.69,-411.4 392.61,-415.48 388.53,-415.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-399.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">getCommitMeta</text>
+</g>
+<!-- replayCommits&#45;&gt;getCommitMeta -->
+<g id="edge1" class="edge">
+<title>replayCommits&#45;&gt;getCommitMeta</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M47.88,-370.41C57.2,-396.34 81.9,-453.47 125.11,-476.24 178.5,-504.38 206.51,-502.39 260.9,-476.24 286.55,-463.91 278.48,-443.76 300.9,-426.24 303.83,-423.96 307.01,-421.84 310.31,-419.89"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="311.23,-422.18 316.2,-416.68 308.88,-417.88 311.23,-422.18"/>
+</g>
+<!-- isHaltPropagated -->
+<g id="node14" class="node">
+<title>isHaltPropagated</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M231.37,-254.48C231.37,-254.48 154.65,-254.48 154.65,-254.48 150.57,-254.48 146.49,-250.4 146.49,-246.32 146.49,-246.32 146.49,-238.16 146.49,-238.16 146.49,-234.08 150.57,-230 154.65,-230 154.65,-230 231.37,-230 231.37,-230 235.45,-230 239.53,-234.08 239.53,-238.16 239.53,-238.16 239.53,-246.32 239.53,-246.32 239.53,-250.4 235.45,-254.48 231.37,-254.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-238.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">isHaltPropagated</text>
+</g>
+<!-- replayCommits&#45;&gt;isHaltPropagated -->
+<g id="edge2" class="edge">
+<title>replayCommits&#45;&gt;isHaltPropagated</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M51.96,-344.03C65.2,-324.2 92.79,-286.8 125.11,-265.24 129.23,-262.49 133.72,-260.03 138.35,-257.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="139.27,-260.12 144.71,-255.09 137.32,-255.63 139.27,-260.12"/>
+</g>
+<!-- markPropagatedHalt -->
+<g id="node15" class="node">
+<title>markPropagatedHalt</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M239,-208.48C239,-208.48 147.01,-208.48 147.01,-208.48 142.93,-208.48 138.85,-204.4 138.85,-200.32 138.85,-200.32 138.85,-192.16 138.85,-192.16 138.85,-188.08 142.93,-184 147.01,-184 147.01,-184 239,-184 239,-184 243.08,-184 247.16,-188.08 247.16,-192.16 247.16,-192.16 247.16,-200.32 247.16,-200.32 247.16,-204.4 243.08,-208.48 239,-208.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-192.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">markPropagatedHalt</text>
+</g>
+<!-- replayCommits&#45;&gt;markPropagatedHalt -->
+<g id="edge3" class="edge">
+<title>replayCommits&#45;&gt;markPropagatedHalt</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M47.78,-344.15C57.23,-316.93 82.62,-253.89 125.11,-219.24 128.02,-216.86 131.2,-214.72 134.53,-212.8"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="135.46,-215.08 140.56,-209.69 133.21,-210.72 135.46,-215.08"/>
+</g>
+<!-- buildCommitEnv -->
+<g id="node16" class="node">
+<title>buildCommitEnv</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M231.68,-162.48C231.68,-162.48 154.33,-162.48 154.33,-162.48 150.25,-162.48 146.17,-158.4 146.17,-154.32 146.17,-154.32 146.17,-146.16 146.17,-146.16 146.17,-142.08 150.25,-138 154.33,-138 154.33,-138 231.68,-138 231.68,-138 235.76,-138 239.84,-142.08 239.84,-146.16 239.84,-146.16 239.84,-154.32 239.84,-154.32 239.84,-158.4 235.76,-162.48 231.68,-162.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-146.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">buildCommitEnv</text>
+</g>
+<!-- replayCommits&#45;&gt;buildCommitEnv -->
+<g id="edge13" class="edge">
+<title>replayCommits&#45;&gt;buildCommitEnv</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M45.69,-344.01C51.78,-310.52 72.32,-221.66 125.11,-173.24 128.97,-169.7 133.4,-166.7 138.1,-164.16"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="138.92,-166.48 144.18,-161.25 136.8,-162.06 138.92,-166.48"/>
+</g>
+<!-- appendTrailer -->
+<g id="node17" class="node">
+<title>appendTrailer</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M224.33,-116.48C224.33,-116.48 161.68,-116.48 161.68,-116.48 157.6,-116.48 153.52,-112.4 153.52,-108.32 153.52,-108.32 153.52,-100.16 153.52,-100.16 153.52,-96.08 157.6,-92 161.68,-92 161.68,-92 224.33,-92 224.33,-92 228.41,-92 232.49,-96.08 232.49,-100.16 232.49,-100.16 232.49,-108.32 232.49,-108.32 232.49,-112.4 228.41,-116.48 224.33,-116.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-100.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">appendTrailer</text>
+</g>
+<!-- replayCommits&#45;&gt;appendTrailer -->
+<g id="edge11" class="edge">
+<title>replayCommits&#45;&gt;appendTrailer</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M44.34,-344.25C47.38,-305.6 61.59,-190.15 125.11,-127.24 130.87,-121.54 138.1,-117.24 145.67,-114.02"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="146.07,-116.48 151.75,-111.72 144.34,-111.9 146.07,-116.48"/>
+</g>
+<!-- stripReplayedTrailers -->
+<g id="node18" class="node">
+<title>stripReplayedTrailers</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M241.14,-70.48C241.14,-70.48 144.88,-70.48 144.88,-70.48 140.8,-70.48 136.72,-66.4 136.72,-62.32 136.72,-62.32 136.72,-54.16 136.72,-54.16 136.72,-50.08 140.8,-46 144.88,-46 144.88,-46 241.14,-46 241.14,-46 245.22,-46 249.3,-50.08 249.3,-54.16 249.3,-54.16 249.3,-62.32 249.3,-62.32 249.3,-66.4 245.22,-70.48 241.14,-70.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-54.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">stripReplayedTrailers</text>
+</g>
+<!-- replayCommits&#45;&gt;stripReplayedTrailers -->
+<g id="edge12" class="edge">
+<title>replayCommits&#45;&gt;stripReplayedTrailers</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M43.44,-344.24C43.79,-300.77 50.83,-158.85 125.11,-81.24 127.23,-79.02 129.57,-77.02 132.07,-75.21"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="132.98,-77.54 137.61,-71.74 130.38,-73.38 132.98,-77.54"/>
+</g>
+<!-- hasTrailer -->
+<g id="node19" class="node">
+<title>hasTrailer</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M374.78,-369.48C374.78,-369.48 329.23,-369.48 329.23,-369.48 325.15,-369.48 321.07,-365.4 321.07,-361.32 321.07,-361.32 321.07,-353.16 321.07,-353.16 321.07,-349.08 325.15,-345 329.23,-345 329.23,-345 374.78,-345 374.78,-345 378.86,-345 382.94,-349.08 382.94,-353.16 382.94,-353.16 382.94,-361.32 382.94,-361.32 382.94,-365.4 378.86,-369.48 374.78,-369.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-353.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">hasTrailer</text>
+</g>
+<!-- replayCommits&#45;&gt;hasTrailer -->
+<g id="edge4" class="edge">
+<title>replayCommits&#45;&gt;hasTrailer</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M50.39,-370.46C62.26,-391.77 88.9,-432.95 125.11,-449.24 180.15,-474 208.61,-479.37 260.9,-449.24 291.62,-431.54 274.68,-404.09 300.9,-380.24 304.58,-376.9 308.82,-373.97 313.25,-371.42"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="314.26,-373.65 319.34,-368.25 312,-369.31 314.26,-373.65"/>
+</g>
+<!-- sourceTrailerKey -->
+<g id="node20" class="node">
+<title>sourceTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M231.96,-24.48C231.96,-24.48 154.05,-24.48 154.05,-24.48 149.97,-24.48 145.89,-20.4 145.89,-16.32 145.89,-16.32 145.89,-8.16 145.89,-8.16 145.89,-4.08 149.97,0 154.05,0 154.05,0 231.96,0 231.96,0 236.04,0 240.12,-4.08 240.12,-8.16 240.12,-8.16 240.12,-16.32 240.12,-16.32 240.12,-20.4 236.04,-24.48 231.96,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="193.01" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceTrailerKey</text>
+</g>
+<!-- replayCommits&#45;&gt;sourceTrailerKey -->
+<g id="edge14" class="edge">
+<title>replayCommits&#45;&gt;sourceTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M45.19,-344.2C52.26,-289.9 81.76,-82.34 125.11,-35.24 128.76,-31.27 133.14,-27.98 137.87,-25.26"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="138.9,-27.49 144.07,-22.18 136.72,-23.1 138.9,-27.49"/>
+</g>
+<!-- git -->
+<g id="node26" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M643.62,-622.48C643.62,-622.48 605.94,-622.48 605.94,-622.48 601.86,-622.48 597.78,-618.4 597.78,-614.32 597.78,-614.32 597.78,-606.16 597.78,-606.16 597.78,-602.08 601.86,-598 605.94,-598 605.94,-598 643.62,-598 643.62,-598 647.7,-598 651.78,-602.08 651.78,-606.16 651.78,-606.16 651.78,-614.32 651.78,-614.32 651.78,-618.4 647.7,-622.48 643.62,-622.48"/>
+<text xml:space="preserve" text-anchor="middle" x="624.78" y="-606.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- replayCommits&#45;&gt;git -->
+<g id="edge15" class="edge">
+<title>replayCommits&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M44.31,-370.19C48.34,-435.34 69.3,-726.72 125.11,-794.24 206.2,-892.37 279.36,-893.13 403.1,-863.24 471.25,-846.78 495.29,-842.19 543.45,-791.24 588.08,-744.02 610.59,-667.88 619.32,-631.25"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="621.7,-631.82 620.88,-624.45 616.93,-630.73 621.7,-631.82"/>
+</g>
+<!-- fail -->
+<g id="node27" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M370.84,-737.48C370.84,-737.48 333.16,-737.48 333.16,-737.48 329.08,-737.48 325,-733.4 325,-729.32 325,-729.32 325,-721.16 325,-721.16 325,-717.08 329.08,-713 333.16,-713 333.16,-713 370.84,-713 370.84,-713 374.92,-713 379,-717.08 379,-721.16 379,-721.16 379,-729.32 379,-729.32 379,-733.4 374.92,-737.48 370.84,-737.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-721.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- replayCommits&#45;&gt;fail -->
+<g id="edge16" class="edge">
+<title>replayCommits&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M45.22,-370.34C50.56,-407.86 70.26,-517.46 125.11,-587.24 176.35,-652.44 267.6,-694.29 316.99,-713.31"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="315.86,-715.51 323.27,-715.69 317.59,-710.92 315.86,-715.51"/>
+</g>
+<!-- spliceMappings -->
+<g id="node4" class="node">
+<title>spliceMappings</title>
+<path fill="#ffffff" stroke="#64748b" d="M387.31,-599.48C387.31,-599.48 316.69,-599.48 316.69,-599.48 312.61,-599.48 308.53,-595.4 308.53,-591.32 308.53,-591.32 308.53,-583.16 308.53,-583.16 308.53,-579.08 312.61,-575 316.69,-575 316.69,-575 387.31,-575 387.31,-575 391.39,-575 395.47,-579.08 395.47,-583.16 395.47,-583.16 395.47,-591.32 395.47,-591.32 395.47,-595.4 391.39,-599.48 387.31,-599.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-583.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">spliceMappings</text>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;spliceMappings -->
+<g id="edge23" class="edge">
+<title>composeMergeBaseTree&#45;&gt;spliceMappings</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M256.51,-573.4C270.95,-575.51 286.15,-577.74 300.04,-579.77"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="299.57,-582.18 306.85,-580.77 300.28,-577.33 299.57,-582.18"/>
+</g>
+<!-- outerOnlyTree -->
+<g id="node6" class="node">
+<title>outerOnlyTree</title>
+<path fill="#ffffff" stroke="#64748b" d="M526.13,-484.48C526.13,-484.48 460.42,-484.48 460.42,-484.48 456.34,-484.48 452.26,-480.4 452.26,-476.32 452.26,-476.32 452.26,-468.16 452.26,-468.16 452.26,-464.08 456.34,-460 460.42,-460 460.42,-460 526.13,-460 526.13,-460 530.21,-460 534.29,-464.08 534.29,-468.16 534.29,-468.16 534.29,-476.32 534.29,-476.32 534.29,-480.4 530.21,-484.48 526.13,-484.48"/>
+<text xml:space="preserve" text-anchor="middle" x="493.28" y="-468.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">outerOnlyTree</text>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;outerOnlyTree -->
+<g id="edge21" class="edge">
+<title>composeMergeBaseTree&#45;&gt;outerOnlyTree</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M256.76,-555.57C299.07,-548.5 355.61,-536.62 403.1,-518.24 422.23,-510.84 424.91,-504.7 443.1,-495.24 447.39,-493.01 451.93,-490.75 456.45,-488.57"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="457.22,-490.91 462.49,-485.69 455.12,-486.49 457.22,-490.91"/>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;getCommitMeta -->
+<g id="edge19" class="edge">
+<title>composeMergeBaseTree&#45;&gt;getCommitMeta</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M237.27,-551.6C245.95,-547.49 254.39,-542.14 260.9,-535.24 296.33,-497.72 265.88,-464.14 300.9,-426.24 302.79,-424.2 304.89,-422.33 307.13,-420.61"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="308.35,-422.75 312.83,-416.84 305.64,-418.66 308.35,-422.75"/>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;hasTrailer -->
+<g id="edge20" class="edge">
+<title>composeMergeBaseTree&#45;&gt;hasTrailer</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M208.02,-551.65C222.87,-537.66 246.19,-513.78 260.9,-489.24 287.44,-444.98 265.88,-418.14 300.9,-380.24 304.44,-376.41 308.74,-373.17 313.32,-370.44"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="314.15,-372.77 319.2,-367.34 311.87,-368.44 314.15,-372.77"/>
+</g>
+<!-- targetTrailerKey -->
+<g id="node21" class="node">
+<title>targetTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M389.13,-691.48C389.13,-691.48 314.88,-691.48 314.88,-691.48 310.8,-691.48 306.72,-687.4 306.72,-683.32 306.72,-683.32 306.72,-675.16 306.72,-675.16 306.72,-671.08 310.8,-667 314.88,-667 314.88,-667 389.13,-667 389.13,-667 393.21,-667 397.29,-671.08 397.29,-675.16 397.29,-675.16 397.29,-683.32 397.29,-683.32 397.29,-687.4 393.21,-691.48 389.13,-691.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-675.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetTrailerKey</text>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;targetTrailerKey -->
+<g id="edge18" class="edge">
+<title>composeMergeBaseTree&#45;&gt;targetTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M208.33,-576.94C228.34,-594.41 266.13,-626.4 300.9,-650.24 306.92,-654.37 313.55,-658.48 319.97,-662.27"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="318.62,-664.32 325.91,-665.7 321.08,-660.08 318.62,-664.32"/>
+</g>
+<!-- targetDirsOf -->
+<g id="node22" class="node">
+<title>targetDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M380.28,-507.48C380.28,-507.48 323.73,-507.48 323.73,-507.48 319.65,-507.48 315.57,-503.4 315.57,-499.32 315.57,-499.32 315.57,-491.16 315.57,-491.16 315.57,-487.08 319.65,-483 323.73,-483 323.73,-483 380.28,-483 380.28,-483 384.36,-483 388.44,-487.08 388.44,-491.16 388.44,-491.16 388.44,-499.32 388.44,-499.32 388.44,-503.4 384.36,-507.48 380.28,-507.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-491.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetDirsOf</text>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;targetDirsOf -->
+<g id="edge22" class="edge">
+<title>composeMergeBaseTree&#45;&gt;targetDirsOf</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M223.34,-551.59C235.04,-546.53 248.62,-540.63 260.9,-535.24 278.68,-527.44 298.4,-518.7 314.84,-511.38"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="315.71,-513.68 321.11,-508.59 313.71,-509.2 315.71,-513.68"/>
+</g>
+<!-- allTargetsConfined -->
+<g id="node23" class="node">
+<title>allTargetsConfined</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M394.94,-461.48C394.94,-461.48 309.06,-461.48 309.06,-461.48 304.98,-461.48 300.9,-457.4 300.9,-453.32 300.9,-453.32 300.9,-445.16 300.9,-445.16 300.9,-441.08 304.98,-437 309.06,-437 309.06,-437 394.94,-437 394.94,-437 399.02,-437 403.1,-441.08 403.1,-445.16 403.1,-445.16 403.1,-453.32 403.1,-453.32 403.1,-457.4 399.02,-461.48 394.94,-461.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-445.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">allTargetsConfined</text>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;allTargetsConfined -->
+<g id="edge17" class="edge">
+<title>composeMergeBaseTree&#45;&gt;allTargetsConfined</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M233.77,-551.61C243.31,-547.38 253.01,-541.98 260.9,-535.24 286.12,-513.69 275.92,-494.05 300.9,-472.24 303.5,-469.97 306.36,-467.89 309.35,-465.98"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="310.24,-468.3 315.08,-462.68 307.79,-464.05 310.24,-468.3"/>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;git -->
+<g id="edge24" class="edge">
+<title>composeMergeBaseTree&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M247.91,-576.96C252.38,-578.55 256.76,-580.31 260.9,-582.24 280.57,-591.42 280.35,-603.28 300.9,-610.24 400.85,-644.08 528.39,-628.15 588.9,-617.35"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="589.25,-619.78 595.69,-616.1 588.37,-614.96 589.25,-619.78"/>
+</g>
+<!-- composeMergeBaseTree&#45;&gt;fail -->
+<g id="edge25" class="edge">
+<title>composeMergeBaseTree&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M203.71,-576.85C229.76,-610.68 299.36,-701.02 300.9,-702.24 305.75,-706.09 311.34,-709.46 316.99,-712.34"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="315.79,-714.49 323.17,-715.27 317.89,-710.06 315.79,-714.49"/>
+</g>
+<!-- anyRootSource -->
+<g id="node24" class="node">
+<title>anyRootSource</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M386.39,-783.48C386.39,-783.48 317.61,-783.48 317.61,-783.48 313.53,-783.48 309.45,-779.4 309.45,-775.32 309.45,-775.32 309.45,-767.16 309.45,-767.16 309.45,-763.08 313.53,-759 317.61,-759 317.61,-759 386.39,-759 386.39,-759 390.47,-759 394.55,-763.08 394.55,-767.16 394.55,-767.16 394.55,-775.32 394.55,-775.32 394.55,-779.4 390.47,-783.48 386.39,-783.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-767.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">anyRootSource</text>
+</g>
+<!-- buildReplayedTree&#45;&gt;anyRootSource -->
+<g id="edge35" class="edge">
+<title>buildReplayedTree&#45;&gt;anyRootSource</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M244.11,-771.24C262.08,-771.24 282.34,-771.24 300.36,-771.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="300.34,-773.69 307.34,-771.24 300.34,-768.79 300.34,-773.69"/>
+</g>
+<!-- sourceDirsOf -->
+<g id="node25" class="node">
+<title>sourceDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M382.11,-829.48C382.11,-829.48 321.89,-829.48 321.89,-829.48 317.81,-829.48 313.73,-825.4 313.73,-821.32 313.73,-821.32 313.73,-813.16 313.73,-813.16 313.73,-809.08 317.81,-805 321.89,-805 321.89,-805 382.11,-805 382.11,-805 386.19,-805 390.27,-809.08 390.27,-813.16 390.27,-813.16 390.27,-821.32 390.27,-821.32 390.27,-825.4 386.19,-829.48 382.11,-829.48"/>
+<text xml:space="preserve" text-anchor="middle" x="352" y="-813.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceDirsOf</text>
+</g>
+<!-- buildReplayedTree&#45;&gt;sourceDirsOf -->
+<g id="edge36" class="edge">
+<title>buildReplayedTree&#45;&gt;sourceDirsOf</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M237.32,-783.93C258.39,-790.11 283.73,-797.53 305.13,-803.8"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="304.43,-806.15 311.83,-805.76 305.8,-801.44 304.43,-806.15"/>
+</g>
+<!-- buildReplayedTree&#45;&gt;git -->
+<g id="edge37" class="edge">
+<title>buildReplayedTree&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M207.55,-783.74C226.66,-800.43 263.4,-829.19 300.9,-840.24 344.47,-853.08 361.32,-858.05 403.1,-840.24 506.32,-796.23 584.47,-677.64 612.51,-630.23"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="614.63,-631.46 616.03,-624.18 610.39,-629 614.63,-631.46"/>
+</g>
+<!-- buildReplayedTree&#45;&gt;fail -->
+<g id="edge38" class="edge">
+<title>buildReplayedTree&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M237.32,-758.55C262.22,-751.25 293.07,-742.21 316.35,-735.39"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="316.93,-737.78 322.96,-733.46 315.55,-733.07 316.93,-737.78"/>
+</g>
+<!-- composeSubtrees -->
+<g id="node5" class="node">
+<title>composeSubtrees</title>
+<path fill="#ffffff" stroke="#64748b" d="M532.25,-576.48C532.25,-576.48 454.3,-576.48 454.3,-576.48 450.22,-576.48 446.14,-572.4 446.14,-568.32 446.14,-568.32 446.14,-560.16 446.14,-560.16 446.14,-556.08 450.22,-552 454.3,-552 454.3,-552 532.25,-552 532.25,-552 536.33,-552 540.41,-556.08 540.41,-560.16 540.41,-560.16 540.41,-568.32 540.41,-568.32 540.41,-572.4 536.33,-576.48 532.25,-576.48"/>
+<text xml:space="preserve" text-anchor="middle" x="493.28" y="-560.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">composeSubtrees</text>
+</g>
+<!-- spliceMappings&#45;&gt;composeSubtrees -->
+<g id="edge27" class="edge">
+<title>spliceMappings&#45;&gt;composeSubtrees</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M395.93,-580.15C409.03,-577.99 423.62,-575.58 437.41,-573.3"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="437.72,-575.73 444.22,-572.18 436.92,-570.9 437.72,-575.73"/>
+</g>
+<!-- filterTreeByIgnore -->
+<g id="node7" class="node">
+<title>filterTreeByIgnore</title>
+<path fill="#ffffff" stroke="#64748b" d="M535.29,-530.48C535.29,-530.48 451.26,-530.48 451.26,-530.48 447.18,-530.48 443.1,-526.4 443.1,-522.32 443.1,-522.32 443.1,-514.16 443.1,-514.16 443.1,-510.08 447.18,-506 451.26,-506 451.26,-506 535.29,-506 535.29,-506 539.37,-506 543.45,-510.08 543.45,-514.16 543.45,-514.16 543.45,-522.32 543.45,-522.32 543.45,-526.4 539.37,-530.48 535.29,-530.48"/>
+<text xml:space="preserve" text-anchor="middle" x="493.28" y="-514.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterTreeByIgnore</text>
+</g>
+<!-- spliceMappings&#45;&gt;filterTreeByIgnore -->
+<g id="edge26" class="edge">
+<title>spliceMappings&#45;&gt;filterTreeByIgnore</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M377.36,-574.52C395.43,-565.15 420.7,-552.19 443.1,-541.24 447.55,-539.07 452.24,-536.81 456.89,-534.61"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="457.83,-536.88 463.12,-531.68 455.75,-532.44 457.83,-536.88"/>
+</g>
+<!-- spliceMappings&#45;&gt;git -->
+<g id="edge28" class="edge">
+<title>spliceMappings&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M395.91,-590.88C449.37,-595.43 539.67,-603.1 589.02,-607.29"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="588.61,-609.71 595.79,-607.86 589.02,-604.83 588.61,-609.71"/>
+</g>
+<!-- withTmpIndex -->
+<g id="node13" class="node">
+<title>withTmpIndex</title>
+<path fill="#ffffff" stroke="#64748b" d="M657.95,-530.48C657.95,-530.48 591.61,-530.48 591.61,-530.48 587.53,-530.48 583.45,-526.4 583.45,-522.32 583.45,-522.32 583.45,-514.16 583.45,-514.16 583.45,-510.08 587.53,-506 591.61,-506 591.61,-506 657.95,-506 657.95,-506 662.03,-506 666.11,-510.08 666.11,-514.16 666.11,-514.16 666.11,-522.32 666.11,-522.32 666.11,-526.4 662.03,-530.48 657.95,-530.48"/>
+<text xml:space="preserve" text-anchor="middle" x="624.78" y="-514.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">withTmpIndex</text>
+</g>
+<!-- composeSubtrees&#45;&gt;withTmpIndex -->
+<g id="edge29" class="edge">
+<title>composeSubtrees&#45;&gt;withTmpIndex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M530.01,-551.55C545.58,-546.02 563.97,-539.48 580.32,-533.68"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="580.82,-536.1 586.6,-531.45 579.18,-531.48 580.82,-536.1"/>
+</g>
+<!-- composeSubtrees&#45;&gt;git -->
+<g id="edge30" class="edge">
+<title>composeSubtrees&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M530.01,-576.93C548.57,-583.53 571.16,-591.55 589.51,-598.07"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="588.63,-600.35 596.04,-600.39 590.27,-595.74 588.63,-600.35"/>
+</g>
+<!-- outerOnlyTree&#45;&gt;withTmpIndex -->
+<g id="edge31" class="edge">
+<title>outerOnlyTree&#45;&gt;withTmpIndex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M530.01,-484.93C545.58,-490.46 563.97,-497 580.32,-502.8"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="579.18,-505 586.6,-505.03 580.82,-500.38 579.18,-505"/>
+</g>
+<!-- outerOnlyTree&#45;&gt;git -->
+<g id="edge32" class="edge">
+<title>outerOnlyTree&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M527.72,-484.96C533.28,-487.87 538.76,-491.3 543.45,-495.24 560.39,-509.49 593.77,-561.47 611.7,-590.43"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="609.49,-591.5 615.25,-596.18 613.66,-588.93 609.49,-591.5"/>
+</g>
+<!-- filterTreeByIgnore&#45;&gt;withTmpIndex -->
+<g id="edge33" class="edge">
+<title>filterTreeByIgnore&#45;&gt;withTmpIndex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M543.61,-518.24C553.77,-518.24 564.47,-518.24 574.63,-518.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="574.34,-520.69 581.34,-518.24 574.34,-515.79 574.34,-520.69"/>
+</g>
+<!-- filterTreeByIgnore&#45;&gt;git -->
+<g id="edge34" class="edge">
+<title>filterTreeByIgnore&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M524.88,-530.97C531.19,-534.03 537.67,-537.51 543.45,-541.24 566.29,-555.99 589.54,-576.72 605.12,-591.61"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="603.37,-593.32 610.1,-596.43 606.78,-589.8 603.37,-593.32"/>
+</g>
+</g>
+</svg>
+<figcaption>replayCommits drives every replayed commit: resolve parents, compose the base tree, overlay the diff, write the commit object.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-halt">
+<figcaption class="cg-title">D · Halt &amp; parent resolution</figcaption>
+<svg width="863pt" height="226pt"
+ viewBox="0.00 0.00 863.00 226.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 221.92)">
+<title>cg&#45;halt</title>
+<!-- resolveHaltAwareParents -->
+<g id="node1" class="node">
+<title>resolveHaltAwareParents</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M121.52,-153.44C121.52,-153.44 8.16,-153.44 8.16,-153.44 4.08,-153.44 0,-149.36 0,-145.28 0,-145.28 0,-137.12 0,-137.12 0,-133.04 4.08,-128.96 8.16,-128.96 8.16,-128.96 121.52,-128.96 121.52,-128.96 125.6,-128.96 129.68,-133.04 129.68,-137.12 129.68,-137.12 129.68,-145.28 129.68,-145.28 129.68,-149.36 125.6,-153.44 121.52,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="64.84" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">resolveHaltAwareParents</text>
+</g>
+<!-- findEchoAnchor -->
+<g id="node6" class="node">
+<title>findEchoAnchor</title>
+<path fill="#ffffff" stroke="#64748b" d="M101.98,-88.96C101.98,-88.96 27.71,-88.96 27.71,-88.96 23.63,-88.96 19.55,-84.88 19.55,-80.8 19.55,-80.8 19.55,-72.64 19.55,-72.64 19.55,-68.56 23.63,-64.48 27.71,-64.48 27.71,-64.48 101.98,-64.48 101.98,-64.48 106.06,-64.48 110.14,-68.56 110.14,-72.64 110.14,-72.64 110.14,-80.8 110.14,-80.8 110.14,-84.88 106.06,-88.96 101.98,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="64.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">findEchoAnchor</text>
+</g>
+<!-- resolveHaltAwareParents&#45;&gt;findEchoAnchor -->
+<g id="edge1" class="edge">
+<title>resolveHaltAwareParents&#45;&gt;findEchoAnchor</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M64.84,-128.15C64.84,-119.57 64.84,-107.84 64.84,-97.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="67.29,-97.97 64.84,-90.97 62.39,-97.97 67.29,-97.97"/>
+</g>
+<!-- haltCommit -->
+<g id="node2" class="node">
+<title>haltCommit</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M601.6,-217.92C601.6,-217.92 548.08,-217.92 548.08,-217.92 544,-217.92 539.92,-213.84 539.92,-209.76 539.92,-209.76 539.92,-201.6 539.92,-201.6 539.92,-197.52 544,-193.44 548.08,-193.44 548.08,-193.44 601.6,-193.44 601.6,-193.44 605.68,-193.44 609.76,-197.52 609.76,-201.6 609.76,-201.6 609.76,-209.76 609.76,-209.76 609.76,-213.84 605.68,-217.92 601.6,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="574.84" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">haltCommit</text>
+</g>
+<!-- formatUnresolvableMergeError -->
+<g id="node7" class="node">
+<title>formatUnresolvableMergeError</title>
+<path fill="#ffffff" stroke="#64748b" d="M645.26,-153.44C645.26,-153.44 504.42,-153.44 504.42,-153.44 500.34,-153.44 496.26,-149.36 496.26,-145.28 496.26,-145.28 496.26,-137.12 496.26,-137.12 496.26,-133.04 500.34,-128.96 504.42,-128.96 504.42,-128.96 645.26,-128.96 645.26,-128.96 649.34,-128.96 653.42,-133.04 653.42,-137.12 653.42,-137.12 653.42,-145.28 653.42,-145.28 653.42,-149.36 649.34,-153.44 645.26,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="574.84" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">formatUnresolvableMergeError</text>
+</g>
+<!-- haltCommit&#45;&gt;formatUnresolvableMergeError -->
+<g id="edge4" class="edge">
+<title>haltCommit&#45;&gt;formatUnresolvableMergeError</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M574.84,-192.63C574.84,-184.05 574.84,-172.32 574.84,-162.33"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="577.29,-162.45 574.84,-155.45 572.39,-162.45 577.29,-162.45"/>
+</g>
+<!-- isHaltPropagated -->
+<g id="node3" class="node">
+<title>isHaltPropagated</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M716.2,-217.92C716.2,-217.92 639.48,-217.92 639.48,-217.92 635.4,-217.92 631.32,-213.84 631.32,-209.76 631.32,-209.76 631.32,-201.6 631.32,-201.6 631.32,-197.52 635.4,-193.44 639.48,-193.44 639.48,-193.44 716.2,-193.44 716.2,-193.44 720.28,-193.44 724.36,-197.52 724.36,-201.6 724.36,-201.6 724.36,-209.76 724.36,-209.76 724.36,-213.84 720.28,-217.92 716.2,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="677.84" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">isHaltPropagated</text>
+</g>
+<!-- markPropagatedHalt -->
+<g id="node4" class="node">
+<title>markPropagatedHalt</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M846.83,-217.92C846.83,-217.92 754.85,-217.92 754.85,-217.92 750.77,-217.92 746.69,-213.84 746.69,-209.76 746.69,-209.76 746.69,-201.6 746.69,-201.6 746.69,-197.52 750.77,-193.44 754.85,-193.44 754.85,-193.44 846.83,-193.44 846.83,-193.44 850.91,-193.44 854.99,-197.52 854.99,-201.6 854.99,-201.6 854.99,-209.76 854.99,-209.76 854.99,-213.84 850.91,-217.92 846.83,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="800.84" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">markPropagatedHalt</text>
+</g>
+<!-- collectAbsorbedHalted -->
+<g id="node5" class="node">
+<title>collectAbsorbedHalted</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M243.02,-88.96C243.02,-88.96 140.66,-88.96 140.66,-88.96 136.58,-88.96 132.5,-84.88 132.5,-80.8 132.5,-80.8 132.5,-72.64 132.5,-72.64 132.5,-68.56 136.58,-64.48 140.66,-64.48 140.66,-64.48 243.02,-64.48 243.02,-64.48 247.1,-64.48 251.18,-68.56 251.18,-72.64 251.18,-72.64 251.18,-80.8 251.18,-80.8 251.18,-84.88 247.1,-88.96 243.02,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="191.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">collectAbsorbedHalted</text>
+</g>
+<!-- git -->
+<g id="node13" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M210.68,-24.48C210.68,-24.48 173,-24.48 173,-24.48 168.92,-24.48 164.84,-20.4 164.84,-16.32 164.84,-16.32 164.84,-8.16 164.84,-8.16 164.84,-4.08 168.92,0 173,0 173,0 210.68,0 210.68,0 214.76,0 218.84,-4.08 218.84,-8.16 218.84,-8.16 218.84,-16.32 218.84,-16.32 218.84,-20.4 214.76,-24.48 210.68,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="191.84" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- collectAbsorbedHalted&#45;&gt;git -->
+<g id="edge3" class="edge">
+<title>collectAbsorbedHalted&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M191.84,-63.67C191.84,-55.09 191.84,-43.36 191.84,-33.37"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="194.29,-33.49 191.84,-26.49 189.39,-33.49 194.29,-33.49"/>
+</g>
+<!-- findEchoAnchor&#45;&gt;git -->
+<g id="edge2" class="edge">
+<title>findEchoAnchor&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M88.43,-64.11C108.84,-54.08 138.49,-39.49 160.81,-28.5"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="161.68,-30.81 166.88,-25.52 159.52,-26.41 161.68,-30.81"/>
+</g>
+<!-- inferSourceBranch -->
+<g id="node8" class="node">
+<title>inferSourceBranch</title>
+<path fill="#ffffff" stroke="#64748b" d="M365.86,-88.96C365.86,-88.96 281.82,-88.96 281.82,-88.96 277.74,-88.96 273.66,-84.88 273.66,-80.8 273.66,-80.8 273.66,-72.64 273.66,-72.64 273.66,-68.56 277.74,-64.48 281.82,-64.48 281.82,-64.48 365.86,-64.48 365.86,-64.48 369.94,-64.48 374.02,-68.56 374.02,-72.64 374.02,-72.64 374.02,-80.8 374.02,-80.8 374.02,-84.88 369.94,-88.96 365.86,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="323.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">inferSourceBranch</text>
+</g>
+<!-- formatUnresolvableMergeError&#45;&gt;inferSourceBranch -->
+<g id="edge5" class="edge">
+<title>formatUnresolvableMergeError&#45;&gt;inferSourceBranch</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M527.92,-128.52C485.8,-118.04 423.91,-102.63 379.34,-91.54"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="379.95,-89.16 372.57,-89.85 378.77,-93.92 379.95,-89.16"/>
+</g>
+<!-- shadowBranchName -->
+<g id="node9" class="node">
+<title>shadowBranchName</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M497.14,-88.96C497.14,-88.96 404.54,-88.96 404.54,-88.96 400.46,-88.96 396.38,-84.88 396.38,-80.8 396.38,-80.8 396.38,-72.64 396.38,-72.64 396.38,-68.56 400.46,-64.48 404.54,-64.48 404.54,-64.48 497.14,-64.48 497.14,-64.48 501.22,-64.48 505.3,-68.56 505.3,-72.64 505.3,-72.64 505.3,-80.8 505.3,-80.8 505.3,-84.88 501.22,-88.96 497.14,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="450.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">shadowBranchName</text>
+</g>
+<!-- formatUnresolvableMergeError&#45;&gt;shadowBranchName -->
+<g id="edge8" class="edge">
+<title>formatUnresolvableMergeError&#45;&gt;shadowBranchName</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M551.81,-128.59C531.97,-118.6 503.19,-104.1 481.42,-93.13"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="482.59,-90.97 475.24,-90.01 480.39,-95.35 482.59,-90.97"/>
+</g>
+<!-- sourceTrailerKey -->
+<g id="node10" class="node">
+<title>sourceTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M613.8,-88.96C613.8,-88.96 535.88,-88.96 535.88,-88.96 531.8,-88.96 527.72,-84.88 527.72,-80.8 527.72,-80.8 527.72,-72.64 527.72,-72.64 527.72,-68.56 531.8,-64.48 535.88,-64.48 535.88,-64.48 613.8,-64.48 613.8,-64.48 617.88,-64.48 621.96,-68.56 621.96,-72.64 621.96,-72.64 621.96,-80.8 621.96,-80.8 621.96,-84.88 617.88,-88.96 613.8,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="574.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceTrailerKey</text>
+</g>
+<!-- formatUnresolvableMergeError&#45;&gt;sourceTrailerKey -->
+<g id="edge9" class="edge">
+<title>formatUnresolvableMergeError&#45;&gt;sourceTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M574.84,-128.74C574.84,-120.02 574.84,-107.81 574.84,-97.52"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="577.29,-97.77 574.84,-90.77 572.39,-97.77 577.29,-97.77"/>
+</g>
+<!-- sourceDirsOf -->
+<g id="node11" class="node">
+<title>sourceDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M711.95,-88.96C711.95,-88.96 651.73,-88.96 651.73,-88.96 647.65,-88.96 643.57,-84.88 643.57,-80.8 643.57,-80.8 643.57,-72.64 643.57,-72.64 643.57,-68.56 647.65,-64.48 651.73,-64.48 651.73,-64.48 711.95,-64.48 711.95,-64.48 716.03,-64.48 720.11,-68.56 720.11,-72.64 720.11,-72.64 720.11,-80.8 720.11,-80.8 720.11,-84.88 716.03,-88.96 711.95,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="681.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceDirsOf</text>
+</g>
+<!-- formatUnresolvableMergeError&#45;&gt;sourceDirsOf -->
+<g id="edge6" class="edge">
+<title>formatUnresolvableMergeError&#45;&gt;sourceDirsOf</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M594.72,-128.59C611.68,-118.69 636.24,-104.35 654.96,-93.42"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="655.82,-95.75 660.63,-90.1 653.35,-91.52 655.82,-95.75"/>
+</g>
+<!-- targetDirsOf -->
+<g id="node12" class="node">
+<title>targetDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M807.12,-88.96C807.12,-88.96 750.57,-88.96 750.57,-88.96 746.49,-88.96 742.41,-84.88 742.41,-80.8 742.41,-80.8 742.41,-72.64 742.41,-72.64 742.41,-68.56 746.49,-64.48 750.57,-64.48 750.57,-64.48 807.12,-64.48 807.12,-64.48 811.2,-64.48 815.28,-68.56 815.28,-72.64 815.28,-72.64 815.28,-80.8 815.28,-80.8 815.28,-84.88 811.2,-88.96 807.12,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="778.84" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetDirsOf</text>
+</g>
+<!-- formatUnresolvableMergeError&#45;&gt;targetDirsOf -->
+<g id="edge7" class="edge">
+<title>formatUnresolvableMergeError&#45;&gt;targetDirsOf</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M612.73,-128.59C647.12,-118.06 697.85,-102.52 734.2,-91.39"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="734.61,-93.83 740.59,-89.44 733.18,-89.14 734.61,-93.83"/>
+</g>
+<!-- inferSourceBranch&#45;&gt;git -->
+<g id="edge10" class="edge">
+<title>inferSourceBranch&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M299.32,-64.11C278.02,-54.03 247.02,-39.36 223.79,-28.36"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="225.11,-26.28 217.73,-25.5 223.01,-30.71 225.11,-26.28"/>
+</g>
+</g>
+</svg>
+<figcaption>Mapping source parents onto target SHAs, propagating halt state, and formatting the operator-facing halt diagnostic.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-trailers">
+<figcaption class="cg-title">E · Trailers, dedup mapping &amp; branch tips</figcaption>
+<svg width="1125pt" height="226pt"
+ viewBox="0.00 0.00 1125.00 226.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 221.92)">
+<title>cg&#45;trailers</title>
+<!-- loadReplayedMappings -->
+<g id="node1" class="node">
+<title>loadReplayedMappings</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M393.2,-217.92C393.2,-217.92 287.76,-217.92 287.76,-217.92 283.68,-217.92 279.6,-213.84 279.6,-209.76 279.6,-209.76 279.6,-201.6 279.6,-201.6 279.6,-197.52 283.68,-193.44 287.76,-193.44 287.76,-193.44 393.2,-193.44 393.2,-193.44 397.28,-193.44 401.36,-197.52 401.36,-201.6 401.36,-201.6 401.36,-209.76 401.36,-209.76 401.36,-213.84 397.28,-217.92 393.2,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="340.48" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">loadReplayedMappings</text>
+</g>
+<!-- extractTrailerMapping -->
+<g id="node4" class="node">
+<title>extractTrailerMapping</title>
+<path fill="#ffffff" stroke="#64748b" d="M457.75,-153.44C457.75,-153.44 357.22,-153.44 357.22,-153.44 353.14,-153.44 349.06,-149.36 349.06,-145.28 349.06,-145.28 349.06,-137.12 349.06,-137.12 349.06,-133.04 353.14,-128.96 357.22,-128.96 357.22,-128.96 457.75,-128.96 457.75,-128.96 461.83,-128.96 465.91,-133.04 465.91,-137.12 465.91,-137.12 465.91,-145.28 465.91,-145.28 465.91,-149.36 461.83,-153.44 457.75,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="407.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">extractTrailerMapping</text>
+</g>
+<!-- loadReplayedMappings&#45;&gt;extractTrailerMapping -->
+<g id="edge4" class="edge">
+<title>loadReplayedMappings&#45;&gt;extractTrailerMapping</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M353.4,-192.63C363.45,-183.27 377.52,-170.14 388.8,-159.63"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="390.39,-161.49 393.84,-154.92 387.05,-157.91 390.39,-161.49"/>
+</g>
+<!-- filterExistingRefs -->
+<g id="node5" class="node">
+<title>filterExistingRefs</title>
+<path fill="#ffffff" stroke="#64748b" d="M188.07,-153.44C188.07,-153.44 108.9,-153.44 108.9,-153.44 104.82,-153.44 100.74,-149.36 100.74,-145.28 100.74,-145.28 100.74,-137.12 100.74,-137.12 100.74,-133.04 104.82,-128.96 108.9,-128.96 108.9,-128.96 188.07,-128.96 188.07,-128.96 192.15,-128.96 196.23,-133.04 196.23,-137.12 196.23,-137.12 196.23,-145.28 196.23,-145.28 196.23,-149.36 192.15,-153.44 188.07,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="148.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterExistingRefs</text>
+</g>
+<!-- loadReplayedMappings&#45;&gt;filterExistingRefs -->
+<g id="edge2" class="edge">
+<title>loadReplayedMappings&#45;&gt;filterExistingRefs</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M303.01,-192.48C271.32,-182.17 225.87,-167.38 192.46,-156.51"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="193.24,-154.19 185.82,-154.35 191.72,-158.85 193.24,-154.19"/>
+</g>
+<!-- sourceTrailerKey -->
+<g id="node6" class="node">
+<title>sourceTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M845.44,-153.44C845.44,-153.44 767.52,-153.44 767.52,-153.44 763.44,-153.44 759.36,-149.36 759.36,-145.28 759.36,-145.28 759.36,-137.12 759.36,-137.12 759.36,-133.04 763.44,-128.96 767.52,-128.96 767.52,-128.96 845.44,-128.96 845.44,-128.96 849.52,-128.96 853.6,-133.04 853.6,-137.12 853.6,-137.12 853.6,-145.28 853.6,-145.28 853.6,-149.36 849.52,-153.44 845.44,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="806.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceTrailerKey</text>
+</g>
+<!-- loadReplayedMappings&#45;&gt;sourceTrailerKey -->
+<g id="edge3" class="edge">
+<title>loadReplayedMappings&#45;&gt;sourceTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M402.18,-198.22C482.24,-189.55 626.17,-172.95 748.48,-153.44 749.24,-153.32 750,-153.2 750.76,-153.07"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="750.92,-155.53 757.41,-151.94 750.1,-150.7 750.92,-155.53"/>
+</g>
+<!-- shadowBranchName -->
+<g id="node15" class="node">
+<title>shadowBranchName</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M318.78,-153.44C318.78,-153.44 226.19,-153.44 226.19,-153.44 222.11,-153.44 218.03,-149.36 218.03,-145.28 218.03,-145.28 218.03,-137.12 218.03,-137.12 218.03,-133.04 222.11,-128.96 226.19,-128.96 226.19,-128.96 318.78,-128.96 318.78,-128.96 322.86,-128.96 326.94,-133.04 326.94,-137.12 326.94,-137.12 326.94,-145.28 326.94,-145.28 326.94,-149.36 322.86,-153.44 318.78,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="272.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">shadowBranchName</text>
+</g>
+<!-- loadReplayedMappings&#45;&gt;shadowBranchName -->
+<g id="edge1" class="edge">
+<title>loadReplayedMappings&#45;&gt;shadowBranchName</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M327.37,-192.63C317.18,-183.27 302.89,-170.14 291.45,-159.63"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="293.13,-157.85 286.32,-154.91 289.82,-161.45 293.13,-157.85"/>
+</g>
+<!-- appendTrailer -->
+<g id="node2" class="node">
+<title>appendTrailer</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M70.81,-153.44C70.81,-153.44 8.16,-153.44 8.16,-153.44 4.08,-153.44 0,-149.36 0,-145.28 0,-145.28 0,-137.12 0,-137.12 0,-133.04 4.08,-128.96 8.16,-128.96 8.16,-128.96 70.81,-128.96 70.81,-128.96 74.89,-128.96 78.97,-133.04 78.97,-137.12 78.97,-137.12 78.97,-145.28 78.97,-145.28 78.97,-149.36 74.89,-153.44 70.81,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="39.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">appendTrailer</text>
+</g>
+<!-- git -->
+<g id="node16" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M297.32,-88.96C297.32,-88.96 259.64,-88.96 259.64,-88.96 255.56,-88.96 251.48,-84.88 251.48,-80.8 251.48,-80.8 251.48,-72.64 251.48,-72.64 251.48,-68.56 255.56,-64.48 259.64,-64.48 259.64,-64.48 297.32,-64.48 297.32,-64.48 301.4,-64.48 305.48,-68.56 305.48,-72.64 305.48,-72.64 305.48,-80.8 305.48,-80.8 305.48,-84.88 301.4,-88.96 297.32,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="278.48" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- appendTrailer&#45;&gt;git -->
+<g id="edge7" class="edge">
+<title>appendTrailer&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M79.76,-129.67C125.4,-117.74 199.12,-98.47 242.78,-87.05"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="243.34,-89.44 249.49,-85.3 242.1,-84.7 243.34,-89.44"/>
+</g>
+<!-- mapBranchesToTargetTips -->
+<g id="node3" class="node">
+<title>mapBranchesToTargetTips</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M617.14,-153.44C617.14,-153.44 495.83,-153.44 495.83,-153.44 491.75,-153.44 487.67,-149.36 487.67,-145.28 487.67,-145.28 487.67,-137.12 487.67,-137.12 487.67,-133.04 491.75,-128.96 495.83,-128.96 495.83,-128.96 617.14,-128.96 617.14,-128.96 621.22,-128.96 625.3,-133.04 625.3,-137.12 625.3,-137.12 625.3,-145.28 625.3,-145.28 625.3,-149.36 621.22,-153.44 617.14,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="556.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">mapBranchesToTargetTips</text>
+</g>
+<!-- mapBranchesToTargetTips&#45;&gt;git -->
+<g id="edge15" class="edge">
+<title>mapBranchesToTargetTips&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M502.22,-128C446.62,-115.51 361.77,-96.44 314.13,-85.73"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="314.96,-83.41 307.59,-84.26 313.89,-88.19 314.96,-83.41"/>
+</g>
+<!-- fail -->
+<g id="node17" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M575.32,-88.96C575.32,-88.96 537.64,-88.96 537.64,-88.96 533.56,-88.96 529.48,-84.88 529.48,-80.8 529.48,-80.8 529.48,-72.64 529.48,-72.64 529.48,-68.56 533.56,-64.48 537.64,-64.48 537.64,-64.48 575.32,-64.48 575.32,-64.48 579.4,-64.48 583.48,-68.56 583.48,-72.64 583.48,-72.64 583.48,-80.8 583.48,-80.8 583.48,-84.88 579.4,-88.96 575.32,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="556.48" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- mapBranchesToTargetTips&#45;&gt;fail -->
+<g id="edge16" class="edge">
+<title>mapBranchesToTargetTips&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M556.48,-128.15C556.48,-119.57 556.48,-107.84 556.48,-97.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="558.93,-97.97 556.48,-90.97 554.03,-97.97 558.93,-97.97"/>
+</g>
+<!-- extractTrailerMapping&#45;&gt;git -->
+<g id="edge5" class="edge">
+<title>extractTrailerMapping&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M383.52,-128.59C362.8,-118.56 332.68,-103.97 310,-92.98"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="311.18,-90.84 303.82,-89.99 309.05,-95.25 311.18,-90.84"/>
+</g>
+<!-- filterExistingRefs&#45;&gt;git -->
+<g id="edge6" class="edge">
+<title>filterExistingRefs&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M172.63,-128.59C193.52,-118.56 223.87,-103.97 246.72,-92.98"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="247.72,-95.23 252.96,-89.98 245.59,-90.81 247.72,-95.23"/>
+</g>
+<!-- replayedTrailerKey -->
+<g id="node8" class="node">
+<title>replayedTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M850.02,-88.96C850.02,-88.96 762.95,-88.96 762.95,-88.96 758.87,-88.96 754.79,-84.88 754.79,-80.8 754.79,-80.8 754.79,-72.64 754.79,-72.64 754.79,-68.56 758.87,-64.48 762.95,-64.48 762.95,-64.48 850.02,-64.48 850.02,-64.48 854.1,-64.48 858.18,-68.56 858.18,-72.64 858.18,-72.64 858.18,-80.8 858.18,-80.8 858.18,-84.88 854.1,-88.96 850.02,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="806.48" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">replayedTrailerKey</text>
+</g>
+<!-- sourceTrailerKey&#45;&gt;replayedTrailerKey -->
+<g id="edge8" class="edge">
+<title>sourceTrailerKey&#45;&gt;replayedTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M806.48,-128.74C806.48,-120.02 806.48,-107.81 806.48,-97.52"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="808.93,-97.77 806.48,-90.77 804.03,-97.77 808.93,-97.77"/>
+</g>
+<!-- targetTrailerKey -->
+<g id="node7" class="node">
+<title>targetTrailerKey</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M729.61,-153.44C729.61,-153.44 655.36,-153.44 655.36,-153.44 651.28,-153.44 647.2,-149.36 647.2,-145.28 647.2,-145.28 647.2,-137.12 647.2,-137.12 647.2,-133.04 651.28,-128.96 655.36,-128.96 655.36,-128.96 729.61,-128.96 729.61,-128.96 733.69,-128.96 737.77,-133.04 737.77,-137.12 737.77,-137.12 737.77,-145.28 737.77,-145.28 737.77,-149.36 733.69,-153.44 729.61,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="692.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetTrailerKey</text>
+</g>
+<!-- targetTrailerKey&#45;&gt;replayedTrailerKey -->
+<g id="edge9" class="edge">
+<title>targetTrailerKey&#45;&gt;replayedTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M713.66,-128.59C731.74,-118.69 757.9,-104.35 777.84,-93.42"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="779,-95.58 783.96,-90.06 776.65,-91.28 779,-95.58"/>
+</g>
+<!-- sanitizeTrailerToken -->
+<g id="node9" class="node">
+<title>sanitizeTrailerToken</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M852.77,-24.48C852.77,-24.48 760.19,-24.48 760.19,-24.48 756.11,-24.48 752.03,-20.4 752.03,-16.32 752.03,-16.32 752.03,-8.16 752.03,-8.16 752.03,-4.08 756.11,0 760.19,0 760.19,0 852.77,0 852.77,0 856.85,0 860.93,-4.08 860.93,-8.16 860.93,-8.16 860.93,-16.32 860.93,-16.32 860.93,-20.4 856.85,-24.48 852.77,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="806.48" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sanitizeTrailerToken</text>
+</g>
+<!-- replayedTrailerKey&#45;&gt;sanitizeTrailerToken -->
+<g id="edge10" class="edge">
+<title>replayedTrailerKey&#45;&gt;sanitizeTrailerToken</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M806.48,-64.26C806.48,-55.54 806.48,-43.33 806.48,-33.04"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="808.93,-33.29 806.48,-26.29 804.03,-33.29 808.93,-33.29"/>
+</g>
+<!-- replayedTrailerRegex -->
+<g id="node10" class="node">
+<title>replayedTrailerRegex</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M980.91,-153.44C980.91,-153.44 884.06,-153.44 884.06,-153.44 879.98,-153.44 875.9,-149.36 875.9,-145.28 875.9,-145.28 875.9,-137.12 875.9,-137.12 875.9,-133.04 879.98,-128.96 884.06,-128.96 884.06,-128.96 980.91,-128.96 980.91,-128.96 984.99,-128.96 989.07,-133.04 989.07,-137.12 989.07,-137.12 989.07,-145.28 989.07,-145.28 989.07,-149.36 984.99,-153.44 980.91,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="932.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">replayedTrailerRegex</text>
+</g>
+<!-- replayedTrailerRegex&#45;&gt;replayedTrailerKey -->
+<g id="edge11" class="edge">
+<title>replayedTrailerRegex&#45;&gt;replayedTrailerKey</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M909.08,-128.59C888.83,-118.56 859.42,-103.97 837.27,-92.98"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="838.61,-90.92 831.25,-90 836.44,-95.31 838.61,-90.92"/>
+</g>
+<!-- escapeRegex -->
+<g id="node14" class="node">
+<title>escapeRegex</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M1016.67,-88.96C1016.67,-88.96 958.3,-88.96 958.3,-88.96 954.22,-88.96 950.14,-84.88 950.14,-80.8 950.14,-80.8 950.14,-72.64 950.14,-72.64 950.14,-68.56 954.22,-64.48 958.3,-64.48 958.3,-64.48 1016.67,-64.48 1016.67,-64.48 1020.75,-64.48 1024.83,-68.56 1024.83,-72.64 1024.83,-72.64 1024.83,-80.8 1024.83,-80.8 1024.83,-84.88 1020.75,-88.96 1016.67,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="987.48" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">escapeRegex</text>
+</g>
+<!-- replayedTrailerRegex&#45;&gt;escapeRegex -->
+<g id="edge12" class="edge">
+<title>replayedTrailerRegex&#45;&gt;escapeRegex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M942.57,-128.74C950.79,-119.4 962.53,-106.06 971.95,-95.37"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="973.57,-97.23 976.36,-90.36 969.9,-93.99 973.57,-97.23"/>
+</g>
+<!-- targetTrailerRegex -->
+<g id="node11" class="node">
+<title>targetTrailerRegex</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M974.5,-217.92C974.5,-217.92 890.47,-217.92 890.47,-217.92 886.39,-217.92 882.31,-213.84 882.31,-209.76 882.31,-209.76 882.31,-201.6 882.31,-201.6 882.31,-197.52 886.39,-193.44 890.47,-193.44 890.47,-193.44 974.5,-193.44 974.5,-193.44 978.58,-193.44 982.66,-197.52 982.66,-201.6 982.66,-201.6 982.66,-209.76 982.66,-209.76 982.66,-213.84 978.58,-217.92 974.5,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="932.48" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetTrailerRegex</text>
+</g>
+<!-- targetTrailerRegex&#45;&gt;replayedTrailerRegex -->
+<g id="edge13" class="edge">
+<title>targetTrailerRegex&#45;&gt;replayedTrailerRegex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M932.48,-193.22C932.48,-184.5 932.48,-172.29 932.48,-162"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="934.93,-162.25 932.48,-155.25 930.03,-162.25 934.93,-162.25"/>
+</g>
+<!-- hasTrailer -->
+<g id="node12" class="node">
+<title>hasTrailer</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M1065.26,-153.44C1065.26,-153.44 1019.71,-153.44 1019.71,-153.44 1015.63,-153.44 1011.55,-149.36 1011.55,-145.28 1011.55,-145.28 1011.55,-137.12 1011.55,-137.12 1011.55,-133.04 1015.63,-128.96 1019.71,-128.96 1019.71,-128.96 1065.26,-128.96 1065.26,-128.96 1069.34,-128.96 1073.42,-133.04 1073.42,-137.12 1073.42,-137.12 1073.42,-145.28 1073.42,-145.28 1073.42,-149.36 1069.34,-153.44 1065.26,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="1042.48" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">hasTrailer</text>
+</g>
+<!-- hasTrailer&#45;&gt;escapeRegex -->
+<g id="edge14" class="edge">
+<title>hasTrailer&#45;&gt;escapeRegex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M1032.4,-128.74C1024.18,-119.4 1012.44,-106.06 1003.02,-95.37"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="1005.07,-93.99 998.61,-90.36 1001.39,-97.23 1005.07,-93.99"/>
+</g>
+<!-- stripReplayedTrailers -->
+<g id="node13" class="node">
+<title>stripReplayedTrailers</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M1108.61,-217.92C1108.61,-217.92 1012.35,-217.92 1012.35,-217.92 1008.27,-217.92 1004.19,-213.84 1004.19,-209.76 1004.19,-209.76 1004.19,-201.6 1004.19,-201.6 1004.19,-197.52 1008.27,-193.44 1012.35,-193.44 1012.35,-193.44 1108.61,-193.44 1108.61,-193.44 1112.69,-193.44 1116.77,-197.52 1116.77,-201.6 1116.77,-201.6 1116.77,-209.76 1116.77,-209.76 1116.77,-213.84 1112.69,-217.92 1108.61,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="1060.48" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">stripReplayedTrailers</text>
+</g>
+</g>
+</svg>
+<figcaption>Reading and writing the Shadow-replayed trailers that carry the source→target SHA map, plus branch-tip mapping.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-config">
+<figcaption class="cg-title">F · Config, direction &amp; auto-ignore setup</figcaption>
+<svg width="759pt" height="226pt"
+ viewBox="0.00 0.00 759.00 226.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 221.92)">
+<title>cg&#45;config</title>
+<!-- loadConfig -->
+<g id="node1" class="node">
+<title>loadConfig</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M58.61,-217.92C58.61,-217.92 8.16,-217.92 8.16,-217.92 4.08,-217.92 0,-213.84 0,-209.76 0,-209.76 0,-201.6 0,-201.6 0,-197.52 4.08,-193.44 8.16,-193.44 8.16,-193.44 58.61,-193.44 58.61,-193.44 62.69,-193.44 66.77,-197.52 66.77,-201.6 66.77,-201.6 66.77,-209.76 66.77,-209.76 66.77,-213.84 62.69,-217.92 58.61,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="33.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">loadConfig</text>
+</g>
+<!-- validatePair -->
+<g id="node4" class="node">
+<title>validatePair</title>
+<path fill="#ffffff" stroke="#64748b" d="M114.13,-153.44C114.13,-153.44 60.64,-153.44 60.64,-153.44 56.56,-153.44 52.48,-149.36 52.48,-145.28 52.48,-145.28 52.48,-137.12 52.48,-137.12 52.48,-133.04 56.56,-128.96 60.64,-128.96 60.64,-128.96 114.13,-128.96 114.13,-128.96 118.21,-128.96 122.29,-133.04 122.29,-137.12 122.29,-137.12 122.29,-145.28 122.29,-145.28 122.29,-149.36 118.21,-153.44 114.13,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="87.39" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">validatePair</text>
+</g>
+<!-- loadConfig&#45;&gt;validatePair -->
+<g id="edge1" class="edge">
+<title>loadConfig&#45;&gt;validatePair</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M43.8,-192.63C51.74,-183.44 62.82,-170.63 71.81,-160.22"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="73.56,-161.95 76.28,-155.05 69.85,-158.74 73.56,-161.95"/>
+</g>
+<!-- applyTestOverrides -->
+<g id="node2" class="node">
+<title>applyTestOverrides</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M184.24,-217.92C184.24,-217.92 96.53,-217.92 96.53,-217.92 92.45,-217.92 88.37,-213.84 88.37,-209.76 88.37,-209.76 88.37,-201.6 88.37,-201.6 88.37,-197.52 92.45,-193.44 96.53,-193.44 96.53,-193.44 184.24,-193.44 184.24,-193.44 188.32,-193.44 192.4,-197.52 192.4,-201.6 192.4,-201.6 192.4,-209.76 192.4,-209.76 192.4,-213.84 188.32,-217.92 184.24,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="140.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">applyTestOverrides</text>
+</g>
+<!-- applyTestOverrides&#45;&gt;validatePair -->
+<g id="edge2" class="edge">
+<title>applyTestOverrides&#45;&gt;validatePair</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M130.17,-192.63C122.37,-183.44 111.5,-170.63 102.67,-160.22"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="104.69,-158.81 98.29,-155.06 100.95,-161.98 104.69,-158.81"/>
+</g>
+<!-- buildDirectionConfig -->
+<g id="node3" class="node">
+<title>buildDirectionConfig</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M318.22,-217.92C318.22,-217.92 222.55,-217.92 222.55,-217.92 218.47,-217.92 214.39,-213.84 214.39,-209.76 214.39,-209.76 214.39,-201.6 214.39,-201.6 214.39,-197.52 218.47,-193.44 222.55,-193.44 222.55,-193.44 318.22,-193.44 318.22,-193.44 322.3,-193.44 326.38,-197.52 326.38,-201.6 326.38,-201.6 326.38,-209.76 326.38,-209.76 326.38,-213.84 322.3,-217.92 318.22,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="270.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">buildDirectionConfig</text>
+</g>
+<!-- computeAutoIgnorePatterns -->
+<g id="node5" class="node">
+<title>computeAutoIgnorePatterns</title>
+<path fill="#ffffff" stroke="#64748b" d="M332.88,-153.44C332.88,-153.44 207.9,-153.44 207.9,-153.44 203.82,-153.44 199.74,-149.36 199.74,-145.28 199.74,-145.28 199.74,-137.12 199.74,-137.12 199.74,-133.04 203.82,-128.96 207.9,-128.96 207.9,-128.96 332.88,-128.96 332.88,-128.96 336.96,-128.96 341.04,-133.04 341.04,-137.12 341.04,-137.12 341.04,-145.28 341.04,-145.28 341.04,-149.36 336.96,-153.44 332.88,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="270.39" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">computeAutoIgnorePatterns</text>
+</g>
+<!-- buildDirectionConfig&#45;&gt;computeAutoIgnorePatterns -->
+<g id="edge4" class="edge">
+<title>buildDirectionConfig&#45;&gt;computeAutoIgnorePatterns</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M270.39,-192.63C270.39,-184.05 270.39,-172.32 270.39,-162.33"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="272.84,-162.45 270.39,-155.45 267.94,-162.45 272.84,-162.45"/>
+</g>
+<!-- fail -->
+<g id="node12" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M106.23,-88.96C106.23,-88.96 68.55,-88.96 68.55,-88.96 64.47,-88.96 60.39,-84.88 60.39,-80.8 60.39,-80.8 60.39,-72.64 60.39,-72.64 60.39,-68.56 64.47,-64.48 68.55,-64.48 68.55,-64.48 106.23,-64.48 106.23,-64.48 110.31,-64.48 114.39,-68.56 114.39,-72.64 114.39,-72.64 114.39,-80.8 114.39,-80.8 114.39,-84.88 110.31,-88.96 106.23,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="87.39" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- validatePair&#45;&gt;fail -->
+<g id="edge3" class="edge">
+<title>validatePair&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M87.39,-128.74C87.39,-120.02 87.39,-107.81 87.39,-97.52"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="89.84,-97.77 87.39,-90.77 84.94,-97.77 89.84,-97.77"/>
+</g>
+<!-- nestedRelativeIgnorePatterns -->
+<g id="node6" class="node">
+<title>nestedRelativeIgnorePatterns</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M335.32,-88.96C335.32,-88.96 205.46,-88.96 205.46,-88.96 201.38,-88.96 197.3,-84.88 197.3,-80.8 197.3,-80.8 197.3,-72.64 197.3,-72.64 197.3,-68.56 201.38,-64.48 205.46,-64.48 205.46,-64.48 335.32,-64.48 335.32,-64.48 339.4,-64.48 343.48,-68.56 343.48,-72.64 343.48,-72.64 343.48,-80.8 343.48,-80.8 343.48,-84.88 339.4,-88.96 335.32,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="270.39" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">nestedRelativeIgnorePatterns</text>
+</g>
+<!-- computeAutoIgnorePatterns&#45;&gt;nestedRelativeIgnorePatterns -->
+<g id="edge5" class="edge">
+<title>computeAutoIgnorePatterns&#45;&gt;nestedRelativeIgnorePatterns</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M270.39,-128.74C270.39,-120.02 270.39,-107.81 270.39,-97.52"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="272.84,-97.77 270.39,-90.77 267.94,-97.77 272.84,-97.77"/>
+</g>
+<!-- escapeRegex -->
+<g id="node7" class="node">
+<title>escapeRegex</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M299.57,-24.48C299.57,-24.48 241.2,-24.48 241.2,-24.48 237.12,-24.48 233.04,-20.4 233.04,-16.32 233.04,-16.32 233.04,-8.16 233.04,-8.16 233.04,-4.08 237.12,0 241.2,0 241.2,0 299.57,0 299.57,0 303.65,0 307.73,-4.08 307.73,-8.16 307.73,-8.16 307.73,-16.32 307.73,-16.32 307.73,-20.4 303.65,-24.48 299.57,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="270.39" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">escapeRegex</text>
+</g>
+<!-- nestedRelativeIgnorePatterns&#45;&gt;escapeRegex -->
+<g id="edge6" class="edge">
+<title>nestedRelativeIgnorePatterns&#45;&gt;escapeRegex</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M270.39,-64.26C270.39,-55.54 270.39,-43.33 270.39,-33.04"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="272.84,-33.29 270.39,-26.29 267.94,-33.29 272.84,-33.29"/>
+</g>
+<!-- sourceDirsOf -->
+<g id="node8" class="node">
+<title>sourceDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M416.5,-217.92C416.5,-217.92 356.28,-217.92 356.28,-217.92 352.2,-217.92 348.12,-213.84 348.12,-209.76 348.12,-209.76 348.12,-201.6 348.12,-201.6 348.12,-197.52 352.2,-193.44 356.28,-193.44 356.28,-193.44 416.5,-193.44 416.5,-193.44 420.58,-193.44 424.66,-197.52 424.66,-201.6 424.66,-201.6 424.66,-209.76 424.66,-209.76 424.66,-213.84 420.58,-217.92 416.5,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="386.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">sourceDirsOf</text>
+</g>
+<!-- targetDirsOf -->
+<g id="node9" class="node">
+<title>targetDirsOf</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M511.66,-217.92C511.66,-217.92 455.11,-217.92 455.11,-217.92 451.03,-217.92 446.95,-213.84 446.95,-209.76 446.95,-209.76 446.95,-201.6 446.95,-201.6 446.95,-197.52 451.03,-193.44 455.11,-193.44 455.11,-193.44 511.66,-193.44 511.66,-193.44 515.74,-193.44 519.82,-197.52 519.82,-201.6 519.82,-201.6 519.82,-209.76 519.82,-209.76 519.82,-213.84 515.74,-217.92 511.66,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="483.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">targetDirsOf</text>
+</g>
+<!-- anyRootSource -->
+<g id="node10" class="node">
+<title>anyRootSource</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M618.78,-217.92C618.78,-217.92 550,-217.92 550,-217.92 545.92,-217.92 541.84,-213.84 541.84,-209.76 541.84,-209.76 541.84,-201.6 541.84,-201.6 541.84,-197.52 545.92,-193.44 550,-193.44 550,-193.44 618.78,-193.44 618.78,-193.44 622.86,-193.44 626.94,-197.52 626.94,-201.6 626.94,-201.6 626.94,-209.76 626.94,-209.76 626.94,-213.84 622.86,-217.92 618.78,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="584.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">anyRootSource</text>
+</g>
+<!-- allTargetsConfined -->
+<g id="node11" class="node">
+<title>allTargetsConfined</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M743.33,-217.92C743.33,-217.92 657.45,-217.92 657.45,-217.92 653.37,-217.92 649.29,-213.84 649.29,-209.76 649.29,-209.76 649.29,-201.6 649.29,-201.6 649.29,-197.52 653.37,-193.44 657.45,-193.44 657.45,-193.44 743.33,-193.44 743.33,-193.44 747.41,-193.44 751.49,-197.52 751.49,-201.6 751.49,-201.6 751.49,-209.76 751.49,-209.76 751.49,-213.84 747.41,-217.92 743.33,-217.92"/>
+<text xml:space="preserve" text-anchor="middle" x="700.39" y="-202.38" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">allTargetsConfined</text>
+</g>
+</g>
+</svg>
+<figcaption>Loading config, validating pairs, and deriving the per-direction config with intra-pair nested-mapping auto-ignore patterns.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-ignore">
+<figcaption class="cg-title">G · .shadowignore &amp; branch-filter compilation</figcaption>
+<svg width="499pt" height="161pt"
+ viewBox="0.00 0.00 499.00 161.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 157.44)">
+<title>cg&#45;ignore</title>
+<!-- readShadowIgnorePatterns -->
+<g id="node1" class="node">
+<title>readShadowIgnorePatterns</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M171.25,-153.44C171.25,-153.44 51.77,-153.44 51.77,-153.44 47.69,-153.44 43.61,-149.36 43.61,-145.28 43.61,-145.28 43.61,-137.12 43.61,-137.12 43.61,-133.04 47.69,-128.96 51.77,-128.96 51.77,-128.96 171.25,-128.96 171.25,-128.96 175.33,-128.96 179.41,-133.04 179.41,-137.12 179.41,-137.12 179.41,-145.28 179.41,-145.28 179.41,-149.36 175.33,-153.44 171.25,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="111.51" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">readShadowIgnorePatterns</text>
+</g>
+<!-- compileShadowIgnoreLine -->
+<g id="node5" class="node">
+<title>compileShadowIgnoreLine</title>
+<path fill="#ffffff" stroke="#64748b" d="M128.86,-88.96C128.86,-88.96 8.16,-88.96 8.16,-88.96 4.08,-88.96 0,-84.88 0,-80.8 0,-80.8 0,-72.64 0,-72.64 0,-68.56 4.08,-64.48 8.16,-64.48 8.16,-64.48 128.86,-64.48 128.86,-64.48 132.94,-64.48 137.02,-68.56 137.02,-72.64 137.02,-72.64 137.02,-80.8 137.02,-80.8 137.02,-84.88 132.94,-88.96 128.86,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="68.51" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">compileShadowIgnoreLine</text>
+</g>
+<!-- readShadowIgnorePatterns&#45;&gt;compileShadowIgnoreLine -->
+<g id="edge1" class="edge">
+<title>readShadowIgnorePatterns&#45;&gt;compileShadowIgnoreLine</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M103.22,-128.15C97.02,-119.14 88.41,-106.64 81.32,-96.34"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="83.42,-95.06 77.43,-90.68 79.38,-97.83 83.42,-95.06"/>
+</g>
+<!-- git -->
+<g id="node7" class="node">
+<title>git</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M205.35,-88.96C205.35,-88.96 167.67,-88.96 167.67,-88.96 163.59,-88.96 159.51,-84.88 159.51,-80.8 159.51,-80.8 159.51,-72.64 159.51,-72.64 159.51,-68.56 163.59,-64.48 167.67,-64.48 167.67,-64.48 205.35,-64.48 205.35,-64.48 209.43,-64.48 213.51,-68.56 213.51,-72.64 213.51,-72.64 213.51,-80.8 213.51,-80.8 213.51,-84.88 209.43,-88.96 205.35,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="186.51" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">git</text>
+</g>
+<!-- readShadowIgnorePatterns&#45;&gt;git -->
+<g id="edge2" class="edge">
+<title>readShadowIgnorePatterns&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M125.97,-128.15C137.32,-118.7 153.27,-105.41 165.95,-94.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="167.51,-96.74 171.32,-90.37 164.38,-92.97 167.51,-96.74"/>
+</g>
+<!-- compileIgnorePattern -->
+<g id="node2" class="node">
+<title>compileIgnorePattern</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M339.64,-88.96C339.64,-88.96 243.38,-88.96 243.38,-88.96 239.3,-88.96 235.22,-84.88 235.22,-80.8 235.22,-80.8 235.22,-72.64 235.22,-72.64 235.22,-68.56 239.3,-64.48 243.38,-64.48 243.38,-64.48 339.64,-64.48 339.64,-64.48 343.72,-64.48 347.8,-68.56 347.8,-72.64 347.8,-72.64 347.8,-80.8 347.8,-80.8 347.8,-84.88 343.72,-88.96 339.64,-88.96"/>
+<text xml:space="preserve" text-anchor="middle" x="291.51" y="-73.42" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">compileIgnorePattern</text>
+</g>
+<!-- globToRegexSource -->
+<g id="node6" class="node">
+<title>globToRegexSource</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M225.2,-24.48C225.2,-24.48 133.82,-24.48 133.82,-24.48 129.74,-24.48 125.66,-20.4 125.66,-16.32 125.66,-16.32 125.66,-8.16 125.66,-8.16 125.66,-4.08 129.74,0 133.82,0 133.82,0 225.2,0 225.2,0 229.28,0 233.36,-4.08 233.36,-8.16 233.36,-8.16 233.36,-16.32 233.36,-16.32 233.36,-20.4 229.28,-24.48 225.2,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="179.51" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">globToRegexSource</text>
+</g>
+<!-- compileIgnorePattern&#45;&gt;globToRegexSource -->
+<g id="edge4" class="edge">
+<title>compileIgnorePattern&#45;&gt;globToRegexSource</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M269.65,-63.52C251.89,-53.62 226.73,-39.58 207.5,-28.85"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="208.94,-26.85 201.64,-25.58 206.56,-31.13 208.94,-26.85"/>
+</g>
+<!-- loadBranchFilters -->
+<g id="node3" class="node">
+<title>loadBranchFilters</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M331.4,-153.44C331.4,-153.44 251.62,-153.44 251.62,-153.44 247.54,-153.44 243.46,-149.36 243.46,-145.28 243.46,-145.28 243.46,-137.12 243.46,-137.12 243.46,-133.04 247.54,-128.96 251.62,-128.96 251.62,-128.96 331.4,-128.96 331.4,-128.96 335.48,-128.96 339.56,-133.04 339.56,-137.12 339.56,-137.12 339.56,-145.28 339.56,-145.28 339.56,-149.36 335.48,-153.44 331.4,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="291.51" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">loadBranchFilters</text>
+</g>
+<!-- loadBranchFilters&#45;&gt;compileIgnorePattern -->
+<g id="edge5" class="edge">
+<title>loadBranchFilters&#45;&gt;compileIgnorePattern</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M291.51,-128.15C291.51,-119.68 291.51,-108.14 291.51,-98.23"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="293.96,-98.39 291.51,-91.39 289.06,-98.39 293.96,-98.39"/>
+</g>
+<!-- filterBranchesForRemote -->
+<g id="node4" class="node">
+<title>filterBranchesForRemote</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M482.89,-153.44C482.89,-153.44 370.13,-153.44 370.13,-153.44 366.05,-153.44 361.97,-149.36 361.97,-145.28 361.97,-145.28 361.97,-137.12 361.97,-137.12 361.97,-133.04 366.05,-128.96 370.13,-128.96 370.13,-128.96 482.89,-128.96 482.89,-128.96 486.97,-128.96 491.05,-133.04 491.05,-137.12 491.05,-137.12 491.05,-145.28 491.05,-145.28 491.05,-149.36 486.97,-153.44 482.89,-153.44"/>
+<text xml:space="preserve" text-anchor="middle" x="426.51" y="-137.9" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterBranchesForRemote</text>
+</g>
+<!-- compileShadowIgnoreLine&#45;&gt;globToRegexSource -->
+<g id="edge3" class="edge">
+<title>compileShadowIgnoreLine&#45;&gt;globToRegexSource</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M89.13,-64.11C106.73,-54.21 132.2,-39.87 151.62,-28.94"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="152.65,-31.17 157.55,-25.6 150.25,-26.9 152.65,-31.17"/>
+</g>
+</g>
+</svg>
+<figcaption>Reading .shadowignore files at a commit snapshot and compiling gitignore-style globs into anchored regexes; the same glob compiler backs branch filters.</figcaption>
+</figure>
+<figure class="flow-figure callgraph" id="cg-primitives">
+<figcaption class="cg-title">H · Primitives, preflight &amp; tag sync</figcaption>
+<svg width="390pt" height="492pt"
+ viewBox="0.00 0.00 390.00 492.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 488.48)">
+<title>cg&#45;primitives</title>
+<!-- git -->
+<g id="node1" class="node">
+<title>git</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M234.43,-231.48C234.43,-231.48 196.75,-231.48 196.75,-231.48 192.67,-231.48 188.59,-227.4 188.59,-223.32 188.59,-223.32 188.59,-215.16 188.59,-215.16 188.59,-211.08 192.67,-207 196.75,-207 196.75,-207 234.43,-207 234.43,-207 238.51,-207 242.59,-211.08 242.59,-215.16 242.59,-215.16 242.59,-223.32 242.59,-223.32 242.59,-227.4 238.51,-231.48 234.43,-231.48"/>
+<text xml:space="preserve" text-anchor="middle" x="215.59" y="-215.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">git</text>
+</g>
+<!-- spawnSync -->
+<g id="node14" class="node">
+<title>spawnSync</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M373.56,-231.48C373.56,-231.48 322.49,-231.48 322.49,-231.48 318.41,-231.48 314.33,-227.4 314.33,-223.32 314.33,-223.32 314.33,-215.16 314.33,-215.16 314.33,-211.08 318.41,-207 322.49,-207 322.49,-207 373.56,-207 373.56,-207 377.64,-207 381.72,-211.08 381.72,-215.16 381.72,-215.16 381.72,-223.32 381.72,-223.32 381.72,-227.4 377.64,-231.48 373.56,-231.48"/>
+<text xml:space="preserve" text-anchor="middle" x="348.03" y="-215.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">spawnSync</text>
+</g>
+<!-- git&#45;&gt;spawnSync -->
+<g id="edge1" class="edge">
+<title>git&#45;&gt;spawnSync</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M243.3,-219.24C261.17,-219.24 285.05,-219.24 305.39,-219.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="305.2,-221.69 312.2,-219.24 305.2,-216.79 305.2,-221.69"/>
+</g>
+<!-- syncTags -->
+<g id="node2" class="node">
+<title>syncTags</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M79.67,-438.48C79.67,-438.48 37.17,-438.48 37.17,-438.48 33.09,-438.48 29.01,-434.4 29.01,-430.32 29.01,-430.32 29.01,-422.16 29.01,-422.16 29.01,-418.08 33.09,-414 37.17,-414 37.17,-414 79.67,-414 79.67,-414 83.75,-414 87.83,-418.08 87.83,-422.16 87.83,-422.16 87.83,-430.32 87.83,-430.32 87.83,-434.4 83.75,-438.48 79.67,-438.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-422.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">syncTags</text>
+</g>
+<!-- syncTags&#45;&gt;git -->
+<g id="edge13" class="edge">
+<title>syncTags&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M88.8,-418.91C98.55,-415.39 108.93,-410.34 116.84,-403.24 167.92,-357.37 196.99,-278.39 208.6,-240.6"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="210.94,-241.34 210.59,-233.93 206.24,-239.94 210.94,-241.34"/>
+</g>
+<!-- runPreflightChecks -->
+<g id="node3" class="node">
+<title>runPreflightChecks</title>
+<path fill="#dbeafe" stroke="#2563eb" stroke-width="2" d="M101.67,-392.48C101.67,-392.48 15.17,-392.48 15.17,-392.48 11.09,-392.48 7.01,-388.4 7.01,-384.32 7.01,-384.32 7.01,-376.16 7.01,-376.16 7.01,-372.08 11.09,-368 15.17,-368 15.17,-368 101.67,-368 101.67,-368 105.75,-368 109.83,-372.08 109.83,-376.16 109.83,-376.16 109.83,-384.32 109.83,-384.32 109.83,-388.4 105.75,-392.48 101.67,-392.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-376.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">runPreflightChecks</text>
+</g>
+<!-- runPreflightChecks&#45;&gt;git -->
+<g id="edge11" class="edge">
+<title>runPreflightChecks&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M100.86,-367.02C106.52,-364.27 112.04,-361.03 116.84,-357.24 158.36,-324.5 189.83,-269.54 204.85,-239.82"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="207,-241 207.9,-233.64 202.61,-238.83 207,-241"/>
+</g>
+<!-- refExists -->
+<g id="node4" class="node">
+<title>refExists</title>
+<path fill="#ffffff" stroke="#64748b" d="M78.45,-346.48C78.45,-346.48 38.39,-346.48 38.39,-346.48 34.31,-346.48 30.23,-342.4 30.23,-338.32 30.23,-338.32 30.23,-330.16 30.23,-330.16 30.23,-326.08 34.31,-322 38.39,-322 38.39,-322 78.45,-322 78.45,-322 82.53,-322 86.61,-326.08 86.61,-330.16 86.61,-330.16 86.61,-338.32 86.61,-338.32 86.61,-342.4 82.53,-346.48 78.45,-346.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-330.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">refExists</text>
+</g>
+<!-- refExists&#45;&gt;git -->
+<g id="edge2" class="edge">
+<title>refExists&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M87.03,-325.57C96.83,-321.89 107.7,-317.08 116.84,-311.24 148.79,-290.85 179.59,-259.24 197.81,-238.9"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="199.59,-240.58 202.39,-233.71 195.92,-237.33 199.59,-240.58"/>
+</g>
+<!-- ensureRemote -->
+<g id="node5" class="node">
+<title>ensureRemote</title>
+<path fill="#ffffff" stroke="#64748b" d="M90.36,-300.48C90.36,-300.48 26.48,-300.48 26.48,-300.48 22.4,-300.48 18.32,-296.4 18.32,-292.32 18.32,-292.32 18.32,-284.16 18.32,-284.16 18.32,-280.08 22.4,-276 26.48,-276 26.48,-276 90.36,-276 90.36,-276 94.44,-276 98.52,-280.08 98.52,-284.16 98.52,-284.16 98.52,-292.32 98.52,-292.32 98.52,-296.4 94.44,-300.48 90.36,-300.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-284.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">ensureRemote</text>
+</g>
+<!-- ensureRemote&#45;&gt;git -->
+<g id="edge3" class="edge">
+<title>ensureRemote&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M92.05,-275.56C100.19,-272.29 108.87,-268.71 116.84,-265.24 138.06,-256.01 161.53,-244.99 180.15,-236.05"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="181.07,-238.33 186.32,-233.08 178.95,-233.91 181.07,-238.33"/>
+</g>
+<!-- listRemoteBranches -->
+<g id="node6" class="node">
+<title>listRemoteBranches</title>
+<path fill="#ffffff" stroke="#64748b" d="M103.2,-254.48C103.2,-254.48 13.65,-254.48 13.65,-254.48 9.57,-254.48 5.49,-250.4 5.49,-246.32 5.49,-246.32 5.49,-238.16 5.49,-238.16 5.49,-234.08 9.57,-230 13.65,-230 13.65,-230 103.2,-230 103.2,-230 107.28,-230 111.36,-234.08 111.36,-238.16 111.36,-238.16 111.36,-246.32 111.36,-246.32 111.36,-250.4 107.28,-254.48 103.2,-254.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-238.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">listRemoteBranches</text>
+</g>
+<!-- listRemoteBranches&#45;&gt;git -->
+<g id="edge4" class="edge">
+<title>listRemoteBranches&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M111.52,-234.52C133.76,-231.22 159.15,-227.46 179.16,-224.49"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="179.45,-226.93 186.01,-223.48 178.73,-222.08 179.45,-226.93"/>
+</g>
+<!-- filterExistingRefs -->
+<g id="node7" class="node">
+<title>filterExistingRefs</title>
+<path fill="#ffffff" stroke="#64748b" d="M98.01,-208.48C98.01,-208.48 18.84,-208.48 18.84,-208.48 14.76,-208.48 10.68,-204.4 10.68,-200.32 10.68,-200.32 10.68,-192.16 10.68,-192.16 10.68,-188.08 14.76,-184 18.84,-184 18.84,-184 98.01,-184 98.01,-184 102.09,-184 106.17,-188.08 106.17,-192.16 106.17,-192.16 106.17,-200.32 106.17,-200.32 106.17,-204.4 102.09,-208.48 98.01,-208.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-192.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">filterExistingRefs</text>
+</g>
+<!-- filterExistingRefs&#45;&gt;git -->
+<g id="edge5" class="edge">
+<title>filterExistingRefs&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M106.4,-203.2C129.76,-206.67 157.53,-210.78 179.09,-213.98"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="178.69,-216.4 185.97,-215 179.41,-211.55 178.69,-216.4"/>
+</g>
+<!-- getCommitMeta -->
+<g id="node8" class="node">
+<title>getCommitMeta</title>
+<path fill="#ffffff" stroke="#64748b" d="M94.95,-162.48C94.95,-162.48 21.89,-162.48 21.89,-162.48 17.81,-162.48 13.73,-158.4 13.73,-154.32 13.73,-154.32 13.73,-146.16 13.73,-146.16 13.73,-142.08 17.81,-138 21.89,-138 21.89,-138 94.95,-138 94.95,-138 99.03,-138 103.11,-142.08 103.11,-146.16 103.11,-146.16 103.11,-154.32 103.11,-154.32 103.11,-158.4 99.03,-162.48 94.95,-162.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-146.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">getCommitMeta</text>
+</g>
+<!-- getCommitMeta&#45;&gt;git -->
+<g id="edge6" class="edge">
+<title>getCommitMeta&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M92.05,-162.92C100.19,-166.19 108.87,-169.77 116.84,-173.24 138.06,-182.47 161.53,-193.49 180.15,-202.43"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="178.95,-204.57 186.32,-205.4 181.07,-200.15 178.95,-204.57"/>
+</g>
+<!-- fetchTrueParents -->
+<g id="node9" class="node">
+<title>fetchTrueParents</title>
+<path fill="#ffffff" stroke="#64748b" d="M96.47,-24.48C96.47,-24.48 20.38,-24.48 20.38,-24.48 16.3,-24.48 12.22,-20.4 12.22,-16.32 12.22,-16.32 12.22,-8.16 12.22,-8.16 12.22,-4.08 16.3,0 20.38,0 20.38,0 96.47,0 96.47,0 100.55,0 104.63,-4.08 104.63,-8.16 104.63,-8.16 104.63,-16.32 104.63,-16.32 104.63,-20.4 100.55,-24.48 96.47,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">fetchTrueParents</text>
+</g>
+<!-- fetchTrueParents&#45;&gt;git -->
+<g id="edge7" class="edge">
+<title>fetchTrueParents&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M101.32,-24.91C106.92,-27.74 112.29,-31.15 116.84,-35.24 167.92,-81.11 196.99,-160.09 208.6,-197.88"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="206.24,-198.54 210.59,-204.55 210.94,-197.14 206.24,-198.54"/>
+</g>
+<!-- fail -->
+<g id="node15" class="node">
+<title>fail</title>
+<path fill="#f1f5f9" stroke="#94a3b8" d="M234.43,-24.48C234.43,-24.48 196.75,-24.48 196.75,-24.48 192.67,-24.48 188.59,-20.4 188.59,-16.32 188.59,-16.32 188.59,-8.16 188.59,-8.16 188.59,-4.08 192.67,0 196.75,0 196.75,0 234.43,0 234.43,0 238.51,0 242.59,-4.08 242.59,-8.16 242.59,-8.16 242.59,-16.32 242.59,-16.32 242.59,-20.4 238.51,-24.48 234.43,-24.48"/>
+<text xml:space="preserve" text-anchor="middle" x="215.59" y="-8.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00" fill="#475569">fail</text>
+</g>
+<!-- fetchTrueParents&#45;&gt;fail -->
+<g id="edge8" class="edge">
+<title>fetchTrueParents&#45;&gt;fail</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M104.72,-12.24C128.73,-12.24 157.75,-12.24 179.94,-12.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="179.72,-14.69 186.72,-12.24 179.72,-9.79 179.72,-14.69"/>
+</g>
+<!-- appendTrailer -->
+<g id="node10" class="node">
+<title>appendTrailer</title>
+<path fill="#ffffff" stroke="#64748b" d="M89.75,-116.48C89.75,-116.48 27.1,-116.48 27.1,-116.48 23.02,-116.48 18.94,-112.4 18.94,-108.32 18.94,-108.32 18.94,-100.16 18.94,-100.16 18.94,-96.08 23.02,-92 27.1,-92 27.1,-92 89.75,-92 89.75,-92 93.83,-92 97.91,-96.08 97.91,-100.16 97.91,-100.16 97.91,-108.32 97.91,-108.32 97.91,-112.4 93.83,-116.48 89.75,-116.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-100.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">appendTrailer</text>
+</g>
+<!-- appendTrailer&#45;&gt;git -->
+<g id="edge9" class="edge">
+<title>appendTrailer&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M96.88,-116.88C103.75,-119.85 110.69,-123.31 116.84,-127.24 148.79,-147.63 179.59,-179.24 197.81,-199.58"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="195.92,-201.15 202.39,-204.77 199.59,-197.9 195.92,-201.15"/>
+</g>
+<!-- extractTrailerMapping -->
+<g id="node11" class="node">
+<title>extractTrailerMapping</title>
+<path fill="#ffffff" stroke="#64748b" d="M108.68,-70.48C108.68,-70.48 8.16,-70.48 8.16,-70.48 4.08,-70.48 0,-66.4 0,-62.32 0,-62.32 0,-54.16 0,-54.16 0,-50.08 4.08,-46 8.16,-46 8.16,-46 108.68,-46 108.68,-46 112.76,-46 116.84,-50.08 116.84,-54.16 116.84,-54.16 116.84,-62.32 116.84,-62.32 116.84,-66.4 112.76,-70.48 108.68,-70.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-54.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">extractTrailerMapping</text>
+</g>
+<!-- extractTrailerMapping&#45;&gt;git -->
+<g id="edge10" class="edge">
+<title>extractTrailerMapping&#45;&gt;git</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M99.66,-70.88C105.75,-73.75 111.7,-77.18 116.84,-81.24 158.36,-113.98 189.83,-168.94 204.85,-198.66"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="202.61,-199.65 207.9,-204.84 207,-197.48 202.61,-199.65"/>
+</g>
+<!-- printPreflightResults -->
+<g id="node12" class="node">
+<title>printPreflightResults</title>
+<path fill="#ffffff" stroke="#64748b" d="M104.73,-484.48C104.73,-484.48 12.11,-484.48 12.11,-484.48 8.03,-484.48 3.95,-480.4 3.95,-476.32 3.95,-476.32 3.95,-468.16 3.95,-468.16 3.95,-464.08 8.03,-460 12.11,-460 12.11,-460 104.73,-460 104.73,-460 108.81,-460 112.89,-464.08 112.89,-468.16 112.89,-468.16 112.89,-476.32 112.89,-476.32 112.89,-480.4 108.81,-484.48 104.73,-484.48"/>
+<text xml:space="preserve" text-anchor="middle" x="58.42" y="-468.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">printPreflightResults</text>
+</g>
+<!-- formatPreflightResults -->
+<g id="node13" class="node">
+<title>formatPreflightResults</title>
+<path fill="#f3e8ff" stroke="#7c3aed" d="M266.17,-484.48C266.17,-484.48 165,-484.48 165,-484.48 160.92,-484.48 156.84,-480.4 156.84,-476.32 156.84,-476.32 156.84,-468.16 156.84,-468.16 156.84,-464.08 160.92,-460 165,-460 165,-460 266.17,-460 266.17,-460 270.25,-460 274.33,-464.08 274.33,-468.16 274.33,-468.16 274.33,-476.32 274.33,-476.32 274.33,-480.4 270.25,-484.48 266.17,-484.48"/>
+<text xml:space="preserve" text-anchor="middle" x="215.59" y="-468.94" font-family="Cascadia Code, Consolas, monospace" font-size="11.00">formatPreflightResults</text>
+</g>
+<!-- printPreflightResults&#45;&gt;formatPreflightResults -->
+<g id="edge12" class="edge">
+<title>printPreflightResults&#45;&gt;formatPreflightResults</title>
+<path fill="none" stroke="#94a3b8" stroke-width="1.1" d="M113.26,-472.24C124.46,-472.24 136.39,-472.24 147.98,-472.24"/>
+<polygon fill="#94a3b8" stroke="#94a3b8" stroke-width="1.1" points="147.69,-474.69 154.69,-472.24 147.69,-469.79 147.69,-474.69"/>
+</g>
+</g>
+</svg>
+<figcaption>The shared git wrapper every command funnels through, the no-throw probes built on it, preflight checks, and tag synchronization.</figcaption>
+</figure>
 
 </body>
 </html>
