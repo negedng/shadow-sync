@@ -16,7 +16,7 @@
  *   hotfix     — be-only bug fix with asymmetric drop (kept on backend, dropped on frontend)
  *   hotfix-roundtrip — operator chases the no-op merge chain on the frontend side
  *   halt-recovery   — divergent merge halts the engine; operator-driven recovery via
- *                     Shadow-replayed-* trailer; squash absorbs Bm + Bn1 + R_be
+ *                     Shadow-replayed-* trailer; squash absorbs Bm + Bn1 + Brec
  *
  * Companion files cover the same engine paths in narrower shapes:
  *   test-halt-recovery-variants.ts — 8 single-pair halt-recovery edge cases
@@ -1109,8 +1109,8 @@ async function runScenario(): Promise<void> {
     // → Bm. --from b HALTS because the engine can't auto-resolve outer when
     // composing Bm's projected merge base. Operator mirrors the merge on mono with
     // byte-identical inner resolution → Mm. After --from a + backend merging the
-    // new shadow tip → R_be, --from b succeeds and produces a squash replay
-    // carrying BOTH Bm and R_be trailers (multi-trailer encoding).
+    // new shadow tip → Brec, --from b succeeds and produces a squash replay
+    // (Brec'_mono) carrying BOTH Bm and Brec trailers (multi-trailer encoding).
     git("checkout main", mono.working);
     git("checkout -b feature/conflict-a main", mono.working);
     allow("origin", "feature/conflict-a");
@@ -1140,12 +1140,12 @@ async function runScenario(): Promise<void> {
     git("checkout main", backend.working);
     git("checkout -b feature/conflict-a main", backend.working);
     allow("backend", "feature/conflict-a");
-    mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "Bca");
+    const Bca = mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "Bca");
     git("push origin feature/conflict-a", backend.working);
 
     git("checkout -b feature/conflict-b main", backend.working);
     allow("backend", "feature/conflict-b");
-    mergeRef(backend, "origin/shadow/backend/feature/conflict-b", "Bcb");
+    const Bcb = mergeRef(backend, "origin/shadow/backend/feature/conflict-b", "Bcb");
     git("push origin feature/conflict-b", backend.working);
 
     // Backend merges conflict-b into conflict-a — conflict on src/conflict.txt, resolved manually.
@@ -1199,33 +1199,50 @@ async function runScenario(): Promise<void> {
       assertEqual(r.exitCode, 0, `[halt-recovery] --from a after Mm: ${r.stderr.slice(0, 300)}`);
     }
 
-    // Backend dev merges the new shadow tip into feature/conflict-a → R_be.
+    // Backend dev merges the new shadow tip into feature/conflict-a → Brec.
     git("fetch origin", backend.working);
     git("checkout feature/conflict-a", backend.working);
-    const R_be = mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "R_be");
+    const Brec = mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "Brec");
     git("push origin feature/conflict-a", backend.working);
 
-    // --from b succeeds: engine emits a squash replay carrying both Bm + R_be trailers.
+    // --from b succeeds: engine emits a squash replay carrying both Bm + Brec trailers.
     {
       const r = runSync({ from: "b" });
       assertEqual(r.exitCode, 0, `[halt-recovery] --from b post-recovery: ${r.stderr.slice(0, 400)}`);
     }
 
-    // Verify the squash on mono's shadow ref encodes both the halted-Bm and the
-    // recovery R_be trailers, and carries the operator's resolution content.
+    // Verify the squash (Brec'_mono) on mono's shadow ref encodes both the
+    // halted-Bm and the recovery Brec trailers, and carries the operator's resolution.
     git("fetch origin", mono.working);
-    const sq = git("rev-parse origin/shadow/backend/feature/conflict-a", mono.working);
-    const sqMsg = execSync(`git log -1 --format=%B ${sq}`, {
+    const Brec_mono = git("rev-parse origin/shadow/backend/feature/conflict-a", mono.working);
+    const Brec_monoMsg = execSync(`git log -1 --format=%B ${Brec_mono}`, {
       cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
     });
-    if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${Bm}`)) {
-      throw new Error(`[halt-recovery] squash missing absorbed-Bm trailer for ${Bm}\nmsg:\n${sqMsg.slice(0, 800)}`);
+    // ── Verified parent topology on mono's shadow ref ────────────────────
+    // Both Bca and Bcb DO get replayed as standalone synthetics before the halt
+    // (their projection differs from Bc5's: each adds backend/src/conflict.txt).
+    // Each Bca'_mono/Bcb'_mono is a 2-parent merge: [Bc5'_mono, Mca|Mcb] via the
+    // echo-mapping on Mca'_be/Mcb'_be. The squash tip Brec'_mono is an OCTOPUS
+    // (3-parent): [Bca'_mono, Bcb'_mono, Mm]  where Mm is the mono operator's
+    // actual merge (Mm is NOT replayed onto the shadow ref — it's directly
+    // referenced as the 3rd parent so its tree carries the operator's
+    // outer + inner resolutions).
+    const Bc5_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc5, "Bc5'_mono");
+    const Bca_mono = findReplayOrFail(mono, "origin/shadow/backend/feature/conflict-a", "backend", Bca, "Bca'_mono");
+    const Bcb_mono = findReplayOrFail(mono, "origin/shadow/backend/feature/conflict-b", "backend", Bcb, "Bcb'_mono");
+    assertParents(mono, Bca_mono, [Bc5_mono, Mca], "[halt-recovery] Bca'_mono = merge(Bc5'_mono, Mca)");
+    assertParents(mono, Bcb_mono, [Bc5_mono, Mcb], "[halt-recovery] Bcb'_mono = merge(Bc5'_mono, Mcb)");
+    assertParents(mono, Brec_mono, [Bca_mono, Bcb_mono, Mm],
+      "[halt-recovery] Brec'_mono = octopus(Bca'_mono, Bcb'_mono, Mm) — multi-trailer squash");
+
+    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Bm}`)) {
+      throw new Error(`[halt-recovery] squash missing absorbed-Bm trailer for ${Bm}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
-    if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${Bn1}`)) {
-      throw new Error(`[halt-recovery] squash missing absorbed-Bn1 trailer for ${Bn1}\nmsg:\n${sqMsg.slice(0, 800)}`);
+    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Bn1}`)) {
+      throw new Error(`[halt-recovery] squash missing absorbed-Bn1 trailer for ${Bn1}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
-    if (!sqMsg.includes(`Shadow-replayed-backend-backend: ${R_be}`)) {
-      throw new Error(`[halt-recovery] squash missing R_be trailer for ${R_be}\nmsg:\n${sqMsg.slice(0, 800)}`);
+    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Brec}`)) {
+      throw new Error(`[halt-recovery] squash missing Brec trailer for ${Brec}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
     assertContent(mono, "origin/shadow/backend/feature/conflict-a", "backend/src/conflict.txt", "value a + value b\n",
       "[halt-recovery] squash carries the agreed inner resolution");
@@ -1236,7 +1253,11 @@ async function runScenario(): Promise<void> {
 
   } finally {
     setBranchFiltersForTesting(null);
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (process.env.SKIP_CLEANUP) {
+      console.log(`SKIP_CLEANUP: tmpDir retained at ${tmpDir}`);
+    } else {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   }
 }
 
