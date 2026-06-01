@@ -1083,6 +1083,12 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
  *  mappings (nested under this one's source/target dir) don't bleed into this
  *  mapping's spliced region — the sibling's own splice covers them at the
  *  correct target path. */
+let _emptyTreeSha: string | null = null;
+function emptyTreeSha(): string {
+  if (_emptyTreeSha === null) _emptyTreeSha = git(["mktree"], { input: "" });
+  return _emptyTreeSha;
+}
+
 function spliceMappings(
   base: string,
   fromHash: string,
@@ -1096,7 +1102,12 @@ function spliceMappings(
     const sub = m[side];
     const ref = sub ? `${fromHash}:${sub}` : `${fromHash}^{tree}`;
     const res = git(["rev-parse", ref], { safe: true });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // The mapped dir doesn't exist at this commit
+      if (!sub) return null;
+      slices.push({ subdir: m.target, content: emptyTreeSha() });
+      continue;
+    }
     const filtered = filterTreeByIgnore(res.stdout, autoPatterns[i] ?? []);
     slices.push({ subdir: m.target, content: filtered });
   }

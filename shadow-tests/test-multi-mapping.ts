@@ -208,6 +208,61 @@ async function main() {
     }
     console.log(`  ✓ root *.tmp cascades into both mappings; appA/dist/ blocked; .shadowignore files stripped`);
 
+    // ── 5. Mapped dir created later: conflicting merge before src/shared exists ──
+    // Regression: a confined merge whose mapped parents lack the `shared` slice
+    // (the dir hadn't been created yet) must compose with that slice empty, not
+    // halt. Pre-fix, spliceMappings returned null on the missing slice.
+    banner("5. Conflicting merge before a mapped dir exists — must not halt");
+    const leaf2 = createRepo(tmpDir, "leaf2", { email: "lea@example.com",  name: "Lea"  });
+    const mono2 = createRepo(tmpDir, "mono2", { email: "mira@example.com", name: "Mira" });
+    git(`remote add leaf "${leaf2.bare}"`, mono2.working);
+
+    commitFiles(leaf2, { "README.md": "leaf\n", "src/app/index.ts": "v0\n" }, "La0");
+    git("push origin main", leaf2.working);
+    commitFiles(mono2, { "README.md": "monorepo\n" }, "Ma0");
+    git("push origin main", mono2.working);
+
+    applyTestOverrides({
+      repoRoot: mono2.working,
+      pairs: [{
+        name: "leaf",
+        a: { remote: "origin", url: mono2.bare },
+        b: { remote: "leaf",   url: leaf2.bare },
+        mappings: [
+          { a: "appA",   b: "src/app" },
+          { a: "shared", b: "src/shared" },   // src/shared never created in this scenario
+        ],
+      }],
+      shadowBranchPrefix: "shadow",
+    });
+    setBranchFiltersForTesting(new Map([
+      ["origin", [compileIgnorePattern("**")]],
+      ["leaf",   [compileIgnorePattern("**")]],
+    ]));
+
+    // Conflicting merge on src/app/index.ts, entirely before src/shared exists.
+    git("checkout -b feat", leaf2.working);
+    commitFiles(leaf2, { "src/app/index.ts": "vFeat\n" }, "Lfeat");
+    git("checkout main", leaf2.working);
+    commitFiles(leaf2, { "src/app/index.ts": "vMain\n" }, "Lmain");
+    try { git(`merge --no-ff feat -m "merge feat (conflict)"`, leaf2.working); } catch { /* expected conflict */ }
+    fs.writeFileSync(path.join(leaf2.working, "src/app/index.ts"), "vResolved\n");
+    git("add -A", leaf2.working);
+    git('commit -m "merge feat (resolved)"', leaf2.working);
+    git("push origin main", leaf2.working);
+
+    r = await runSync({ from: "b" });
+    if (r.exitCode !== 0) {
+      console.error(r.stdout); console.error(r.stderr);
+      throw new Error("late-mapping-dir: --from b halted on a merge before the mapped dir existed");
+    }
+    git("fetch origin", mono2.working);
+    const mergedApp = readPath(mono2.bare, "refs/heads/shadow/leaf/main", "appA/index.ts");
+    if (mergedApp !== "vResolved\n") {
+      throw new Error(`late-mapping-dir: expected resolved merge on shadow appA/index.ts, got ${JSON.stringify(mergedApp)}`);
+    }
+    console.log(`  ✓ conflicting merge replayed with the missing 'shared' slice composed empty — no halt`);
+
     console.log("\n  ✓ PASS — multi-mapping pair behaves correctly end-to-end.");
   } finally {
     setBranchFiltersForTesting(null);
