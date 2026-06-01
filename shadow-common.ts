@@ -505,6 +505,16 @@ function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoComm
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
+// Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
+// phases (>100 items) where per-item logging would be noise.
+const PROGRESS_THRESHOLD = 100;
+function logDecileProgress(label: string, i: number, total: number): void {
+  const step = Math.ceil(total / 10);
+  if (step > 0 && (i % step === 0 || i === total)) {
+    console.log(`  ${label}: ${Math.round((i / total) * 100)}% (${i}/${total})`);
+  }
+}
+
 function filterLoadBearingCommits(
   commits: TopoCommit[],
   dc: DirectionConfig,
@@ -513,11 +523,16 @@ function filterLoadBearingCommits(
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
   const keptSet = new Set<string>();
   const kept: TopoCommit[] = [];
+  const total = commits.length;
+  const showProgress = total > PROGRESS_THRESHOLD;
+  let i = 0;
   for (const c of commits) {
+    i++;
     if (isLoadBearing(c, dc, keptSet)) {
       keptSet.add(c.hash);
       kept.push(c);
     }
+    if (showProgress) logDecileProgress("Scanned", i, total);
   }
   return kept;
 }
@@ -529,28 +544,69 @@ function filterLoadBearingCommits(
  * kept commits. P1 is the trunk; any Pi (i>=1) contributing a kept commit
  * anchors the merge.
  */
+// True iff `<hash>:<sourceDir>` resolves to a tree. Root ("") is always
+// present; memoized since a non-root slice's presence rarely changes.
+const _slicePresentCache = new Map<string, boolean>();
+function slicePresent(hash: string, sourceDir: string): boolean {
+  if (!sourceDir) return true;
+  const key = `${hash}:${sourceDir}`;
+  const hit = _slicePresentCache.get(key);
+  if (hit !== undefined) return hit;
+  const r = git(["cat-file", "-t", `${hash}:${sourceDir}`], { safe: true });
+  const present = r.ok && r.stdout === "tree";
+  _slicePresentCache.set(key, present);
+  return present;
+}
+
+// True iff the commit's diff vs `parent`, after mapping + ignore filtering,
+// has any surviving path — i.e. it changes content that flows to the target.
+// O(changed files), mirroring buildReplayedTree's ownership/ignore rules.
+function sliceChangedVsParent(
+  parent: string,
+  commit: string,
+  dc: DirectionConfig,
+  ignoreBySrc: RegExp[][],
+): boolean {
+  const args = ["diff-tree", "-r", parent, commit];
+  if (!anyRootSource(dc)) args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
+  const res = git(args, { safe: true });
+  if (!res.ok) return true;
+  if (!res.stdout) return false;
+  const sorted = dc.mappings.map((m, i) => ({ source: m.source, idx: i }))
+    .sort((a, b) => b.source.length - a.source.length);
+  for (const line of res.stdout.split("\n")) {
+    const m = line.match(/^:\d+ \d+ [0-9a-f]+ [0-9a-f]+ [AMDT]\t(.+)$/);
+    if (!m) continue;
+    const filePath = m[1];
+    const owner = sorted.find(o => o.source === "" || filePath === o.source || filePath.startsWith(`${o.source}/`));
+    if (!owner) continue;
+    const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
+    if ((ignoreBySrc[owner.idx] ?? []).some(p => p.test(srcRelative))) continue;
+    return true;
+  }
+  return false;
+}
+
 function isLoadBearing(
   c: TopoCommit,
   dc: DirectionConfig,
   keptSet: Set<string>,
 ): boolean {
   if (c.parents.length === 0) return true;
+  const p1 = c.parents[0];
 
-  const effectiveIgnoreBySrc = dc.mappings.map((m, i) =>
+  // Missing source slice (at c or p1) load-bears, matching the old fingerprint
+  // "" escape. Root is always present, so this only fires for a non-root
+  // mapping whose dir hasn't appeared yet (or just vanished).
+  for (const m of dc.mappings) {
+    if (!slicePresent(c.hash, m.source) || !slicePresent(p1, m.source)) return true;
+  }
+
+  const ignoreBySrc = dc.mappings.map((m, i) =>
     readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
-
-  // The effective-ignore list always contains SHADOWIGNORE_SELF_RE, so we
-  // never short-circuit on "empty patterns" alone. Composite fingerprint
-  // drives the decision.
-
-  const commitTree = effectiveSourceFingerprint(c.hash, dc, effectiveIgnoreBySrc);
-  if (!commitTree) return true;
-  const tree1st = effectiveSourceFingerprint(c.parents[0], dc, effectiveIgnoreBySrc);
-  if (tree1st !== commitTree) return true;
+  if (sliceChangedVsParent(p1, c.hash, dc, ignoreBySrc)) return true;
 
   if (c.parents.length === 1) return false;
-
-  const p1 = c.parents[0];
   for (let i = 1; i < c.parents.length; i++) {
     if (hasKeptExclusiveAncestor(c.parents[i], p1, keptSet)) return true;
   }
@@ -823,72 +879,6 @@ export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): v
 }
 
 // ── Tree composition ──────────────────────────────────────────────
-
-// Build a tree SHA for `hash`'s source-side content under `sourceDir/`, with
-// paths matching `ignorePatterns` stripped out. The result is the tree that
-// would actually flow to the target if this commit's diff were replayed —
-// without it, a commit whose only changes are ignored produces a "ghost" tree
-// that differs at the source but is identical post-filter. Returns "" if the
-// source subdir doesn't exist at this commit — caller treats that as
-// "source content missing" and load-bears the commit.
-// Memo of effective-source fingerprints. Scan computes each commit's slice
-// once as itself and once as its child's 1st parent → cache ~halves the work.
-const _effectiveTreeCache = new Map<string, string>();
-
-function ignoreSignature(ignorePatterns: RegExp[]): string {
-  return ignorePatterns.map(r => r.source).join("");
-}
-
-// Equality-only fingerprint of a commit's ignore-filtered source slice. Built
-// from one `ls-tree -r` + JS filter (was read-tree/ls-files/rm/write-tree,
-// 3-4 spawns) — never fed back to git, so a hash of the surviving entries
-// suffices. "" when the source dir is absent (preserves the missing-source
-// load-bearing escape).
-function effectiveSourceTreeOne(
-  hash: string,
-  sourceDir: string,
-  ignorePatterns: RegExp[],
-): string {
-  const key = `${hash} ${sourceDir} ${ignoreSignature(ignorePatterns)}`;
-  const cached = _effectiveTreeCache.get(key);
-  if (cached !== undefined) return cached;
-
-  const treeRef = sourceDir ? `${hash}:${sourceDir}` : hash;
-  const ls = git(["ls-tree", "-r", "-z", treeRef], { safe: true, raw: true });
-  let result = "";
-  if (ls.ok) {
-    const kept: string[] = [];
-    for (const entry of ls.stdout.split("\0")) {
-      if (!entry) continue;
-      const tab = entry.indexOf("\t"); // "<mode> <type> <object>\t<path>"
-      if (tab < 0) continue;
-      if (ignorePatterns.some(re => re.test(entry.slice(tab + 1)))) continue;
-      kept.push(entry);
-    }
-    result = crypto.createHash("sha1").update(kept.join("\n")).digest("hex");
-  }
-  _effectiveTreeCache.set(key, result);
-  return result;
-}
-
-// Direction-wide effective-tree fingerprint: concatenated per-mapping tree
-// SHAs. Used only for equality comparison in isLoadBearing — never fed back
-// to a git command, so it does not need to be a real tree SHA. Returns ""
-// if any per-mapping tree was empty, preserving the "missing source"
-// escape hatch in isLoadBearing.
-function effectiveSourceFingerprint(
-  hash: string,
-  dc: DirectionConfig,
-  patternsBySourceIdx: RegExp[][],
-): string {
-  const parts: string[] = [];
-  for (let i = 0; i < dc.mappings.length; i++) {
-    const tree = effectiveSourceTreeOne(hash, dc.mappings[i].source, patternsBySourceIdx[i] ?? []);
-    if (!tree) return "";
-    parts.push(`${i}:${tree}`);
-  }
-  return parts.join("\n");
-}
 
 /**
  * Apply this commit's diff (vs first parent) to parentTree, composed across
@@ -1542,9 +1532,11 @@ function replayCommits(opts: {
 
   try {
     const total = newCommits.length;
+    const verbose = total < PROGRESS_THRESHOLD;
     let idx = 0;
     for (const commit of newCommits) {
       idx++;
+      if (!verbose) logDecileProgress("Replayed", idx, total);
       const meta = getCommitMeta(commit.hash);
 
       if (isHaltPropagated(commit, haltedSources, shaMapping)) {
@@ -1555,16 +1547,17 @@ function replayCommits(opts: {
       // Carries our own trailer → forwarded earlier and merged back; record only.
       const isEcho = hasTrailer(meta.trailers, addKey);
 
-      const progress = `[${idx}/${total}]`;
-      if (isEcho) {
-        console.log(`  ${progress} Skipping ${meta.short} (echo from other direction).`);
-      } else {
-        const label = commit.parents.length > 1
-          ? `merge commit ${meta.short}`
-          : commit.parents.length === 0
-            ? `root commit ${meta.short}`
-            : meta.short;
-        console.log(`  ${progress} Replaying ${label}...`);
+      if (verbose) {
+        if (isEcho) {
+          console.log(`  [${idx}/${total}] Skipping ${meta.short} (echo from other direction).`);
+        } else {
+          const label = commit.parents.length > 1
+            ? `merge commit ${meta.short}`
+            : commit.parents.length === 0
+              ? `root commit ${meta.short}`
+              : meta.short;
+          console.log(`  [${idx}/${total}] Replaying ${label}...`);
+        }
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
@@ -1598,7 +1591,7 @@ function replayCommits(opts: {
       });
 
       if (!tree) {
-        console.log(`  Skipping ${meta.short} (source content missing).`);
+        if (verbose) console.log(`  Skipping ${meta.short} (source content missing).`);
         continue;
       }
 
@@ -1627,7 +1620,7 @@ function replayCommits(opts: {
       }
       if (absorbed.length > 0) {
         console.log(`  ✓ Replayed${isEcho ? " (recorded)" : ""}, absorbing ${absorbed.length} halted ancestor(s): ${absorbed.map(s => s.slice(0, 7)).join(", ")}.`);
-      } else {
+      } else if (verbose) {
         console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
       }
     }
