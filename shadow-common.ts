@@ -434,13 +434,25 @@ interface TopoCommit {
   parents: string[];
 }
 
+// Small LRU keyed by commit hash (immutable). The confined-mapping echo check
+// in composeMergeBaseTree re-reads each commit's first parent — on a linear
+// chain that's the previous iteration's commit, so a handful of recent entries
+// captures nearly all hits without retaining every commit's meta.
+const META_CACHE_MAX = 256;
+const _commitMetaCache = new Map<string, CommitMeta>();
 function getCommitMeta(hash: string): CommitMeta {
+  const cached = _commitMetaCache.get(hash);
+  if (cached) {
+    _commitMetaCache.delete(hash);     // bump to most-recently-used
+    _commitMetaCache.set(hash, cached);
+    return cached;
+  }
   // NUL-separated; %B last so its newlines can't shift fields.
   const format = ["%an", "%ae", "%aD", "%cn", "%ce", "%cD", "%h: %s", "%(trailers:only,unfold=true)", "%B"]
     .join("%x00");
   const raw = git(["log", "-1", `--format=${format}`, hash]);
   const parts = raw.split("\0");
-  return {
+  const meta: CommitMeta = {
     hash,
     authorName: parts[0],
     authorEmail: parts[1],
@@ -452,6 +464,11 @@ function getCommitMeta(hash: string): CommitMeta {
     trailers: parts[7],
     message: parts[8],
   };
+  _commitMetaCache.set(hash, meta);
+  if (_commitMetaCache.size > META_CACHE_MAX) {
+    _commitMetaCache.delete(_commitMetaCache.keys().next().value!);  // evict LRU
+  }
+  return meta;
 }
 
 function buildCommitEnv(meta: CommitMeta): Record<string, string> {
@@ -694,6 +711,7 @@ function dropOrphanedCommits(
   branches: string[],
   shaMapping: Map<string, string>,
   remote: string,
+  sourceCommits: TopoCommit[],
 ): TopoCommit[] {
   const newSet = new Set(newCommits.map(c => c.hash));
   const kept = new Set<string>();
@@ -709,16 +727,25 @@ function dropOrphanedCommits(
     }
   }
 
+  // Parents are already on the TopoCommit objects (collectSourceCommits ran
+  // `log %P` over the whole set); reuse them instead of a git query per commit.
+  // Fall back per-commit only for passthrough hashes outside the set.
+  const parentsByHash = new Map(sourceCommits.map(c => [c.hash, c.parents]));
+  const parentsOf = (hash: string): string[] => {
+    const cached = parentsByHash.get(hash);
+    if (cached) return cached;
+    const res = git(["log", "-1", "--format=%P", hash], { safe: true });
+    if (!res.ok) fail(`log -1 --format=%P ${hash} failed: ${res.stderr}`);
+    return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
+  };
+
   const visited = new Set<string>();
   const stack = Array.from(kept);
   while (stack.length) {
     const hash = stack.pop()!;
     if (visited.has(hash)) continue;
     visited.add(hash);
-    const parentsRes = git(["log", "-1", "--format=%P", hash], { safe: true });
-    if (!parentsRes.ok) fail(`log -1 --format=%P ${hash} failed: ${parentsRes.stderr}`);
-    if (!parentsRes.stdout) continue; // root commit — no parents to chase
-    for (const p of parentsRes.stdout.split(/\s+/).filter(Boolean)) {
+    for (const p of parentsOf(hash)) {
       if (shaMapping.has(p) || visited.has(p)) continue;
       if (newSet.has(p) && !kept.has(p)) kept.add(p);
       // Walk through even when p isn't in newSet — passthrough commits
@@ -887,12 +914,13 @@ export function setBranchFiltersForTesting(map: Map<string, RegExp[]> | null): v
  */
 function buildReplayedTree(opts: {
   commitHash: string;
+  sourceFirstParent: string | null;
   dc: DirectionConfig;
   parentTree: string | null;
   tmpIndex: string;
   shadowIgnorePatternsBySourceIdx: RegExp[][];
 }): string | null {
-  const { commitHash, dc, parentTree, tmpIndex, shadowIgnorePatternsBySourceIdx } = opts;
+  const { commitHash, sourceFirstParent, dc, parentTree, tmpIndex, shadowIgnorePatternsBySourceIdx } = opts;
   const idxEnv = { GIT_INDEX_FILE: tmpIndex };
 
   if (parentTree) {
@@ -905,11 +933,12 @@ function buildReplayedTree(opts: {
   // Any "" source matches the entire tree → skip the pathspec filter so
   // siblings of more-specific sources (e.g. src/init.txt next to src/common)
   // aren't excluded. Otherwise pass the non-root dirs to git's pathspec.
-  const sourceParent = git(["rev-parse", `${commitHash}^`], { safe: true });
+  // sourceFirstParent is the commit's real first parent (from the TopoCommit);
+  // null means a source root, which diffs as all-additions below.
   let diffOutput: string;
 
-  if (sourceParent.ok) {
-    const diffArgs = ["diff-tree", "-r", sourceParent.stdout, commitHash];
+  if (sourceFirstParent) {
+    const diffArgs = ["diff-tree", "-r", sourceFirstParent, commitHash];
     if (!anyRootSource(dc)) diffArgs.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
     const diffRes = git(diffArgs, { safe: true });
     if (!diffRes.ok) {
@@ -1584,6 +1613,7 @@ function replayCommits(opts: {
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,
+        sourceFirstParent: commit.parents[0] ?? null,
         dc,
         parentTree,
         tmpIndex,
@@ -1655,7 +1685,7 @@ export function mirrorHistory(opts: {
   const relevantCommits = filterLoadBearingCommits(sourceCommits, dc);
   console.log(`${relevantCommits.length} load-bearing; checking which are already replayed...`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
-  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote);
+  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, sourceCommits);
 
   if (usefulNewCommits.length === 0) {
     return {
