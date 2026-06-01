@@ -729,29 +729,28 @@ function compileShadowIgnoreLine(rawPattern: string, ignoreDir: string, sourceDi
     }
   }
 
-  const regex = translated
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
-    .replace(/\*\*/g, "<<GLOBSTAR>>")
-    .replace(/\*/g, "[^/]*")
-    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
-    .replace(/<<GLOBSTAR>>/g, ".*");
+  const regex = globToRegexSource(translated);
 
   const prefix = isAnchored ? "^" : "(^|.*/)";
   const suffix = isDirOnly ? "/.*$" : "$";
   return new RegExp(`${prefix}${regex}${suffix}`);
 }
 
-/** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
-export function compileIgnorePattern(pattern: string): RegExp {
-  const regex = pattern
+// Translate a glob (supporting * and ** globs) into an unanchored regex source
+// fragment. Callers add their own anchoring/prefix/suffix.
+function globToRegexSource(glob: string): string {
+  return glob
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
     .replace(/\*\*/g, "<<GLOBSTAR>>")
     .replace(/\*/g, "[^/]*")
     .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
     .replace(/<<GLOBSTAR>>/g, ".*");
-  return new RegExp(`^${regex}$`);
+}
+
+/** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
+export function compileIgnorePattern(pattern: string): RegExp {
+  return new RegExp(`^${globToRegexSource(pattern)}$`);
 }
 
 // ── Branch filters ────────────────────────────────────────────────────────────
