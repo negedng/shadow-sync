@@ -489,7 +489,7 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
 function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoCommit[] {
   // --full-history surfaces all merges in the path-filtered reachable set;
   // filterLoadBearingCommits drops the non-load-bearing ones afterward.
-  const args = ["rev-list", "--topo-order", "--reverse", "--full-history",
+  const args = ["log", "--topo-order", "--reverse", "--full-history", "--format=%H",
     ...branches.map(b => `${dc.source.remote}/${b}`)];
   // Path filter only when no mapping is at root. Any root source means the
   // whole commit graph is in-scope and no `--` is added.
@@ -497,7 +497,7 @@ function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoComm
     args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
   }
   const result = git(args, { safe: true });
-  if (!result.ok) fail(`rev-list failed (${args.join(" ")}): ${result.stderr}`);
+  if (!result.ok) fail(`log failed (${args.join(" ")}): ${result.stderr}`);
   if (!result.stdout) return [];
   const hashes = result.stdout.split("\n").filter(Boolean);
   const parentsMap = fetchTrueParents(hashes);
@@ -556,11 +556,11 @@ function isLoadBearing(
   return false;
 }
 
-// Returns true iff `git rev-list pi ^p1` contains any commit in keptSet —
+// Returns true iff `git log pi ^p1` contains any commit in keptSet —
 // i.e., Pi contributes at least one kept commit not already reachable from P1.
 function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>): boolean {
   if (keptSet.size === 0) return false;
-  const result = git(["rev-list", pi, `^${p1}`], { safe: true });
+  const result = git(["log", "--format=%H", pi, `^${p1}`], { safe: true });
   if (!result.ok) return false;
   for (const line of result.stdout.split("\n")) {
     const h = line.trim();
@@ -621,8 +621,8 @@ function dropOrphanedCommits(
   const kept = new Set<string>();
 
   for (const branch of branches) {
-    const log = git(["rev-list", "--first-parent", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) fail(`rev-list ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
+    const log = git(["log", "--first-parent", "--format=%H", `${remote}/${branch}`], { safe: true });
+    if (!log.ok) fail(`log ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
     for (const line of log.stdout.split("\n")) {
       const hash = line.trim();
       if (!hash) continue;
@@ -1256,7 +1256,7 @@ function mapBranchesToTargetTips(
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
-    const log = git(["rev-list", "--first-parent", `${remote}/${branch}`], { safe: true });
+    const log = git(["log", "--first-parent", "--format=%H", `${remote}/${branch}`], { safe: true });
     if (!log.ok) {
       fail(`Failed to list commits for ${remote}/${branch}: ${log.stderr}`);
     }
@@ -1624,7 +1624,7 @@ export function mirrorHistory(opts: {
   // Fallback root for orphan parents (see resolveTargetParents).
   let targetInit: string | null = null;
   if (refExists(`${dc.target.remote}/main`)) {
-    const initRes = git(["rev-list", "--max-parents=0", `${dc.target.remote}/main`], { safe: true });
+    const initRes = git(["log", "--max-parents=0", "--format=%H", `${dc.target.remote}/main`], { safe: true });
     if (!initRes.ok) {
       fail(`Failed to find init commit on ${dc.target.remote}/main: ${initRes.stderr}`);
     }
