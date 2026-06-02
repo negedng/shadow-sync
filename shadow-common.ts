@@ -1094,6 +1094,7 @@ function spliceMappings(
   fromHash: string,
   side: "source" | "target",
   dc: DirectionConfig,
+  extraIgnoreByIdx?: RegExp[][],
 ): string | null {
   const autoPatterns = side === "source" ? dc.autoIgnoreBySourceIdx : dc.autoIgnoreByTargetIdx;
   const slices: Array<{ subdir: string; content: string }> = [];
@@ -1108,116 +1109,163 @@ function spliceMappings(
       slices.push({ subdir: m.target, content: emptyTreeSha() });
       continue;
     }
-    const filtered = filterTreeByIgnore(res.stdout, autoPatterns[i] ?? []);
+    // extraIgnoreByIdx carries the per-commit .shadowignore (round-trip source
+    // splice only); paths in `fromHash:sub` are already source-dir-relative, so
+    // the patterns match. Union with auto-ignore is harmless if they overlap.
+    const patterns = extraIgnoreByIdx
+      ? [...(autoPatterns[i] ?? []), ...(extraIgnoreByIdx[i] ?? [])]
+      : (autoPatterns[i] ?? []);
+    const filtered = filterTreeByIgnore(res.stdout, patterns);
     slices.push({ subdir: m.target, content: filtered });
   }
   return composeSubtrees(base, slices);
 }
 
 /**
+ * Outcome of composeMergeBaseTree: a base tree SHA, or a halt carrying the
+ * reason that selects the operator diagnostic in formatHaltDiagnostic.
+ *   outer-divergence       — mapped parents of a real merge disagree on outer
+ *                            state (operator-resolvable; full round-trip recipe).
+ *   multi-echo-disagreement — several already-replayed (echo) parents disagree.
+ *   missing-tree           — a required parent tree or mapped subdir was absent.
+ */
+type ComposeHaltKind = "outer-divergence" | "multi-echo-disagreement" | "missing-tree";
+interface ComposeHalt { halt: ComposeHaltKind; }
+function isHalt(r: unknown): r is ComposeHalt {
+  return typeof r === "object" && r !== null && "halt" in r;
+}
+
+/** First mapped parent's full tree. mappedParents[0] is always a valid replayed
+ *  commit by construction; an unreadable tree means repo corruption, not an
+ *  operator-resolvable conflict — so abort the run rather than halt one branch. */
+function firstParentTree(mappedParents: string[], commitShort: string): string {
+  const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
+  if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
+  return treeRes.stdout;
+}
+
+/**
+ * Reconcile the OUTER (files outside target.dir/) across ≥2 mapped parents. The
+ * caller splices the first parent's inner over the result, so this only decides
+ * outer state.
+ *   2 parents, clean merge-tree → the auto-merged outer. Ancestor/descendant
+ *     pairs reduce to a fast-forward, preserving outer a first-parent fallback
+ *     would drop.
+ *   2-parent conflict / 3+ parents → outer-agreement: every parent must share
+ *     the same outer. The source commit's scope can't author an outer-state
+ *     difference, so divergence halts.
+ */
+function reconcileOuter(mappedParents: string[], dc: DirectionConfig): { tree: string } | ComposeHalt {
+  const targetDirs = targetDirsOf(dc);
+  if (mappedParents.length === 2) {
+    const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
+    // Clean auto-merge prints just the tree SHA; a conflict prints a multiline
+    // body, so the full-string match fails and we fall through to agreement.
+    if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) {
+      return { tree: outerOnlyTree(mergeRes.stdout, targetDirs) };
+    }
+  }
+  const outers = mappedParents.map(p => outerOnlyTree(p, targetDirs));
+  if (outers.every(o => o === outers[0])) return { tree: outers[0] };
+  return { halt: "outer-divergence" };
+}
+
+/**
+ * Echo splice: if ≥1 source parent already round-tripped (carries the target
+ * trailer), old shadow commits must reflect target's outer state at the time,
+ * not a frozen bootstrap snapshot — so splice the inner over the echo'd outer.
+ *   Round-trip (echo target is itself a mapped parent — the operator's
+ *     resolution merge Mm, kept in the parent set by resolveHaltAwareParents):
+ *     splice the CURRENT commit's source-side inner (the operator's resolved
+ *     inner, including any backend-only intermediate work) over Mm's outer.
+ *   Otherwise: splice the first parent's inner over the echo'd outer.
+ *   Multi-echo: the echo'd outers must agree.
+ * Returns "none" when no parent is an echo, so the caller continues to the
+ * parent-count dispatch.
+ */
+function resolveEcho(
+  commit: TopoCommit,
+  mappedParents: string[],
+  shaMapping: Map<string, string>,
+  dc: DirectionConfig,
+  shadowIgnoreBySourceIdx: RegExp[][],
+): { tree: string } | ComposeHalt | "none" {
+  const skipKey = targetTrailerKey(dc);
+  const echoTargets: string[] = [];
+  for (const sourceParent of commit.parents) {
+    const parentMeta = getCommitMeta(sourceParent);
+    if (hasTrailer(parentMeta.trailers, skipKey)) {
+      const mapped = shaMapping.get(sourceParent);
+      if (mapped) echoTargets.push(mapped);
+    }
+  }
+  if (echoTargets.length === 0) return "none";
+
+  if (echoTargets.length > 1) {
+    const outers = echoTargets.map(t => outerOnlyTree(t, targetDirsOf(dc)));
+    if (!outers.every(o => o === outers[0])) return { halt: "multi-echo-disagreement" };
+  }
+
+  const echoTargetSHA = echoTargets[0];
+  const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
+  if (!echoTreeRes.ok) return { halt: "missing-tree" };
+
+  // Round-trip splices the commit's OWN source tree (fresh, unfiltered), so
+  // apply .shadowignore here — buildReplayedTree's diff overlay only filters
+  // changed paths and would let a base-borne ignored file survive otherwise.
+  const spliced = mappedParents.includes(echoTargetSHA)
+    ? spliceMappings(echoTreeRes.stdout, commit.hash, "source", dc, shadowIgnoreBySourceIdx)
+    : spliceMappings(echoTreeRes.stdout, mappedParents[0], "target", dc);
+  return spliced === null ? { halt: "missing-tree" } : { tree: spliced };
+}
+
+/**
  * Build the base tree for replaying `commit` onto `mappedParents`.
- * buildReplayedTree later overlays the source-side diff on top, carrying the
- * user's merge resolution into the replay.
+ * buildReplayedTree later overlays diff(firstParent → commit) within the synced
+ * region as an ABSOLUTE apply, so the base must already equal the commit's
+ * content everywhere that diff won't overwrite. That reduces to one invariant:
+ * the base's inner (synced) region must be the FIRST PARENT's inner, and (cross-
+ * repo) its outer must be the commit's reconciled outer. Taking any other inner
+ * — e.g. an auto-merged tree — drops resolutions that re-assert the first parent
+ * (the diff is empty there, so the wrong inner survives verbatim).
  *
- * Cross-repo (target.dir set):
- *   Echo splice (≥1 source parent carries the target trailer) → splice the
- *     shadow chain's target.dir/ over the echo'd target's outer files, so old
- *     shadow commits reflect target's outer state at the time, not a frozen
- *     bootstrap snapshot. Runs before the 1-parent shortcut so 1-parent commits
- *     on top of an echo still hit the round-trip branch. Round-trip exception:
- *     if the echo target is itself in mappedParents (the operator's resolution
- *     merge Mm was spliced in via resolveHaltAwareParents to keep the previous
- *     shadow tip in the parent set), the inner slice we want is the CURRENT
- *     commit's source-side tree — the operator's resolved inner including any
- *     backend-only intermediate work. Splice that into Mm's outer. Multi-echo:
- *     outers must agree; otherwise return null.
- *   1 mapped parent, no echo → that tree.
- *   2 parents, no echo, clean merge-tree → that tree. For ancestor/descendant
- *     pairs (e.g. via a prior shadow-sync round) merge-tree reduces to a
- *     fast-forward, preserving outer state a first-parent fallback would drop.
- *   2-parent merge-tree conflict / 3+ parents, no echo → outer-agreement: if
- *     every mapped parent has the same tree outside target.dir/, splice
- *     mappedParents[0]'s target.dir/ over that shared outer. Outer divergence
- *     returns null — caller halts the branch (see formatUnresolvableMergeError).
- *
- * Same-repo (no target.dir):
- *   1 parent → that tree.
- *   2 parents, clean merge-tree → that tree.
- *   Else → mappedParents[0]'s tree. Source layout matches target's, so the
- *     source merge commit's diff already carries the user's resolution.
+ * Cross-repo (target.dir set): reconcile the outer, then splice the first
+ *   parent's inner over it. The inner splice lives in exactly ONE place so no
+ *   branch can substitute a divergent inner. The lone exception is an echo
+ *   round-trip, where the inner is the commit's own resolved source (resolveEcho).
+ * Same-repo (no target.dir): the synced region is the whole tree, so
+ *   diff(firstParent → commit) covers everything and the first parent's tree is
+ *   the correct base verbatim.
  */
 function composeMergeBaseTree(opts: {
   commit: TopoCommit;
   mappedParents: string[];
   shaMapping: Map<string, string>;
   dc: DirectionConfig;
-}): string | null {
-  const { commit, mappedParents, shaMapping, dc } = opts;
+  shadowIgnoreBySourceIdx: RegExp[][];
+}): string | ComposeHalt {
+  const { commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx } = opts;
   const commitShort = commit.hash.slice(0, 8);
   const confined = allTargetsConfined(dc);
 
-  const firstMappedTree = (): string => {
-    const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
-    if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
-    return treeRes.stdout;
-  };
-
-  // allTargetsConfined fires iff every mapping target is a confined subdir
-  // of the target tree (none of them is the target root). When any mapping
-  // has target="", the synthetic spans the whole target — there's no outer
-  // to preserve, so we fall through to the same-repo branch (use
-  // mappedParents[0]'s tree).
-
-  // Cross-repo echo splice runs first — handles round-trip case even when
-  // the commit has a single mapped parent that is itself the echo target.
+  // Echo splice runs first — handles the round-trip case even when the commit
+  // has a single mapped parent that is itself the echo target.
   if (confined) {
-    const skipKey = targetTrailerKey(dc);
-    const echoTargets: string[] = [];
-    for (const sourceParent of commit.parents) {
-      const parentMeta = getCommitMeta(sourceParent);
-      if (hasTrailer(parentMeta.trailers, skipKey)) {
-        const mapped = shaMapping.get(sourceParent);
-        if (mapped) echoTargets.push(mapped);
-      }
-    }
-
-    if (echoTargets.length > 0) {
-      if (echoTargets.length > 1) {
-        const outers = echoTargets.map(t => outerOnlyTree(t, targetDirsOf(dc)));
-        if (!outers.every(o => o === outers[0])) return null;
-      }
-
-      const echoTargetSHA = echoTargets[0];
-      const echoTreeRes = git(["rev-parse", `${echoTargetSHA}^{tree}`], { safe: true });
-      if (!echoTreeRes.ok) return null;
-
-      // Round-trip: echo target in mappedParents → splice each mapping's
-      // source-inner over Mm's outer.
-      if (mappedParents.includes(echoTargetSHA)) {
-        return spliceMappings(echoTreeRes.stdout, commit.hash, "source", dc);
-      }
-      return spliceMappings(echoTreeRes.stdout, mappedParents[0], "target", dc);
-    }
+    const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
+    if (echo !== "none") return isHalt(echo) ? echo : echo.tree;
   }
 
-  if (mappedParents.length === 1) return firstMappedTree();
+  // 1 parent: outer can't have diverged; inner is that parent's. (fast path)
+  if (mappedParents.length === 1) return firstParentTree(mappedParents, commitShort);
 
-  if (mappedParents.length === 2) {
-    const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
-    if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) {
-      return mergeRes.stdout;
-    }
-  }
+  // Same-repo: the first parent's tree is the correct base verbatim.
+  if (!confined) return firstParentTree(mappedParents, commitShort);
 
-  if (!confined) return firstMappedTree();
-
-  // Cross-repo, no echo, conflict / octopus: outer-agreement.
-  const outerTrees = mappedParents.map(p => outerOnlyTree(p, targetDirsOf(dc)));
-  if (outerTrees.every(t => t === outerTrees[0])) {
-    return spliceMappings(outerTrees[0], mappedParents[0], "target", dc);
-  }
-
-  return null;
+  // Cross-repo, ≥2 parents: reconcile the outer, splice first parent's inner.
+  const outer = reconcileOuter(mappedParents, dc);
+  if (isHalt(outer)) return outer;
+  const spliced = spliceMappings(outer.tree, mappedParents[0], "target", dc);
+  return spliced === null ? { halt: "missing-tree" } : spliced;
 }
 
 // ── Ancestry resolution ──────────────────────────────────────────────────────
@@ -1371,47 +1419,78 @@ function inferSourceBranch(commitHash: string, sourceRemote: string): string | n
 }
 
 /**
- * Build the actionable error printed when composeMergeBaseTree gives up.
- * The operator's escape: hand-write a target-side commit whose parents are the
- * divergent mapped parents and whose message carries the source→target trailer.
- * `loadReplayedMappings` will pick that up on the next run and treat the source
- * merge as already replayed, so the sync proceeds without re-attempting this.
+ * The single halt diagnostic printed when composeMergeBaseTree gives up. Every
+ * reason shares a header (commit, failure, mapped parents) and the hand-built
+ * escape hatch — a commit on the shadow ref carrying the source→target trailer,
+ * which loadReplayedMappings treats as already-replayed on the next run.
+ * `outer-divergence` (a real merge whose mapped parents disagree on outer state)
+ * additionally gets the full round-trip recovery recipe; the rarer structural
+ * failures stop at the escape hatch (so a single-parent echo failure no longer
+ * prints a nonsensical "octopus merge" recipe).
  */
-function formatUnresolvableMergeError(opts: {
+function formatHaltDiagnostic(opts: {
   commit: TopoCommit;
   meta: CommitMeta;
   mappedParents: string[];
   dc: DirectionConfig;
+  reason: ComposeHaltKind;
 }): string {
-  const { commit, meta, mappedParents, dc } = opts;
+  const { commit, meta, mappedParents, dc, reason } = opts;
   const { target, pair } = dc;
-  const branchHint = inferSourceBranch(commit.hash, dc.source.remote);
-  const reason = mappedParents.length === 2
-    ? `merge-tree conflict between mapped parents on ${target.remote}`
-    : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`;
+  const branchLabel = inferSourceBranch(commit.hash, dc.source.remote) ?? "<source-branch>";
+  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchLabel)}`;
+  const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
+  const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
+
+  const failure =
+    reason === "outer-divergence"
+      ? (mappedParents.length === 2
+          ? `merge-tree conflict between mapped parents on ${target.remote}`
+          : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`)
+    : reason === "multi-echo-disagreement"
+      ? "multiple already-replayed (echo) parents disagree on outer state"
+    : "a required parent tree or mapped subdirectory was absent during base-tree composition";
+
+  // outer-divergence and multi-echo-disagreement are both outer-state
+  // disagreements the operator resolves the same way (round-trip), so they
+  // share the full recipe and the exact "cannot auto-resolve" headline the
+  // recovery tests assert. Only missing-tree is structurally different.
+  const structural = reason === "missing-tree";
+  const lines: string[] = [
+    structural
+      ? `${meta.short}: cannot compose replay base tree — branch halted.`
+      : `${meta.short}: cannot auto-resolve replay parent tree — branch halted.`,
+    ``,
+    `  ${structural ? "Source commit:  " : "Source merge:   "}${commit.hash}  (${meta.short})`,
+    `  Failure:        ${failure}`,
+    `  Mapped parents on ${target.remote}:`,
+    ppLines,
+    ``,
+  ];
+
+  if (structural) {
+    lines.push(
+      `Recovery: create a commit on ${shadowRef} with these mapped parents and a`,
+      `tree you choose (resolved outer + merged inner), including this trailer in`,
+      `its message body (exact text):`,
+      ``,
+      `        ${trailer}`,
+      ``,
+      `On the next sync run, ${meta.short} is picked up via that trailer and skipped.`,
+    );
+    return lines.join("\n");
+  }
+
   const sourceScopeDirs = sourceDirsOf(dc).filter(d => d !== "");
   const targetScopeDirs = targetDirsOf(dc).filter(d => d !== "");
   const sourceScope = sourceScopeDirs.length > 0 ? sourceScopeDirs.map(d => `${d}/`).join(", ") : "<root>";
   const targetScope = targetScopeDirs.length > 0 ? targetScopeDirs.map(d => `${d}/`).join(", ") : "<root>";
-  const outerNote =
-    `Mapped parents disagree on outer state (files outside ${targetScope}). ` +
-    `The source commit's scope is ${sourceScope}, so it couldn't have authored this outer-state difference.`;
-  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchHint ?? "<source-branch>")}`;
-  const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
-  const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
-  const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
-
   const shortHash = commit.hash.slice(0, 7);
-  const branchLabel = branchHint ?? "<source-branch>";
-  return [
-    `${meta.short}: cannot auto-resolve replay parent tree — branch halted.`,
-    ``,
-    `  Source merge:   ${commit.hash}  (${meta.short})`,
-    `  Failure:        ${reason}`,
-    `  Mapped parents on ${target.remote}:`,
-    ppLines,
-    ``,
-    `  ${outerNote}`,
+  const parentArgs = mappedParents.map(p => `-p ${p}`).join(" ");
+
+  lines.push(
+    `  Mapped parents disagree on outer state (files outside ${targetScope}). ` +
+      `The source commit's scope is ${sourceScope}, so it couldn't have authored this outer-state difference.`,
     ``,
     `Recovery — choose ONE:`,
     ``,
@@ -1450,7 +1529,8 @@ function formatUnresolvableMergeError(opts: {
     `    git update-ref ${shadowRef} $new`,
     `    git push ${target.remote} ${shadowRef.replace(/^refs\/heads\//, "")}`,
     `  Then re-run shadow-sync.`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 
@@ -1526,15 +1606,20 @@ function haltCommit(opts: {
   dc: DirectionConfig;
   haltedSources: Set<string>;
   haltReasons: Map<string, HaltReason>;
+  reason: ComposeHaltKind;
 }): void {
-  const { commit, meta, mappedParents, dc, haltedSources, haltReasons } = opts;
+  const { commit, meta, mappedParents, dc, haltedSources, haltReasons, reason } = opts;
   haltedSources.add(commit.hash);
   haltReasons.set(commit.hash, {
     anchorCommits: mappedParents,
-    diagnostic: formatUnresolvableMergeError({ commit, meta, mappedParents, dc }),
+    diagnostic: formatHaltDiagnostic({ commit, meta, mappedParents, dc, reason }),
     commitShort: meta.short,
   });
-  console.log(`  ⚠ Halted on ${meta.short}: outer-state divergence between mapped parents.`);
+  const summary =
+    reason === "outer-divergence" ? "outer-state divergence between mapped parents"
+    : reason === "multi-echo-disagreement" ? "already-replayed parents disagree on outer state"
+    : "a required parent tree or mapped subdirectory was absent";
+  console.log(`  ⚠ Halted on ${meta.short}: ${summary}.`);
 }
 
 
@@ -1603,24 +1688,28 @@ function replayCommits(opts: {
       // Resolve parent from trailers or Halt anchors for squash fix
       const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons);
 
+      // Per-mapping ignore (self + auto + .shadowignore). Computed before the
+      // base tree so composeMergeBaseTree can filter the round-trip source
+      // splice — the one place fresh, unfiltered source enters the base.
+      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
+        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
+
       let parentTree: string | null;
       if (mappedParents.length === 0) {
         if (commit.parents.length !== 0) fail(`Non-root commit ${meta.short} has no resolvable parent tree.`);
         // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
         parentTree = null;
       } else {
-        parentTree = composeMergeBaseTree({ commit, mappedParents, shaMapping, dc });
-        if (parentTree === null) {
-          // Neither compose path produced a defensible tree. Halt the branch
-          // (other branches in this call keep flowing); the diagnostic surfaces
-          // via mirrorHistory's return.
-          haltCommit({ commit, meta, mappedParents, dc, haltedSources, haltReasons });
+        const composed = composeMergeBaseTree({ commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx });
+        if (isHalt(composed)) {
+          // No compose path produced a defensible tree. Halt the branch (other
+          // branches in this call keep flowing); the diagnostic surfaces via
+          // mirrorHistory's return.
+          haltCommit({ commit, meta, mappedParents, dc, haltedSources, haltReasons, reason: composed.halt });
           continue;
         }
+        parentTree = composed;
       }
-
-      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
-        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
 
       const tree = buildReplayedTree({
         commitHash: commit.hash,

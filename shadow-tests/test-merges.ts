@@ -300,6 +300,51 @@ function runEchoIntermediateOuter(): void {
   }
 }
 
+// ── C2. echo round-trip must not leak .shadowignore'd files ─────────────────
+// The round-trip echo base splices the merge commit's OWN source tree. That
+// tree is fresh (not previously replayed), so .shadowignore must be applied
+// there — buildReplayedTree's diff overlay only filters CHANGED paths and would
+// let a base-borne ignored file survive. Regression for the round-trip leak.
+function runEchoRoundTripShadowignore(): void {
+  const env = createTestEnv("echo-roundtrip-shadowignore");
+  try {
+    runCiSync(env);
+    mergeShadow(env);
+
+    // Team root gets a .shadowignore (pull source = team root) + an ignored file.
+    fs.writeFileSync(path.join(env.remoteWorking, ".shadowignore"), "*.secret\n");
+    fs.writeFileSync(path.join(env.remoteWorking, "keep.secret"), "TOP SECRET\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "team: add .shadowignore + secret"', env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    // Baseline: a normal (non-merge) replay never syncs the ignored file.
+    assertEqual(runCiSync(env).status, 0, "[roundtrip-ignore] baseline pull succeeds");
+    assertEqual(readShadowFile(env, "keep.secret"), null,
+      "[roundtrip-ignore] ignored secret NOT on shadow after a normal replay");
+
+    // A modifies the synced subdir + outer, push → replay to team's shadow.
+    fs.writeFileSync(path.join(env.localRepo, env.subdir, "feature.ts"), "feature from A\n");
+    fs.writeFileSync(path.join(env.localRepo, "mono.txt"), "mono updated by A\n");
+    git("add -A", env.localRepo);
+    git('commit -m "x: A modifies subdir + outer"', env.localRepo);
+    git("push origin main", env.localRepo);
+    assertEqual(runPush(env).status, 0, "[roundtrip-ignore] push succeeds");
+
+    // Team merges the shadow back — this merge is the round-trip echo commit,
+    // and its source tree still carries keep.secret at the team root.
+    git(`fetch origin shadow/${env.subdir}/main`, env.remoteWorking);
+    git(`merge --no-ff origin/shadow/${env.subdir}/main -m "B: merge shadow into main"`, env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    assertEqual(runCiSync(env).status, 0, "[roundtrip-ignore] round-trip pull succeeds");
+    assertEqual(readShadowFile(env, "keep.secret"), null,
+      "[roundtrip-ignore] ignored secret must NOT ride onto the shadow via the echo round-trip splice");
+  } finally {
+    env.cleanup();
+  }
+}
+
 // ── D. push-merge-skipped-parents: merges whose parents drop out of rev-list ─
 function runPushMergeSkippedParents(): void {
   const env = createTestEnv("push-merge-skipped-parents");
@@ -679,13 +724,62 @@ function runManualMergeRecovery(): void {
   }
 }
 
+// ── G. reject-incoming merge: resolution keeps the first parent, rejecting the
+//      second parent's change. The merge result equals the first parent for
+//      that file, so diff(firstParent → M) is empty — the replay must still
+//      reproduce M's content, not auto-merge the parents and re-introduce the
+//      rejected change. Regression for the sentinel-version drift (a file
+//      pinned on the trunk and re-asserted at every merge).
+function runRejectIncomingMerge(): void {
+  const env = createTestEnv("reject-incoming-merge");
+  try {
+    // Trunk pins core-version.ts to KEEP.
+    fs.writeFileSync(path.join(env.remoteWorking, "core-version.ts"), "KEEP\n");
+    git("add core-version.ts", env.remoteWorking);
+    git('commit -m "pin core-version KEEP"', env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    // Feature bumps the version and adds an unrelated file.
+    git("checkout -b feat", env.remoteWorking);
+    fs.writeFileSync(path.join(env.remoteWorking, "core-version.ts"), "INCOMING\n");
+    fs.writeFileSync(path.join(env.remoteWorking, "feat-extra.ts"), "extra\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "feat: bump version + extra"', env.remoteWorking);
+
+    // Trunk advances (so the merge is a real 2-parent merge, not a fast-forward).
+    git("checkout main", env.remoteWorking);
+    fs.writeFileSync(path.join(env.remoteWorking, "other.ts"), "x\n");
+    git("add other.ts", env.remoteWorking);
+    git('commit -m "main: unrelated change"', env.remoteWorking);
+
+    // Merge feat but REJECT the version bump (keep KEEP); take feat-extra.
+    git("merge --no-ff --no-commit feat", env.remoteWorking);
+    fs.writeFileSync(path.join(env.remoteWorking, "core-version.ts"), "KEEP\n");
+    git("add core-version.ts", env.remoteWorking);
+    git('commit -m "merge feat (reject version bump)"', env.remoteWorking);
+    git("push origin main", env.remoteWorking);
+
+    const r = runCiSync(env);
+    assertEqual(r.status, 0, "[reject-incoming] ci-sync should succeed");
+
+    assertEqual(readShadowFile(env, "core-version.ts"), "KEEP\n",
+      "[reject-incoming] shadow must carry the merge's resolution (KEEP), not the rejected incoming change");
+    assertEqual(readShadowFile(env, "feat-extra.ts"), "extra\n",
+      "[reject-incoming] feat's non-rejected content still reaches the shadow");
+  } finally {
+    env.cleanup();
+  }
+}
+
 export default function run(): void {
   // This file tests merge topology, not the branch filter — wildcard.
   setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
   try {
     runMergeTopology();
+    runRejectIncomingMerge();
     runEchoMapping();
     runEchoIntermediateOuter();
+    runEchoRoundTripShadowignore();
     runPushMergeSkippedParents();
     runSquashLocalBeforePush();
     runSquashRemoteBeforeSync();
