@@ -992,15 +992,32 @@ function buildReplayedTree(opts: {
     }
   }
 
-  if (removals.length > 0) {
-    git(["rm", "--cached", "-f", "--quiet", "--", ...removals], { env: idxEnv, safe: true });
-  }
 
-  if (additions.length > 0) {
-    git(["update-index", "--index-info"], { env: idxEnv, input: additions.join("\n") + "\n" });
-  }
+  applyIndexInfo(idxEnv, removals, additions);
 
   return git(["write-tree"], { env: idxEnv });
+}
+
+const NULL_SHA = "0".repeat(40);
+
+/**
+ * Stage `removals` (deletes) and `additions` against `idxEnv`'s index in a
+ * single `update-index --index-info` call over stdin. `additions` are already
+ * "<mode> <sha>\t<path>" lines; `removals` become mode-0 delete lines. Stdin
+ * has no length limit, so this is safe for arbitrarily large file lists —
+ * unlike `git rm -- <paths>`, whose argv overflows CreateProcess on Windows.
+ */
+function applyIndexInfo(
+  idxEnv: { GIT_INDEX_FILE: string },
+  removals: string[],
+  additions: string[],
+): void {
+  if (removals.length === 0 && additions.length === 0) return;
+  const lines = [
+    ...removals.map(p => `0 ${NULL_SHA}\t${p}`),
+    ...additions,
+  ];
+  git(["update-index", "--index-info"], { env: idxEnv, input: lines.join("\n") + "\n" });
 }
 
 /** Allocate a private git index, run `fn` against it, then delete it. */
@@ -1068,9 +1085,8 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
     if (ls.ok && ls.stdout) {
       const toRemove = ls.stdout.split("\n").filter(Boolean)
         .filter(p => ignorePatterns.some(re => re.test(p)));
-      if (toRemove.length > 0) {
-        git(["rm", "--cached", "-f", "--quiet", "--", ...toRemove], { env: idxEnv, safe: true });
-      }
+      // stdin-based delete (see applyIndexInfo) — avoids argv overflow on Windows.
+      applyIndexInfo(idxEnv, toRemove, []);
     }
     return git(["write-tree"], { env: idxEnv });
   });
