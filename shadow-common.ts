@@ -679,6 +679,66 @@ function fetchTrailersBatch(hashes: string[]): Map<string, string> {
   return map;
 }
 
+/** Which of `shas` resolve to a present object — one `cat-file --batch-check`
+ *  instead of a `rev-parse` spawn per sha. */
+function batchObjectsExist(shas: string[]): Set<string> {
+  const present = new Set<string>();
+  const uniq = [...new Set(shas)].filter(Boolean);
+  if (uniq.length === 0) return present;
+  const res = git(["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", safe: true, raw: true });
+  if (!res.ok) return present;
+  for (const line of res.stdout.split("\n")) {
+    const sp = line.indexOf(" ");
+    if (sp < 0) continue;
+    // "<sha> <type> <size>" for present; "<sha> missing" for absent.
+    if (line.slice(sp + 1).startsWith("missing")) continue;
+    present.add(line.slice(0, sp));
+  }
+  return present;
+}
+
+/**
+ * Map echo commits (source → target SHA) so they count as already-replayed:
+ * skipped in the load-bearing scan AND resolvable as parents. An echo is a
+ * source commit forwarded FROM the target side — it carries THIS pair's
+ * target-direction trailer pointing back at the target SHA. Without this, the
+ * export direction (--from a) re-diffs the whole echo history (the bulk of the
+ * monorepo) every run; with it, only genuinely-new commits are scanned.
+ *
+ * Keyed on targetTrailerKey(dc), so a SIBLING pair's trailer (e.g. a
+ * frontend→common commit seen by the backend pair) does NOT match — those
+ * still replay, preserving cross-pair propagation. This mirrors what
+ * filterNotReplayedCommits already does, just early enough to skip the diff,
+ * and batches the existence check that would otherwise be a spawn per echo.
+ * Adds each echo (source → target SHA) directly into `shaMapping`; commits
+ * already mapped are skipped.
+ */
+function addEchoMappings(
+  sourceCommits: TopoCommit[],
+  dc: DirectionConfig,
+  shaMapping: Map<string, string>,
+): void {
+  const skipKey = targetTrailerKey(dc);
+  const skipRe = targetTrailerRegex(dc);
+  const pending = sourceCommits.filter(c => !shaMapping.has(c.hash)).map(c => c.hash);
+  if (pending.length === 0) return;
+
+  const trailersByHash = fetchTrailersBatch(pending);
+  const candidates: Array<{ hash: string; target: string }> = [];
+  for (const hash of pending) {
+    const trailers = trailersByHash.get(hash) ?? "";
+    if (!hasTrailer(trailers, skipKey)) continue;
+    const match = trailers.split("\n").map(l => l.match(skipRe)).find(m => m);
+    if (match) candidates.push({ hash, target: match[1] });
+  }
+  if (candidates.length === 0) return;
+
+  const present = batchObjectsExist(candidates.map(c => c.target));
+  for (const { hash, target } of candidates) {
+    if (present.has(target)) shaMapping.set(hash, target);
+  }
+}
+
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
@@ -1801,8 +1861,12 @@ export function mirrorHistory(opts: {
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const sourceCommits = collectSourceCommits(dc, branches);
+  // Treat echoes (commits forwarded from the target side) as already-replayed
+  // so the load-bearing scan skips them — the dominant cost in the export
+  // direction, where most of the monorepo is echoes of prior imports.
+  addEchoMappings(sourceCommits, dc, shaMapping);
   const alreadyReplayed = new Set(shaMapping.keys());
-  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes (skipping ${alreadyReplayed.size} already replayed)...`);
+  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes (skipping ${alreadyReplayed.size} already replayed/echo)...`);
   const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
