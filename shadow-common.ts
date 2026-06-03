@@ -1879,7 +1879,7 @@ export function syncTags(opts: {
   source: RepoEndpoint;
   target: RepoEndpoint;
   shaMapping: Map<string, string>;
-}): { pushed: number; skipped: number } {
+}): { pushed: number; skipped: number; upToDate: number } {
   const { source, target, shaMapping } = opts;
 
   git(["fetch", source.remote, "--tags"], { safe: true });
@@ -1888,14 +1888,30 @@ export function syncTags(opts: {
     ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)"],
     { safe: true },
   );
-  if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0 };
+  if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0, upToDate: 0 };
   const tagLines = listRes.stdout.split("\n").filter(Boolean);
-  if (tagLines.length === 0) return { pushed: 0, skipped: 0 };
+  if (tagLines.length === 0) return { pushed: 0, skipped: 0, upToDate: 0 };
 
   console.log(`\n── Syncing tags (${tagLines.length} candidate(s)) ──`);
 
+  // Live snapshot of the target's current tags so we skip ones already correct
+  // instead of re-force-pushing every tag each run. Must be ls-remote (the
+  // target's real state): the local refs/tags/* are the SOURCE tags fetched
+  // above into the same namespace, so comparing against them would be wrong.
+  const remoteTags = new Map<string, string>();
+  const lr = git(["ls-remote", "--tags", target.remote], { safe: true });
+  if (lr.ok) {
+    for (const l of lr.stdout.split("\n")) {
+      const [sha, ref] = l.split("\t");
+      if (ref && ref.startsWith("refs/tags/") && !ref.endsWith("^{}")) {
+        remoteTags.set(ref.slice("refs/tags/".length), sha);
+      }
+    }
+  }
+
   let pushed = 0;
   let skipped = 0;
+  let upToDate = 0;
   for (const line of tagLines) {
     const sep1 = line.indexOf("|");
     const sep2 = line.indexOf("|", sep1 + 1);
@@ -1931,6 +1947,14 @@ export function syncTags(opts: {
       pushSHA = targetCommit;
     }
 
+    // Already correct on the target (byte-identical tag object / same commit) —
+    // nothing to do. pushSHA fingerprints the whole tag, so a re-annotation
+    // (same commit, new message/tagger) still differs and falls through.
+    if (remoteTags.get(name) === pushSHA) {
+      upToDate++;
+      continue;
+    }
+
     // Force-push: source is the source of truth for tags, so target may need
     // to overwrite a previous propagation if the source moved the tag.
     const pushRes = git(
@@ -1946,6 +1970,6 @@ export function syncTags(opts: {
     pushed++;
   }
 
-  console.log(`Tags: ${pushed} pushed, ${skipped} skipped.`);
-  return { pushed, skipped };
+  console.log(`Tags: ${pushed} pushed, ${upToDate} up to date, ${skipped} skipped (source commit not replayed).`);
+  return { pushed, skipped, upToDate };
 }
