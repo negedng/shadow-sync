@@ -535,6 +535,7 @@ function logDecileProgress(label: string, i: number, total: number): void {
 function filterLoadBearingCommits(
   commits: TopoCommit[],
   dc: DirectionConfig,
+  alreadyReplayed: Set<string>,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
@@ -545,7 +546,10 @@ function filterLoadBearingCommits(
   let i = 0;
   for (const c of commits) {
     i++;
-    if (isLoadBearing(c, dc, keptSet)) {
+    // An already-replayed commit was load-bearing-kept in a prior run.
+    if (alreadyReplayed.has(c.hash)) {
+      keptSet.add(c.hash);
+    } else if (isLoadBearing(c, dc, keptSet)) {
       keptSet.add(c.hash);
       kept.push(c);
     }
@@ -1797,9 +1801,10 @@ export function mirrorHistory(opts: {
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const sourceCommits = collectSourceCommits(dc, branches);
-  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes...`);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc);
-  console.log(`${relevantCommits.length} load-bearing; checking which are already replayed...`);
+  const alreadyReplayed = new Set(shaMapping.keys());
+  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes (skipping ${alreadyReplayed.size} already replayed)...`);
+  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed);
+  console.log(`${relevantCommits.length} new load-bearing commit(s).`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, sourceCommits);
 
