@@ -1884,8 +1884,12 @@ export function syncTags(opts: {
 
   git(["fetch", source.remote, "--tags"], { safe: true });
 
+  // %(*objectname) dereferences an annotated tag to its commit (empty for
+  // lightweight, where %(objectname) is already the commit). Peeling here
+  // avoids a `git rev-parse` spawn per tag — the real cost when thousands of
+  // tags point at commits not yet replayed.
   const listRes = git(
-    ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)"],
+    ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)|%(*objectname)"],
     { safe: true },
   );
   if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0, upToDate: 0 };
@@ -1913,19 +1917,22 @@ export function syncTags(opts: {
   let skipped = 0;
   let upToDate = 0;
   for (const line of tagLines) {
+    // name | objecttype | objectname | *objectname(peeled commit, blank if lightweight)
+    // name/type can't contain '|'; the trailing two fields are hex/blank.
     const sep1 = line.indexOf("|");
     const sep2 = line.indexOf("|", sep1 + 1);
+    const sep3 = line.indexOf("|", sep2 + 1);
     const name = line.slice(0, sep1);
     const objectType = line.slice(sep1 + 1, sep2);
-
-    // Peel to commit (works for both lightweight and annotated).
-    const peeled = git(["rev-parse", `refs/tags/${name}^{commit}`], { safe: true });
-    if (!peeled.ok) { skipped++; continue; }
-    const sourceCommit = peeled.stdout;
+    const objectName = line.slice(sep2 + 1, sep3);
+    const peeledCommit = line.slice(sep3 + 1);
+    const sourceCommit = peeledCommit || objectName;  // commit for both kinds; no spawn
+    if (!sourceCommit) { skipped++; continue; }
 
     const targetCommit = shaMapping.get(sourceCommit);
     if (!targetCommit) {
-      console.log(`  ${name}: source commit ${sourceCommit.slice(0, 8)} not replayed (skipping)`);
+      // Common and expected (tags on commits not yet merged into the synced
+      // branch). Count, don't log per-tag — there can be thousands.
       skipped++;
       continue;
     }
