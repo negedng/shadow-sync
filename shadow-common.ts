@@ -482,50 +482,6 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
   };
 }
 
-/**
- * `--no-walk` bypasses path-filter simplification, which would silently drop
- * merge parents TREESAME at the path. Chunked for argv limits.
- */
-function fetchTrueParents(hashes: string[]): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  if (hashes.length === 0) return map;
-  const CHUNK = 500;
-  for (let i = 0; i < hashes.length; i += CHUNK) {
-    const chunk = hashes.slice(i, i + CHUNK);
-    const result = git(["log", "--no-walk", "--format=%H %P", ...chunk], { safe: true });
-    if (!result.ok) {
-      fail(`Failed to fetch parents for ${chunk.length} commit(s): ${result.stderr}`);
-    }
-    for (const line of result.stdout.split("\n").filter(Boolean)) {
-      const parts = line.split(/\s+/).filter(Boolean);
-      map.set(parts[0], parts.slice(1));
-    }
-  }
-  return map;
-}
-
-function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoCommit[] {
-  // --full-history --parents surfaces all merges in the path-filtered reachable
-  // set, INCLUDING merges TREESAME to all parents (e.g. two branches making the
-  // identical change, joined by a merge) — without --parents, path simplification
-  // prunes those, stranding one side's replay. Parent rewriting keeps them; the
-  // non-touching single-parent commits stay pruned. filterLoadBearingCommits
-  // drops the non-load-bearing ones afterward. With --format=%H, --parents does
-  // not append parent SHAs to the output; fetchTrueParents supplies real parents.
-  const args = ["log", "--topo-order", "--reverse", "--full-history", "--parents", "--format=%H",
-    ...branches.map(b => `${dc.source.remote}/${b}`)];
-  // Path filter only when no mapping is at root. Any root source means the
-  // whole commit graph is in-scope and no `--` is added.
-  if (dc.mappings.length > 0 && !anyRootSource(dc)) {
-    args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
-  }
-  const result = git(args, { safe: true });
-  if (!result.ok) fail(`log failed (${args.join(" ")}): ${result.stderr}`);
-  if (!result.stdout) return [];
-  const hashes = result.stdout.split("\n").filter(Boolean);
-  const parentsMap = fetchTrueParents(hashes);
-  return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
-}
 
 // ── Candidate-merge identification (two batched calls, decided in memory) ─────
 // The load-bearing scan must decide, per merge, whether a non-first parent
@@ -651,6 +607,22 @@ function computeCandidateMerges(g: SourceGraph): Set<string> {
     }
   }
   return candidates;
+}
+
+// The replay list, derived from the graph instead of a second `git log` +
+// fetchTrueParents: `git log --full-history --parents -- <dirs>` is exactly
+// {commits whose own diff touched the dirs} ∪ {all merges} (verified), and the
+// graph already holds the touched set and the true parents. Emitted oldest-first
+// (graph keys are newest-first) so the load-bearing scan sees ancestors first.
+function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
+  const out: TopoCommit[] = [];
+  const keys = [...g.parents.keys()];
+  for (let i = keys.length - 1; i >= 0; i--) {
+    const h = keys[i];
+    const ps = g.parents.get(h)!;
+    if (g.touched.has(h) || ps.length >= 2) out.push({ hash: h, parents: ps });
+  }
+  return out;
 }
 
 // Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
@@ -917,7 +889,7 @@ function dropOrphanedCommits(
   branches: string[],
   shaMapping: Map<string, string>,
   remote: string,
-  sourceCommits: TopoCommit[],
+  graph: SourceGraph,
 ): TopoCommit[] {
   const newSet = new Set(newCommits.map(c => c.hash));
   const kept = new Set<string>();
@@ -933,13 +905,11 @@ function dropOrphanedCommits(
     }
   }
 
-  // Parents are already on the TopoCommit objects (collectSourceCommits ran
-  // `log %P` over the whole set); reuse them instead of a git query per commit.
-  // Fall back per-commit only for passthrough hashes outside the set.
-  const parentsByHash = new Map(sourceCommits.map(c => [c.hash, c.parents]));
+  // The graph holds every source commit's true parents — read them instead of a
+  // `git log %P` per commit. (Defensive git fallback for any hash outside it.)
   const parentsOf = (hash: string): string[] => {
-    const cached = parentsByHash.get(hash);
-    if (cached) return cached;
+    const fromGraph = graph.parents.get(hash);
+    if (fromGraph) return fromGraph;
     const res = git(["log", "-1", "--format=%P", hash], { safe: true });
     if (!res.ok) fail(`log -1 --format=%P ${hash} failed: ${res.stderr}`);
     return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
@@ -1558,6 +1528,7 @@ function collectAbsorbedHalted(
   commit: TopoCommit,
   haltedSources: Set<string>,
   shaMapping: Map<string, string>,
+  graph: SourceGraph,
 ): string[] {
   const absorbed = new Set<string>();
   const seen = new Set<string>();
@@ -1568,10 +1539,10 @@ function collectAbsorbedHalted(
     seen.add(p);
     if (!haltedSources.has(p)) continue;
     absorbed.add(p);
-    const parents = git(["log", "-1", "--format=%P", p], { safe: true });
-    if (parents.ok && parents.stdout) {
-      for (const pp of parents.stdout.split(/\s+/).filter(Boolean)) stack.push(pp);
-    }
+    // True parents from the graph (defensive git fallback for hashes outside it).
+    const pps = graph.parents.get(p)
+      ?? (() => { const r = git(["log", "-1", "--format=%P", p], { safe: true }); return r.ok && r.stdout ? r.stdout.split(/\s+/).filter(Boolean) : []; })();
+    for (const pp of pps) stack.push(pp);
   }
   return [...absorbed];
 }
@@ -1870,8 +1841,9 @@ function replayCommits(opts: {
   shaMapping: Map<string, string>;
   targetInit: string | null;
   dc: DirectionConfig;
+  graph: SourceGraph;
 }): ReplayHalts {
-  const { newCommits, shaMapping, targetInit, dc } = opts;
+  const { newCommits, shaMapping, targetInit, dc, graph } = opts;
   const addKey = sourceTrailerKey(dc);
   const tmpIndex = path.join(
     os.tmpdir(),
@@ -1954,7 +1926,7 @@ function replayCommits(opts: {
       // Absorption: collect halted source ancestors reachable from this commit
       // through its source-side parents. They become additional Shadow-replayed
       // trailers so the next sync sees them as already mapped and skips them.
-      const absorbed = collectAbsorbedHalted(commit, haltedSources, shaMapping);
+      const absorbed = collectAbsorbedHalted(commit, haltedSources, shaMapping, graph);
 
       let msg = isEcho
         ? appendTrailer(stripReplayedTrailers(meta.message), `${addKey}: ${commit.hash}`)
@@ -2006,11 +1978,15 @@ export function mirrorHistory(opts: {
   const shaMapping = loadReplayedMappings({ branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  const sourceCommits = collectSourceCommits(dc, branches);
-  // Identify (in memory, off two batched git calls) which merges could be
-  // load-bearing, so the scan skips the per-merge `git log p2 ^p1` for the
-  // thousands of inert merges instead of re-running it every sync.
-  const candidateMerges = computeCandidateMerges(collectSourceGraph(dc, branches));
+  // One in-memory source graph (two batched git calls) is the single source of
+  // truth for the scan: the replay list, the candidate merges, and the ancestry
+  // walks (dropOrphanedCommits, collectAbsorbedHalted) all read it instead of
+  // spawning a `git log` per commit.
+  const graph = collectSourceGraph(dc, branches);
+  const sourceCommits = deriveSourceCommits(graph);
+  // Which merges could be load-bearing — lets the scan skip the per-merge
+  // `git log p2 ^p1` for the thousands of inert merges every sync.
+  const candidateMerges = computeCandidateMerges(graph);
   // Treat echoes (commits forwarded from the target side) as already-replayed
   // so the load-bearing scan skips them — the dominant cost in the export
   // direction, where most of the monorepo is echoes of prior imports.
@@ -2020,7 +1996,7 @@ export function mirrorHistory(opts: {
   const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed, candidateMerges);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
-  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, sourceCommits);
+  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, graph);
 
   if (usefulNewCommits.length === 0) {
     return {
@@ -2045,7 +2021,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc });
+  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, graph });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're
