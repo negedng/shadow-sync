@@ -492,8 +492,8 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
 // instead of spawning a `git log` per commit.
 interface SourceGraph {
   parents: Map<string, string[]>;
-  index: Map<string, number>;   // topo position, 0 = newest; a commit's parents have larger index
-  touched: Set<string>;         // commits whose own diff touched the synced dirs (ignore-blind)
+  index: Map<string, number>;     // topo position, 0 = newest; a commit's parents have larger index
+  syncTouched: Set<string>;       // commits whose own diff touched the synced dirs (ignore-blind)
 }
 
 function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGraph {
@@ -513,15 +513,15 @@ function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGrap
   // Call 2: the set of commits whose own diff touched the synced dirs. With no
   // pathspec (root source) every commit is in scope, so the candidate filter is
   // a no-op there (every merge becomes a candidate → precise check, as before).
-  const touched = new Set<string>();
+  const syncTouched = new Set<string>();
   if (dc.mappings.length > 0 && !anyRootSource(dc)) {
     const t = git(["log", "--full-history", "--format=%H", ...refs, "--", ...sourceDirsOf(dc).map(d => `${d}/`)], { safe: true });
-    if (!t.ok) fail(`log --full-history (touched) failed: ${t.stderr}`);
-    for (const h of t.stdout.split("\n")) if (h) touched.add(h);
+    if (!t.ok) fail(`log --full-history (sync-touched) failed: ${t.stderr}`);
+    for (const h of t.stdout.split("\n")) if (h) syncTouched.add(h);
   } else {
-    for (const h of index.keys()) touched.add(h);
+    for (const h of index.keys()) syncTouched.add(h);
   }
-  return { parents, index, touched };
+  return { parents, index, syncTouched };
 }
 
 // A commit's true parents from the loaded graph, with a defensive `git log %P`
@@ -537,15 +537,15 @@ function graphParentsOf(graph: SourceGraph, hash: string): string[] {
 // The replay list, derived from the graph instead of a second `git log` +
 // fetchTrueParents: `git log --full-history --parents -- <dirs>` is exactly
 // {commits whose own diff touched the dirs} ∪ {all merges} (verified), and the
-// graph already holds the touched set and the true parents. Emitted oldest-first
-// (graph keys are newest-first) so the load-bearing scan sees ancestors first.
+// graph already holds the sync-touched set and the true parents. Emitted
+// oldest-first (graph keys are newest-first) so the scan sees ancestors first.
 function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
   const out: TopoCommit[] = [];
   const keys = [...g.parents.keys()];
   for (let i = keys.length - 1; i >= 0; i--) {
     const h = keys[i];
     const ps = g.parents.get(h)!;
-    if (g.touched.has(h) || ps.length >= 2) out.push({ hash: h, parents: ps });
+    if (g.syncTouched.has(h) || ps.length >= 2) out.push({ hash: h, parents: ps });
   }
   return out;
 }
@@ -556,88 +556,112 @@ function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
 // Spawning `git log p2 ^p1` per merge is the dominant incremental cost: thousands
 // of inert pull-merges (their non-first parents touch nothing in the synced dirs),
 // re-evaluated every sync. Instead, compute in memory the merges that COULD be
-// load-bearing from the graph + touched set. A merge that is NOT a candidate is
-// provably inert (no touched exclusive ancestor ⟹ no kept exclusive ancestor,
-// since the touched set over-approximates kept), so it is dropped with zero git
-// calls. The few candidates still run the precise, .shadowignore-aware per-merge
-// check (sliceChangedVsParent + hasKeptExclusiveAncestor), so decisions are
-// byte-identical to the per-merge scan.
+// load-bearing from the graph + sync-touched set. A merge that is NOT a candidate
+// is provably inert (no sync-touched exclusive ancestor ⟹ no kept exclusive
+// ancestor, since sync-touched over-approximates kept), so it is dropped with zero
+// git calls. The few candidates still run the precise, .shadowignore-aware
+// per-merge check (sliceChangedVsParent + hasKeptExclusiveAncestor), so decisions
+// are byte-identical to the per-merge scan.
 
-// True iff some commit in `kept` is reachable from `pi` but not from `p1` — the
-// in-memory equivalent of `git log pi ^p1 ∩ kept`. Paints INTERESTING down from
-// pi and UNINTERESTING down from p1; processing in topo (newest-first) order means
-// a commit's flags are final when popped (all its children have smaller index).
-// Bounded by the divergence depth and returns on the first exclusive kept commit.
-const F_UNINT = 1, F_INT = 2;
-function exclusiveHasKept(
-  pi: string, p1: string, kept: Set<string>,
-  parents: Map<string, string[]>, index: Map<string, number>,
-): boolean {
+// Binary min-heap of numbers (smallest pops first). Drives exclusiveHasKept's
+// strict topo-order walk: indices are popped newest-first so a commit is only
+// visited once all its descendants have painted it.
+function makeMinHeap() {
+  const h: number[] = [];
+  return {
+    get size() { return h.length; },
+    push(x: number): void {
+      h.push(x);
+      let c = h.length - 1;
+      while (c > 0) {
+        const p = (c - 1) >> 1;
+        if (h[p] <= h[c]) break;
+        [h[p], h[c]] = [h[c], h[p]];
+        c = p;
+      }
+    },
+    pop(): number {
+      const top = h[0], last = h.pop()!;
+      if (h.length) {
+        h[0] = last;
+        let c = 0;
+        for (;;) {
+          const l = 2 * c + 1, r = 2 * c + 2;
+          let s = c;
+          if (l < h.length && h[l] < h[s]) s = l;
+          if (r < h.length && h[r] < h[s]) s = r;
+          if (s === c) break;
+          [h[s], h[c]] = [h[c], h[s]];
+          c = s;
+        }
+      }
+      return top;
+    },
+  };
+}
+
+// True iff some commit in `keptApprox` is reachable from `pi` but not from `p1`
+// — the in-memory equivalent of `git log pi ^p1 ∩ keptApprox`. Paints "reachable
+// from p1" down from p1 and "reachable from pi" down from pi; a commit is
+// EXCLUSIVE when it carries the pi flag but not the p1 flag. The topo-index
+// min-heap (newest first) means a commit's flags are final when popped (all its
+// children have a smaller index). Bounded by the divergence depth, returning on
+// the first exclusive commit that is in keptApprox.
+const F_P1_REACHABLE = 1, F_Pi_REACHABLE = 2;
+function exclusiveHasKept(pi: string, p1: string, keptApprox: Set<string>, g: SourceGraph): boolean {
+  const { parents, index } = g;
   const flag = new Map<string, number>();
-  // Binary min-heap of topo indices (smallest = newest, popped first).
-  const heap: number[] = [];
-  const shaAt = new Map<number, string>();
-  const heapPush = (ix: number) => {
-    heap.push(ix);
-    let c = heap.length - 1;
-    while (c > 0) { const p = (c - 1) >> 1; if (heap[p] <= heap[c]) break; [heap[p], heap[c]] = [heap[c], heap[p]]; c = p; }
-  };
-  const heapPop = (): number => {
-    const top = heap[0]; const last = heap.pop()!;
-    if (heap.length) {
-      heap[0] = last; let c = 0;
-      for (;;) { const l = 2 * c + 1, r = 2 * c + 2; let s = c; if (l < heap.length && heap[l] < heap[s]) s = l; if (r < heap.length && heap[r] < heap[s]) s = r; if (s === c) break; [heap[s], heap[c]] = [heap[c], heap[s]]; c = s; }
-    }
-    return top;
-  };
-  let interesting = 0;
+  const heap = makeMinHeap();
+  const shaAt = new Map<number, string>();   // recover a sha from its popped index
+  let exclusiveQueued = 0;                    // pi-exclusive commits still in the heap
+
+  const isExclusive = (f: number) => (f & F_Pi_REACHABLE) !== 0 && (f & F_P1_REACHABLE) === 0;
   const setFlag = (sha: string, bit: number) => {
     const ix = index.get(sha);
-    if (ix === undefined) return;       // outside the loaded graph
+    if (ix === undefined) return;            // outside the loaded graph
     const old = flag.get(sha) ?? 0;
     const nw = old | bit;
     if (nw === old) return;
     flag.set(sha, nw);
-    const wasInt = (old & F_INT) !== 0 && (old & F_UNINT) === 0;
-    const isInt = (nw & F_INT) !== 0 && (nw & F_UNINT) === 0;
-    if (old === 0) { shaAt.set(ix, sha); heapPush(ix); }
-    if (isInt && !wasInt) interesting++;
-    else if (!isInt && wasInt) interesting--;
+    if (old === 0) { shaAt.set(ix, sha); heap.push(ix); }
+    if (isExclusive(nw) && !isExclusive(old)) exclusiveQueued++;
+    else if (!isExclusive(nw) && isExclusive(old)) exclusiveQueued--;
   };
-  setFlag(p1, F_UNINT);
-  setFlag(pi, F_INT);
-  while (heap.length && interesting > 0) {
-    const c = shaAt.get(heapPop())!;
+
+  setFlag(p1, F_P1_REACHABLE);
+  setFlag(pi, F_Pi_REACHABLE);
+  while (heap.size && exclusiveQueued > 0) {
+    const c = shaAt.get(heap.pop())!;
     const f = flag.get(c) ?? 0;
-    const cInt = (f & F_INT) !== 0 && (f & F_UNINT) === 0;
-    if (cInt) {
-      interesting--;
-      if (kept.has(c)) return true;
+    const exclusive = isExclusive(f);
+    if (exclusive) {
+      exclusiveQueued--;
+      if (keptApprox.has(c)) return true;
     }
     for (const p of parents.get(c) ?? []) {
-      if (f & F_UNINT) setFlag(p, F_UNINT);
-      if (cInt) setFlag(p, F_INT);   // only propagate INT from purely-interesting commits
+      if (f & F_P1_REACHABLE) setFlag(p, F_P1_REACHABLE);   // p1-reachability is hereditary
+      if (exclusive) setFlag(p, F_Pi_REACHABLE);            // pi-reach flows only through exclusive commits
     }
   }
   return false;
 }
 
-// Merges that could be load-bearing: in the touched set (own diff touched the
-// path) OR a non-first parent has a touched/candidate exclusive ancestor. Processed
-// oldest-first so each merge's parents' candidate status is already settled; kept
-// accumulates candidate merges so the test is transitive.
+// Merges that could be load-bearing: in the sync-touched set (own diff touched
+// the path) OR a non-first parent has a sync-touched/candidate exclusive ancestor.
+// Processed oldest-first so each merge's parents' candidate status is already
+// settled; keptApprox accumulates candidate merges so the test is transitive.
 function computeCandidateMerges(g: SourceGraph): Set<string> {
-  const { parents, index, touched } = g;
+  const { parents, index, syncTouched } = g;
   const order = [...index.keys()].sort((a, b) => index.get(b)! - index.get(a)!);  // oldest (largest index) first
-  const kept = new Set(touched);
+  const keptApprox = new Set(syncTouched);
   const candidates = new Set<string>();
   for (const sha of order) {
     const ps = parents.get(sha) ?? [];
     if (ps.length < 2) continue;
-    if (touched.has(sha)) { candidates.add(sha); kept.add(sha); continue; }
+    if (syncTouched.has(sha)) { candidates.add(sha); keptApprox.add(sha); continue; }
     const p1 = ps[0];
     for (let i = 1; i < ps.length; i++) {
-      if (exclusiveHasKept(ps[i], p1, kept, parents, index)) { candidates.add(sha); kept.add(sha); break; }
+      if (exclusiveHasKept(ps[i], p1, keptApprox, g)) { candidates.add(sha); keptApprox.add(sha); break; }
     }
   }
   return candidates;
