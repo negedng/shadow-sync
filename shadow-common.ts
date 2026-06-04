@@ -505,9 +505,14 @@ function fetchTrueParents(hashes: string[]): Map<string, string[]> {
 }
 
 function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoCommit[] {
-  // --full-history surfaces all merges in the path-filtered reachable set;
-  // filterLoadBearingCommits drops the non-load-bearing ones afterward.
-  const args = ["log", "--topo-order", "--reverse", "--full-history", "--format=%H",
+  // --full-history --parents surfaces all merges in the path-filtered reachable
+  // set, INCLUDING merges TREESAME to all parents (e.g. two branches making the
+  // identical change, joined by a merge) — without --parents, path simplification
+  // prunes those, stranding one side's replay. Parent rewriting keeps them; the
+  // non-touching single-parent commits stay pruned. filterLoadBearingCommits
+  // drops the non-load-bearing ones afterward. With --format=%H, --parents does
+  // not append parent SHAs to the output; fetchTrueParents supplies real parents.
+  const args = ["log", "--topo-order", "--reverse", "--full-history", "--parents", "--format=%H",
     ...branches.map(b => `${dc.source.remote}/${b}`)];
   // Path filter only when no mapping is at root. Any root source means the
   // whole commit graph is in-scope and no `--` is added.
@@ -1329,11 +1334,15 @@ function composeMergeBaseTree(opts: {
   const confined = allTargetsConfined(dc);
 
   // Echo splice runs first — handles the round-trip case even when the commit
-  // has a single mapped parent that is itself the echo target.
-  if (confined) {
-    const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
-    if (echo !== "none") return isHalt(echo) ? echo : echo.tree;
-  }
+  // has a single mapped parent that is itself the echo target. It runs
+  // regardless of confinement: the `!confined` first-parent shortcut below is
+  // only valid when the first mapped parent is a faithful replay image, but an
+  // unmapped source parent resolves to targetInit (the target's root commit),
+  // whose stale outer content would otherwise leak through verbatim. resolveEcho
+  // returns "none" when no source parent is an echo, so non-echo merges are
+  // unaffected.
+  const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
+  if (echo !== "none") return isHalt(echo) ? echo : echo.tree;
 
   // 1 parent: outer can't have diverged; inner is that parent's. (fast path)
   if (mappedParents.length === 1) return firstParentTree(mappedParents, commitShort);
