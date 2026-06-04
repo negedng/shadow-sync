@@ -527,6 +527,132 @@ function collectSourceCommits(dc: DirectionConfig, branches: string[]): TopoComm
   return hashes.map(hash => ({ hash, parents: parentsMap.get(hash) ?? [] }));
 }
 
+// ── Candidate-merge identification (two batched calls, decided in memory) ─────
+// The load-bearing scan must decide, per merge, whether a non-first parent
+// contributes a kept commit exclusive of the first parent (hasKeptExclusiveAncestor).
+// Spawning `git log p2 ^p1` per merge is the dominant incremental cost: thousands
+// of inert pull-merges (their non-first parents touch nothing in the synced dirs),
+// re-evaluated every sync. Instead, load the full commit graph and the path-touched
+// set ONCE, and compute in memory the merges that COULD be load-bearing. A merge
+// that is NOT a candidate is provably inert (no touched exclusive ancestor ⟹ no
+// kept exclusive ancestor, since the touched set over-approximates kept), so it is
+// dropped with zero git calls. The few candidates still run the precise,
+// .shadowignore-aware per-merge check (sliceChangedVsParent + hasKeptExclusiveAncestor),
+// so decisions are byte-identical to the per-merge scan.
+interface SourceGraph {
+  parents: Map<string, string[]>;
+  index: Map<string, number>;   // topo position, 0 = newest; a commit's parents have larger index
+  touched: Set<string>;         // commits whose own diff touched the synced dirs (ignore-blind)
+}
+
+function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGraph {
+  const refs = branches.map(b => `${dc.source.remote}/${b}`);
+  // Call 1: the whole reachable graph in topo order with parent edges.
+  const g = git(["rev-list", "--topo-order", "--parents", ...refs], { safe: true });
+  if (!g.ok) fail(`rev-list --parents failed: ${g.stderr}`);
+  const parents = new Map<string, string[]>();
+  const index = new Map<string, number>();
+  let i = 0;
+  for (const line of g.stdout.split("\n")) {
+    if (!line) continue;
+    const parts = line.split(" ");
+    parents.set(parts[0], parts.slice(1));
+    index.set(parts[0], i++);
+  }
+  // Call 2: the set of commits whose own diff touched the synced dirs. With no
+  // pathspec (root source) every commit is in scope, so the candidate filter is
+  // a no-op there (every merge becomes a candidate → precise check, as before).
+  const touched = new Set<string>();
+  if (dc.mappings.length > 0 && !anyRootSource(dc)) {
+    const t = git(["log", "--full-history", "--format=%H", ...refs, "--", ...sourceDirsOf(dc).map(d => `${d}/`)], { safe: true });
+    if (!t.ok) fail(`log --full-history (touched) failed: ${t.stderr}`);
+    for (const h of t.stdout.split("\n")) if (h) touched.add(h);
+  } else {
+    for (const h of index.keys()) touched.add(h);
+  }
+  return { parents, index, touched };
+}
+
+// True iff some commit in `kept` is reachable from `pi` but not from `p1` — the
+// in-memory equivalent of `git log pi ^p1 ∩ kept`. Paints INTERESTING down from
+// pi and UNINTERESTING down from p1; processing in topo (newest-first) order means
+// a commit's flags are final when popped (all its children have smaller index).
+// Bounded by the divergence depth and returns on the first exclusive kept commit.
+const F_UNINT = 1, F_INT = 2;
+function exclusiveHasKept(
+  pi: string, p1: string, kept: Set<string>,
+  parents: Map<string, string[]>, index: Map<string, number>,
+): boolean {
+  const flag = new Map<string, number>();
+  // Binary min-heap of topo indices (smallest = newest, popped first).
+  const heap: number[] = [];
+  const shaAt = new Map<number, string>();
+  const heapPush = (ix: number) => {
+    heap.push(ix);
+    let c = heap.length - 1;
+    while (c > 0) { const p = (c - 1) >> 1; if (heap[p] <= heap[c]) break; [heap[p], heap[c]] = [heap[c], heap[p]]; c = p; }
+  };
+  const heapPop = (): number => {
+    const top = heap[0]; const last = heap.pop()!;
+    if (heap.length) {
+      heap[0] = last; let c = 0;
+      for (;;) { const l = 2 * c + 1, r = 2 * c + 2; let s = c; if (l < heap.length && heap[l] < heap[s]) s = l; if (r < heap.length && heap[r] < heap[s]) s = r; if (s === c) break; [heap[s], heap[c]] = [heap[c], heap[s]]; c = s; }
+    }
+    return top;
+  };
+  let interesting = 0;
+  const setFlag = (sha: string, bit: number) => {
+    const ix = index.get(sha);
+    if (ix === undefined) return;       // outside the loaded graph
+    const old = flag.get(sha) ?? 0;
+    const nw = old | bit;
+    if (nw === old) return;
+    flag.set(sha, nw);
+    const wasInt = (old & F_INT) !== 0 && (old & F_UNINT) === 0;
+    const isInt = (nw & F_INT) !== 0 && (nw & F_UNINT) === 0;
+    if (old === 0) { shaAt.set(ix, sha); heapPush(ix); }
+    if (isInt && !wasInt) interesting++;
+    else if (!isInt && wasInt) interesting--;
+  };
+  setFlag(p1, F_UNINT);
+  setFlag(pi, F_INT);
+  while (heap.length && interesting > 0) {
+    const c = shaAt.get(heapPop())!;
+    const f = flag.get(c) ?? 0;
+    const cInt = (f & F_INT) !== 0 && (f & F_UNINT) === 0;
+    if (cInt) {
+      interesting--;
+      if (kept.has(c)) return true;
+    }
+    for (const p of parents.get(c) ?? []) {
+      if (f & F_UNINT) setFlag(p, F_UNINT);
+      if (cInt) setFlag(p, F_INT);   // only propagate INT from purely-interesting commits
+    }
+  }
+  return false;
+}
+
+// Merges that could be load-bearing: in the touched set (own diff touched the
+// path) OR a non-first parent has a touched/candidate exclusive ancestor. Processed
+// oldest-first so each merge's parents' candidate status is already settled; kept
+// accumulates candidate merges so the test is transitive.
+function computeCandidateMerges(g: SourceGraph): Set<string> {
+  const { parents, index, touched } = g;
+  const order = [...index.keys()].sort((a, b) => index.get(b)! - index.get(a)!);  // oldest (largest index) first
+  const kept = new Set(touched);
+  const candidates = new Set<string>();
+  for (const sha of order) {
+    const ps = parents.get(sha) ?? [];
+    if (ps.length < 2) continue;
+    if (touched.has(sha)) { candidates.add(sha); kept.add(sha); continue; }
+    const p1 = ps[0];
+    for (let i = 1; i < ps.length; i++) {
+      if (exclusiveHasKept(ps[i], p1, kept, parents, index)) { candidates.add(sha); kept.add(sha); break; }
+    }
+  }
+  return candidates;
+}
+
 // Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
 // phases (>100 items) where per-item logging would be noise.
 const PROGRESS_THRESHOLD = 100;
@@ -541,6 +667,7 @@ function filterLoadBearingCommits(
   commits: TopoCommit[],
   dc: DirectionConfig,
   alreadyReplayed: Set<string>,
+  candidateMerges: Set<string>,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
@@ -554,7 +681,7 @@ function filterLoadBearingCommits(
     // An already-replayed commit was load-bearing-kept in a prior run.
     if (alreadyReplayed.has(c.hash)) {
       keptSet.add(c.hash);
-    } else if (isLoadBearing(c, dc, keptSet)) {
+    } else if (isLoadBearing(c, dc, keptSet, candidateMerges)) {
       keptSet.add(c.hash);
       kept.push(c);
     }
@@ -617,8 +744,17 @@ function isLoadBearing(
   c: TopoCommit,
   dc: DirectionConfig,
   keptSet: Set<string>,
+  candidateMerges: Set<string>,
 ): boolean {
   if (c.parents.length === 0) return true;
+
+  // Non-candidate merge: provably inert (no touched exclusive ancestor ⟹ no kept
+  // exclusive ancestor, and not touched ⟹ treesame in the path). Drop with zero
+  // git calls — this is the thousands of inert pull-merges on incremental syncs.
+  // (Slices are necessarily present too: a vanished slice is a path change ⟹ in
+  // the touched set ⟹ a candidate.)
+  if (c.parents.length > 1 && !candidateMerges.has(c.hash)) return false;
+
   const p1 = c.parents[0];
 
   // Missing source slice (at c or p1) load-bears, matching the old fingerprint
@@ -633,6 +769,7 @@ function isLoadBearing(
   if (sliceChangedVsParent(p1, c.hash, dc, ignoreBySrc)) return true;
 
   if (c.parents.length === 1) return false;
+  // Candidate merge: confirm with the precise, .shadowignore-aware check.
   for (let i = 1; i < c.parents.length; i++) {
     if (hasKeptExclusiveAncestor(c.parents[i], p1, keptSet)) return true;
   }
@@ -1870,13 +2007,17 @@ export function mirrorHistory(opts: {
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
   const sourceCommits = collectSourceCommits(dc, branches);
+  // Identify (in memory, off two batched git calls) which merges could be
+  // load-bearing, so the scan skips the per-merge `git log p2 ^p1` for the
+  // thousands of inert merges instead of re-running it every sync.
+  const candidateMerges = computeCandidateMerges(collectSourceGraph(dc, branches));
   // Treat echoes (commits forwarded from the target side) as already-replayed
   // so the load-bearing scan skips them — the dominant cost in the export
   // direction, where most of the monorepo is echoes of prior imports.
   addEchoMappings(sourceCommits, dc, shaMapping);
   const alreadyReplayed = new Set(shaMapping.keys());
   console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes (skipping ${alreadyReplayed.size} already replayed/echo)...`);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed);
+  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed, candidateMerges);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, sourceCommits);
