@@ -483,18 +483,13 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
 }
 
 
-// ── Candidate-merge identification (two batched calls, decided in memory) ─────
-// The load-bearing scan must decide, per merge, whether a non-first parent
-// contributes a kept commit exclusive of the first parent (hasKeptExclusiveAncestor).
-// Spawning `git log p2 ^p1` per merge is the dominant incremental cost: thousands
-// of inert pull-merges (their non-first parents touch nothing in the synced dirs),
-// re-evaluated every sync. Instead, load the full commit graph and the path-touched
-// set ONCE, and compute in memory the merges that COULD be load-bearing. A merge
-// that is NOT a candidate is provably inert (no touched exclusive ancestor ⟹ no
-// kept exclusive ancestor, since the touched set over-approximates kept), so it is
-// dropped with zero git calls. The few candidates still run the precise,
-// .shadowignore-aware per-merge check (sliceChangedVsParent + hasKeptExclusiveAncestor),
-// so decisions are byte-identical to the per-merge scan.
+// ── Source graph ─────────────────────────────────────────────────────────────
+// The in-memory commit graph: built ONCE per direction from two batched git
+// calls (rev-list --parents for the edges, log --full-history for the
+// path-touched set), then used as the single source of truth for the whole scan.
+// The replay list (deriveSourceCommits), candidate-merge identification, and the
+// ancestry walks in dropOrphanedCommits / collectAbsorbedHalted all read it
+// instead of spawning a `git log` per commit.
 interface SourceGraph {
   parents: Map<string, string[]>;
   index: Map<string, number>;   // topo position, 0 = newest; a commit's parents have larger index
@@ -528,6 +523,45 @@ function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGrap
   }
   return { parents, index, touched };
 }
+
+// A commit's true parents from the loaded graph, with a defensive `git log %P`
+// fallback for any hash outside it.
+function graphParentsOf(graph: SourceGraph, hash: string): string[] {
+  const fromGraph = graph.parents.get(hash);
+  if (fromGraph) return fromGraph;
+  const res = git(["log", "-1", "--format=%P", hash], { safe: true });
+  if (!res.ok) fail(`log -1 --format=%P ${hash} failed: ${res.stderr}`);
+  return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
+}
+
+// The replay list, derived from the graph instead of a second `git log` +
+// fetchTrueParents: `git log --full-history --parents -- <dirs>` is exactly
+// {commits whose own diff touched the dirs} ∪ {all merges} (verified), and the
+// graph already holds the touched set and the true parents. Emitted oldest-first
+// (graph keys are newest-first) so the load-bearing scan sees ancestors first.
+function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
+  const out: TopoCommit[] = [];
+  const keys = [...g.parents.keys()];
+  for (let i = keys.length - 1; i >= 0; i--) {
+    const h = keys[i];
+    const ps = g.parents.get(h)!;
+    if (g.touched.has(h) || ps.length >= 2) out.push({ hash: h, parents: ps });
+  }
+  return out;
+}
+
+// ── Candidate-merge identification ───────────────────────────────────────────
+// The load-bearing scan must decide, per merge, whether a non-first parent
+// contributes a kept commit exclusive of the first parent (hasKeptExclusiveAncestor).
+// Spawning `git log p2 ^p1` per merge is the dominant incremental cost: thousands
+// of inert pull-merges (their non-first parents touch nothing in the synced dirs),
+// re-evaluated every sync. Instead, compute in memory the merges that COULD be
+// load-bearing from the graph + touched set. A merge that is NOT a candidate is
+// provably inert (no touched exclusive ancestor ⟹ no kept exclusive ancestor,
+// since the touched set over-approximates kept), so it is dropped with zero git
+// calls. The few candidates still run the precise, .shadowignore-aware per-merge
+// check (sliceChangedVsParent + hasKeptExclusiveAncestor), so decisions are
+// byte-identical to the per-merge scan.
 
 // True iff some commit in `kept` is reachable from `pi` but not from `p1` — the
 // in-memory equivalent of `git log pi ^p1 ∩ kept`. Paints INTERESTING down from
@@ -609,22 +643,6 @@ function computeCandidateMerges(g: SourceGraph): Set<string> {
   return candidates;
 }
 
-// The replay list, derived from the graph instead of a second `git log` +
-// fetchTrueParents: `git log --full-history --parents -- <dirs>` is exactly
-// {commits whose own diff touched the dirs} ∪ {all merges} (verified), and the
-// graph already holds the touched set and the true parents. Emitted oldest-first
-// (graph keys are newest-first) so the load-bearing scan sees ancestors first.
-function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
-  const out: TopoCommit[] = [];
-  const keys = [...g.parents.keys()];
-  for (let i = keys.length - 1; i >= 0; i--) {
-    const h = keys[i];
-    const ps = g.parents.get(h)!;
-    if (g.touched.has(h) || ps.length >= 2) out.push({ hash: h, parents: ps });
-  }
-  return out;
-}
-
 // Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
 // phases (>100 items) where per-item logging would be noise.
 const PROGRESS_THRESHOLD = 100;
@@ -662,13 +680,6 @@ function filterLoadBearingCommits(
   return kept;
 }
 
-/**
- * Drop iff the commit's effective source tree (composed across all mappings)
- * matches the 1st parent's AND (for merges) every non-first parent's
- * exclusive ancestry above its merge-base with the 1st parent is empty of
- * kept commits. P1 is the trunk; any Pi (i>=1) contributing a kept commit
- * anchors the merge.
- */
 // True iff `<hash>:<sourceDir>` resolves to a tree. Root ("") is always
 // present; memoized since a non-root slice's presence rarely changes.
 const _slicePresentCache = new Map<string, boolean>();
@@ -712,6 +723,13 @@ function sliceChangedVsParent(
   return false;
 }
 
+/**
+ * Drop iff the commit's effective source tree (composed across all mappings)
+ * matches the 1st parent's AND (for merges) every non-first parent's
+ * exclusive ancestry above its merge-base with the 1st parent is empty of
+ * kept commits. P1 is the trunk; any Pi (i>=1) contributing a kept commit
+ * anchors the merge.
+ */
 function isLoadBearing(
   c: TopoCommit,
   dc: DirectionConfig,
@@ -761,18 +779,8 @@ function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>):
   return false;
 }
 
+// ── Replay-list filtering ───────────────────────────────────────────────────
 
-/**
- * Drop already-replayed and echoed commits. Echoes get echo→original recorded
- * in shaMapping so parent resolution reuses the real target SHA rather than
- * re-replaying or falling back to the branch tip.
- *
- * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT
- * dropped here: when two pairs share a source dir on mono (e.g. common/), a
- * frontend-originated commit reaching backend's pair via the monorepo must
- * replay onto backend's shadow so the original author's commit appears in
- * backend's history rather than being flattened into the integrating merge.
- */
 // Batched trailer fetch (one `git log` per ~500 commits, NUL-separated).
 function fetchTrailersBatch(hashes: string[]): Map<string, string> {
   const map = new Map<string, string>();
@@ -811,6 +819,12 @@ function batchObjectsExist(shas: string[]): Set<string> {
   return present;
 }
 
+// The target-side SHA from the first replay trailer matching `skipRe`, or null.
+function matchEchoTarget(trailers: string, skipRe: RegExp): string | null {
+  const match = trailers.split("\n").map(l => l.match(skipRe)).find(m => m);
+  return match ? match[1] : null;
+}
+
 /**
  * Map echo commits (source → target SHA) so they count as already-replayed:
  * skipped in the load-bearing scan AND resolvable as parents. An echo is a
@@ -842,8 +856,8 @@ function addEchoMappings(
   for (const hash of pending) {
     const trailers = trailersByHash.get(hash) ?? "";
     if (!hasTrailer(trailers, skipKey)) continue;
-    const match = trailers.split("\n").map(l => l.match(skipRe)).find(m => m);
-    if (match) candidates.push({ hash, target: match[1] });
+    const target = matchEchoTarget(trailers, skipRe);
+    if (target) candidates.push({ hash, target });
   }
   if (candidates.length === 0) return;
 
@@ -853,6 +867,17 @@ function addEchoMappings(
   }
 }
 
+/**
+ * Drop already-replayed and echoed commits. Echoes get echo→original recorded
+ * in shaMapping so parent resolution reuses the real target SHA rather than
+ * re-replaying or falling back to the branch tip.
+ *
+ * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT
+ * dropped here: when two pairs share a source dir on mono (e.g. common/), a
+ * frontend-originated commit reaching backend's pair via the monorepo must
+ * replay onto backend's shadow so the original author's commit appears in
+ * backend's history rather than being flattened into the integrating merge.
+ */
 function filterNotReplayedCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
@@ -865,11 +890,9 @@ function filterNotReplayedCommits(
     if (shaMapping.has(c.hash)) return false;
     const trailers = trailersByHash.get(c.hash) ?? "";
     if (hasTrailer(trailers, skipKey)) {
-      const match = trailers.split("\n")
-        .map(l => l.match(skipRe))
-        .find(m => m);
-      if (match && refExists(match[1])) {
-        shaMapping.set(c.hash, match[1]);
+      const target = matchEchoTarget(trailers, skipRe);
+      if (target && refExists(target)) {
+        shaMapping.set(c.hash, target);
       }
       return false;
     }
@@ -905,23 +928,13 @@ function dropOrphanedCommits(
     }
   }
 
-  // The graph holds every source commit's true parents — read them instead of a
-  // `git log %P` per commit. (Defensive git fallback for any hash outside it.)
-  const parentsOf = (hash: string): string[] => {
-    const fromGraph = graph.parents.get(hash);
-    if (fromGraph) return fromGraph;
-    const res = git(["log", "-1", "--format=%P", hash], { safe: true });
-    if (!res.ok) fail(`log -1 --format=%P ${hash} failed: ${res.stderr}`);
-    return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
-  };
-
   const visited = new Set<string>();
   const stack = Array.from(kept);
   while (stack.length) {
     const hash = stack.pop()!;
     if (visited.has(hash)) continue;
     visited.add(hash);
-    for (const p of parentsOf(hash)) {
+    for (const p of graphParentsOf(graph, hash)) {
       if (shaMapping.has(p) || visited.has(p)) continue;
       if (newSet.has(p) && !kept.has(p)) kept.add(p);
       // Walk through even when p isn't in newSet — passthrough commits
@@ -1268,6 +1281,12 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
   });
 }
 
+let _emptyTreeSha: string | null = null;
+function emptyTreeSha(): string {
+  if (_emptyTreeSha === null) _emptyTreeSha = git(["mktree"], { input: "" });
+  return _emptyTreeSha;
+}
+
 /** For each mapping, read `<fromHash>:<m[side]>` and splice it into `base` at
  *  `m.target`. Returns null if any slice ref fails to resolve — caller decides
  *  whether to fall back to bare `base` or halt. Each slice is filtered through
@@ -1275,12 +1294,6 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
  *  mappings (nested under this one's source/target dir) don't bleed into this
  *  mapping's spliced region — the sibling's own splice covers them at the
  *  correct target path. */
-let _emptyTreeSha: string | null = null;
-function emptyTreeSha(): string {
-  if (_emptyTreeSha === null) _emptyTreeSha = git(["mktree"], { input: "" });
-  return _emptyTreeSha;
-}
-
 function spliceMappings(
   base: string,
   fromHash: string,
@@ -1539,10 +1552,7 @@ function collectAbsorbedHalted(
     seen.add(p);
     if (!haltedSources.has(p)) continue;
     absorbed.add(p);
-    // True parents from the graph (defensive git fallback for hashes outside it).
-    const pps = graph.parents.get(p)
-      ?? (() => { const r = git(["log", "-1", "--format=%P", p], { safe: true }); return r.ok && r.stdout ? r.stdout.split(/\s+/).filter(Boolean) : []; })();
-    for (const pp of pps) stack.push(pp);
+    for (const pp of graphParentsOf(graph, p)) stack.push(pp);
   }
   return [...absorbed];
 }
@@ -1845,15 +1855,12 @@ function replayCommits(opts: {
 }): ReplayHalts {
   const { newCommits, shaMapping, targetInit, dc, graph } = opts;
   const addKey = sourceTrailerKey(dc);
-  const tmpIndex = path.join(
-    os.tmpdir(),
-    `shadow-replay-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
-  );
 
   const haltedSources = new Set<string>();
   const haltReasons = new Map<string, HaltReason>();
 
-  try {
+  withTmpIndex("replay", idxEnv => {
+    const tmpIndex = idxEnv.GIT_INDEX_FILE;
     const total = newCommits.length;
     const verbose = total < PROGRESS_THRESHOLD;
     let idx = 0;
@@ -1952,9 +1959,7 @@ function replayCommits(opts: {
         console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
       }
     }
-  } finally {
-    fs.rmSync(tmpIndex, { force: true });
-  }
+  });
 
   return { haltedSources, haltReasons };
 }
