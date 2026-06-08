@@ -682,6 +682,7 @@ function filterLoadBearingCommits(
   dc: DirectionConfig,
   alreadyReplayed: Set<string>,
   candidateMerges: Set<string>,
+  settled: Set<string>,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
@@ -695,6 +696,10 @@ function filterLoadBearingCommits(
     // An already-replayed commit was load-bearing-kept in a prior run.
     if (alreadyReplayed.has(c.hash)) {
       keptSet.add(c.hash);
+    } else if (settled.has(c.hash)) {
+      // Reachable from a prior-run frontier and not mapped ⟹ provably dropped in
+      // an earlier sync. Its verdict is immutable, so skip the diff-tree re-check.
+      continue;
     } else if (isLoadBearing(c, dc, keptSet, candidateMerges)) {
       keptSet.add(c.hash);
       kept.push(c);
@@ -922,6 +927,52 @@ function filterNotReplayedCommits(
     }
     return true;
   });
+}
+
+/**
+ * Commits a prior sync already settled: everything reachable from the newest
+ * already-replayed commit on each branch's first-parent line. Such a commit was
+ * scanned in an earlier run and is now either in shaMapping (kept) or provably
+ * dropped — its load-bearing verdict is immutable (it depends only on its own
+ * and its ancestors' fixed trees/verdicts), so the scan can skip re-deriving it.
+ * Pure in-memory walk over the loaded graph; the only git call is one batched
+ * tip resolution. Empty on the first sync (no mapped ancestor ⟹ no frontier).
+ */
+function computeSettledCommits(
+  graph: SourceGraph,
+  branches: string[],
+  dc: DirectionConfig,
+  shaMapping: Map<string, string>,
+): Set<string> {
+  const settled = new Set<string>();
+  if (shaMapping.size === 0) return settled;
+
+  // Resolve each branch tip SHA in one for-each-ref (absent refs are omitted).
+  const refs = branches.map(b => `refs/remotes/${dc.source.remote}/${b}`);
+  const res = git(["for-each-ref", "--format=%(objectname)", ...refs], { safe: true });
+  if (!res.ok || !res.stdout) return settled;
+  const tips = res.stdout.split("\n").map(s => s.trim()).filter(Boolean);
+
+  // Frontier per branch: walk first-parent until the newest mapped commit C_b.
+  // Running off the end (no mapped ancestor on this line) yields no C_b.
+  const frontier: string[] = [];
+  for (const tip of tips) {
+    let h: string | undefined = tip;
+    while (h && !shaMapping.has(h)) h = graphParentsOf(graph, h)[0];
+    if (h) frontier.push(h);
+  }
+
+  // Settled = everything reachable from any frontier commit. Frontier-finding is
+  // first-parent (to locate C_b), but this must follow ALL parents — a dropped
+  // commit can sit on a non-first-parent side branch below a mapped merge.
+  const stack = [...frontier];
+  while (stack.length) {
+    const x = stack.pop()!;
+    if (settled.has(x)) continue;
+    settled.add(x);
+    for (const p of graph.parents.get(x) ?? []) stack.push(p);
+  }
+  return settled;
 }
 
 /**
@@ -2021,8 +2072,18 @@ export function mirrorHistory(opts: {
   // direction, where most of the monorepo is echoes of prior imports.
   addEchoMappings(sourceCommits, dc, shaMapping);
   const alreadyReplayed = new Set(shaMapping.keys());
-  console.log(`Scanning ${sourceCommits.length} source commit(s) for load-bearing changes (skipping ${alreadyReplayed.size} already replayed/echo)...`);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed, candidateMerges);
+  // Commits a prior sync already settled (reachable from the per-branch frontier
+  // of newest-replayed commits). Computed after addEchoMappings so echoes — which
+  // only grow shaMapping — widen the frontier and can only add skips, never flip a
+  // drop to load-bearing. Lets the scan skip re-deriving immutable drop verdicts.
+  const settled = computeSettledCommits(graph, branches, dc, shaMapping);
+  let newToScan = 0, settledDropped = 0;
+  for (const c of sourceCommits) {
+    if (alreadyReplayed.has(c.hash)) continue;
+    if (settled.has(c.hash)) settledDropped++; else newToScan++;
+  }
+  console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${alreadyReplayed.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
+  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed, candidateMerges, settled);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
   const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, graph);
