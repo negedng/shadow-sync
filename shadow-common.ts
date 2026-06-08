@@ -199,6 +199,18 @@ export function applyTestOverrides(opts: {
   if (opts.shadowBranchPrefix != null) _shadowBranchPrefix = opts.shadowBranchPrefix;
 }
 
+
+// Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
+// phases (>100 items) where per-item logging would be noise.
+const PROGRESS_THRESHOLD = 100;
+function logDecileProgress(label: string, i: number, total: number): void {
+  const step = Math.ceil(total / 10);
+  if (step > 0 && (i % step === 0 || i === total)) {
+    console.log(`  ${label}: ${Math.round((i / total) * 100)}% (${i}/${total})`);
+  }
+}
+
+
 export function fail(msg: string): never {
   throw new ShadowSyncError(`✘ ${msg}`);
 }
@@ -261,6 +273,26 @@ function filterExistingRefs(refs: string[]): string[] {
   return refs.filter(r => existing.has(r));
 }
 
+
+/** Which of `shas` resolve to a present object — one `cat-file --batch-check`
+ *  instead of a `rev-parse` spawn per sha. */
+function batchObjectsExist(shas: string[]): Set<string> {
+  const present = new Set<string>();
+  const uniq = [...new Set(shas)].filter(Boolean);
+  if (uniq.length === 0) return present;
+  const res = git(["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", safe: true, raw: true });
+  if (!res.ok) return present;
+  for (const line of res.stdout.split("\n")) {
+    const sp = line.indexOf(" ");
+    if (sp < 0) continue;
+    // "<sha> <type> <size>" for present; "<sha> missing" for absent.
+    if (line.slice(sp + 1).startsWith("missing")) continue;
+    present.add(line.slice(0, sp));
+  }
+  return present;
+}
+
+
 export function listRemoteBranches(remote: string): string[] {
   return git(["branch", "-r"])
     .split("\n")
@@ -282,6 +314,59 @@ export function ensureRemote(endpoint: RepoEndpoint): void {
   } else if (existing.stdout !== endpoint.url) {
     git(["remote", "set-url", endpoint.remote, endpoint.url]);
   }
+}
+
+// True iff `<hash>:<sourceDir>` resolves to a tree. Root ("") is always
+// present; memoized since a non-root slice's presence rarely changes.
+const _slicePresentCache = new Map<string, boolean>();
+function slicePresent(hash: string, sourceDir: string): boolean {
+  if (!sourceDir) return true;
+  const key = `${hash}:${sourceDir}`;
+  const hit = _slicePresentCache.get(key);
+  if (hit !== undefined) return hit;
+  const r = git(["cat-file", "-t", `${hash}:${sourceDir}`], { safe: true });
+  const present = r.ok && r.stdout === "tree";
+  _slicePresentCache.set(key, present);
+  return present;
+}
+
+/**
+ * Stage `removals` (deletes) and `additions` against `idxEnv`'s index in a
+ * single `update-index --index-info` call over stdin. `additions` are already
+ * "<mode> <sha>\t<path>" lines; `removals` become mode-0 delete lines. Stdin
+ * has no length limit, so this is safe for arbitrarily large file lists —
+ * unlike `git rm -- <paths>`, whose argv overflows CreateProcess on Windows.
+ */
+function applyIndexInfo(
+  idxEnv: { GIT_INDEX_FILE: string },
+  removals: string[],
+  additions: string[],
+): void {
+  if (removals.length === 0 && additions.length === 0) return;
+  const lines = [
+    ...removals.map(p => `0 ${NULL_SHA}\t${p}`),
+    ...additions,
+  ];
+  git(["update-index", "--index-info"], { env: idxEnv, input: lines.join("\n") + "\n" });
+}
+
+/** Allocate a private git index, run `fn` against it, then delete it. */
+function withTmpIndex<T>(label: string, fn: (idxEnv: { GIT_INDEX_FILE: string }) => T): T {
+  const tmpIndex = path.join(
+    os.tmpdir(),
+    `shadow-${label}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
+  );
+  try {
+    return fn({ GIT_INDEX_FILE: tmpIndex });
+  } finally {
+    fs.rmSync(tmpIndex, { force: true });
+  }
+}
+
+let _emptyTreeSha: string | null = null;
+function emptyTreeSha(): string {
+  if (_emptyTreeSha === null) _emptyTreeSha = git(["mktree"], { input: "" });
+  return _emptyTreeSha;
 }
 
 // ── Trailer machinery ─────────────────────────────────────────────────────────
@@ -366,6 +451,35 @@ function extractTrailerMapping(logArgs: string[], trailerKey: string): Map<strin
   }
   return mapping;
 }
+
+
+// Batched trailer fetch (one `git log` per ~500 commits, NUL-separated).
+function fetchTrailersBatch(hashes: string[]): Map<string, string> {
+  const map = new Map<string, string>();
+  if (hashes.length === 0) return map;
+  const CHUNK = 500;
+  for (let i = 0; i < hashes.length; i += CHUNK) {
+    const chunk = hashes.slice(i, i + CHUNK);
+    const res = git(["log", "--no-walk", "-z", "--format=%H%n%(trailers:only,unfold=true)", ...chunk],
+      { safe: true, raw: true });
+    if (!res.ok) fail(`Failed to fetch trailers for ${chunk.length} commit(s): ${res.stderr}`);
+    for (const rec of res.stdout.split("\0")) {
+      if (!rec) continue;
+      const nl = rec.indexOf("\n");
+      const hash = (nl < 0 ? rec : rec.slice(0, nl)).trim();
+      if (hash) map.set(hash, nl < 0 ? "" : rec.slice(nl + 1));
+    }
+  }
+  return map;
+}
+
+// The hash of the existing commit this one is a copy of, read from the first
+// matching replay trailer in its footer — or null if it carries no such trailer.
+function matchOriginalHash(commitTrailers: string, dcTrailerRe: RegExp): string | null {
+  const match = commitTrailers.split("\n").map(l => l.match(dcTrailerRe)).find(m => m);
+  return match ? match[1] : null;
+}
+
 
 // ── Preflight checks ──────────────────────────────────────────────────────────
 
@@ -550,60 +664,7 @@ function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
   return out;
 }
 
-// Log "<label>: P% (i/total)" each time i crosses a 10% boundary — for long
-// phases (>100 items) where per-item logging would be noise.
-const PROGRESS_THRESHOLD = 100;
-function logDecileProgress(label: string, i: number, total: number): void {
-  const step = Math.ceil(total / 10);
-  if (step > 0 && (i % step === 0 || i === total)) {
-    console.log(`  ${label}: ${Math.round((i / total) * 100)}% (${i}/${total})`);
-  }
-}
-
-function filterLoadBearingCommits(
-  commits: TopoCommit[],
-  dc: DirectionConfig,
-  alreadyReplayed: Set<string>,
-  settled: Set<string>,
-): TopoCommit[] {
-  // commits arrive --topo-order --reverse (oldest first), so by the time we
-  // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
-  const keptSet = new Set<string>();
-  const kept: TopoCommit[] = [];
-  const total = commits.length;
-  const showProgress = total > PROGRESS_THRESHOLD;
-  let i = 0;
-  for (const c of commits) {
-    i++;
-    // An already-replayed commit was load-bearing-kept in a prior run.
-    if (alreadyReplayed.has(c.hash)) {
-      keptSet.add(c.hash);
-    } else if (settled.has(c.hash)) {
-      // Reachable from a prior-run frontier and not mapped ⟹ provably dropped in
-      // an earlier sync. Its verdict is immutable, so skip the diff-tree re-check.
-      continue;
-    } else if (isLoadBearing(c, dc, keptSet)) {
-      keptSet.add(c.hash);
-      kept.push(c);
-    }
-    if (showProgress) logDecileProgress("Scanned", i, total);
-  }
-  return kept;
-}
-
-// True iff `<hash>:<sourceDir>` resolves to a tree. Root ("") is always
-// present; memoized since a non-root slice's presence rarely changes.
-const _slicePresentCache = new Map<string, boolean>();
-function slicePresent(hash: string, sourceDir: string): boolean {
-  if (!sourceDir) return true;
-  const key = `${hash}:${sourceDir}`;
-  const hit = _slicePresentCache.get(key);
-  if (hit !== undefined) return hit;
-  const r = git(["cat-file", "-t", `${hash}:${sourceDir}`], { safe: true });
-  const present = r.ok && r.stdout === "tree";
-  _slicePresentCache.set(key, present);
-  return present;
-}
+// ── Replay-list filtering ───────────────────────────────────────────────────
 
 // True iff the commit's diff vs `parent`, after mapping + ignore filtering,
 // has any surviving path — i.e. it changes content that flows to the target.
@@ -630,6 +691,19 @@ function sliceChangedVsParent(
     const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
     if ((ignoreBySrc[owner.idx] ?? []).some(p => p.test(srcRelative))) continue;
     return true;
+  }
+  return false;
+}
+
+// Returns true iff `git log pi ^p1` contains any commit in keptSet —
+// i.e., Pi contributes at least one kept commit not already reachable from P1.
+function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>): boolean {
+  if (keptSet.size === 0) return false;
+  const result = git(["log", "--format=%H", pi, `^${p1}`], { safe: true });
+  if (!result.ok) return false;
+  for (const line of result.stdout.split("\n")) {
+    const h = line.trim();
+    if (h && keptSet.has(h)) return true;
   }
   return false;
 }
@@ -670,63 +744,35 @@ function isLoadBearing(
   return false;
 }
 
-// Returns true iff `git log pi ^p1` contains any commit in keptSet —
-// i.e., Pi contributes at least one kept commit not already reachable from P1.
-function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>): boolean {
-  if (keptSet.size === 0) return false;
-  const result = git(["log", "--format=%H", pi, `^${p1}`], { safe: true });
-  if (!result.ok) return false;
-  for (const line of result.stdout.split("\n")) {
-    const h = line.trim();
-    if (h && keptSet.has(h)) return true;
-  }
-  return false;
-}
-
-// ── Replay-list filtering ───────────────────────────────────────────────────
-
-// Batched trailer fetch (one `git log` per ~500 commits, NUL-separated).
-function fetchTrailersBatch(hashes: string[]): Map<string, string> {
-  const map = new Map<string, string>();
-  if (hashes.length === 0) return map;
-  const CHUNK = 500;
-  for (let i = 0; i < hashes.length; i += CHUNK) {
-    const chunk = hashes.slice(i, i + CHUNK);
-    const res = git(["log", "--no-walk", "-z", "--format=%H%n%(trailers:only,unfold=true)", ...chunk],
-      { safe: true, raw: true });
-    if (!res.ok) fail(`Failed to fetch trailers for ${chunk.length} commit(s): ${res.stderr}`);
-    for (const rec of res.stdout.split("\0")) {
-      if (!rec) continue;
-      const nl = rec.indexOf("\n");
-      const hash = (nl < 0 ? rec : rec.slice(0, nl)).trim();
-      if (hash) map.set(hash, nl < 0 ? "" : rec.slice(nl + 1));
+function dropNonLoadBearingCommits(
+  commits: TopoCommit[],
+  dc: DirectionConfig,
+  alreadyReplayed: Set<string>,
+  settled: Set<string>,
+): TopoCommit[] {
+  // commits arrive --topo-order --reverse (oldest first), so by the time we
+  // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
+  const keptSet = new Set<string>();
+  const kept: TopoCommit[] = [];
+  const total = commits.length;
+  const showProgress = total > PROGRESS_THRESHOLD;
+  let i = 0;
+  for (const c of commits) {
+    i++;
+    // An already-replayed commit was load-bearing-kept in a prior run.
+    if (alreadyReplayed.has(c.hash)) {
+      keptSet.add(c.hash);
+    } else if (settled.has(c.hash)) {
+      // Reachable from a prior-run frontier and not mapped ⟹ provably dropped in
+      // an earlier sync. Its verdict is immutable, so skip the diff-tree re-check.
+      continue;
+    } else if (isLoadBearing(c, dc, keptSet)) {
+      keptSet.add(c.hash);
+      kept.push(c);
     }
+    if (showProgress) logDecileProgress("Scanned", i, total);
   }
-  return map;
-}
-
-/** Which of `shas` resolve to a present object — one `cat-file --batch-check`
- *  instead of a `rev-parse` spawn per sha. */
-function batchObjectsExist(shas: string[]): Set<string> {
-  const present = new Set<string>();
-  const uniq = [...new Set(shas)].filter(Boolean);
-  if (uniq.length === 0) return present;
-  const res = git(["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", safe: true, raw: true });
-  if (!res.ok) return present;
-  for (const line of res.stdout.split("\n")) {
-    const sp = line.indexOf(" ");
-    if (sp < 0) continue;
-    // "<sha> <type> <size>" for present; "<sha> missing" for absent.
-    if (line.slice(sp + 1).startsWith("missing")) continue;
-    present.add(line.slice(0, sp));
-  }
-  return present;
-}
-
-// The target-side SHA from the first replay trailer matching `skipRe`, or null.
-function matchEchoTarget(trailers: string, skipRe: RegExp): string | null {
-  const match = trailers.split("\n").map(l => l.match(skipRe)).find(m => m);
-  return match ? match[1] : null;
+  return kept;
 }
 
 /**
@@ -740,7 +786,7 @@ function matchEchoTarget(trailers: string, skipRe: RegExp): string | null {
  * Keyed on targetTrailerKey(dc), so a SIBLING pair's trailer (e.g. a
  * frontend→common commit seen by the backend pair) does NOT match — those
  * still replay, preserving cross-pair propagation. This mirrors what
- * filterNotReplayedCommits already does, just early enough to skip the diff,
+ * dropEchoCommits already does, just early enough to skip the diff,
  * and batches the existence check that would otherwise be a spawn per echo.
  * Adds each echo (source → target SHA) directly into `shaMapping`; commits
  * already mapped are skipped.
@@ -760,7 +806,7 @@ function addEchoMappings(
   for (const hash of pending) {
     const trailers = trailersByHash.get(hash) ?? "";
     if (!hasTrailer(trailers, skipKey)) continue;
-    const target = matchEchoTarget(trailers, skipRe);
+    const target = matchOriginalHash(trailers, skipRe);
     if (target) candidates.push({ hash, target });
   }
   if (candidates.length === 0) return;
@@ -772,35 +818,32 @@ function addEchoMappings(
 }
 
 /**
- * Drop already-replayed and echoed commits. Echoes get echo→original recorded
- * in shaMapping so parent resolution reuses the real target SHA rather than
- * re-replaying or falling back to the branch tip.
+ * Drop echoes: source commits forwarded FROM the target side, identified by this
+ * pair's target-direction trailer. Each echo's source→target SHA is recorded in
+ * shaMapping so parent resolution reuses the real target SHA rather than
+ * re-replaying it. (Already-replayed commits are excluded upstream by
+ * dropNonLoadBearingCommits via alreadyReplayed, so they never reach here.)
  *
- * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT
- * dropped here: when two pairs share a source dir on mono (e.g. common/), a
- * frontend-originated commit reaching backend's pair via the monorepo must
- * replay onto backend's shadow so the original author's commit appears in
- * backend's history rather than being flattened into the integrating merge.
+ * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT dropped:
+ * when two pairs share a source dir on mono (e.g. common/), a frontend-originated
+ * commit reaching backend's pair via the monorepo must replay onto backend's
+ * shadow so the original author's commit appears in backend's history rather than
+ * being flattened into the integrating merge.
  */
-function filterNotReplayedCommits(
+function dropEchoCommits(
   allCommits: TopoCommit[],
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
 ): TopoCommit[] {
   const skipKey = targetTrailerKey(dc);
   const skipRe = targetTrailerRegex(dc);
-  const trailersByHash = fetchTrailersBatch(allCommits.filter(c => !shaMapping.has(c.hash)).map(c => c.hash));
+  const trailersByHash = fetchTrailersBatch(allCommits.map(c => c.hash));
   return allCommits.filter(c => {
-    if (shaMapping.has(c.hash)) return false;
     const trailers = trailersByHash.get(c.hash) ?? "";
-    if (hasTrailer(trailers, skipKey)) {
-      const target = matchEchoTarget(trailers, skipRe);
-      if (target && refExists(target)) {
-        shaMapping.set(c.hash, target);
-      }
-      return false;
-    }
-    return true;
+    if (!hasTrailer(trailers, skipKey)) return true;
+    const target = matchOriginalHash(trailers, skipRe);
+    if (target && refExists(target)) shaMapping.set(c.hash, target);
+    return false;   // echo: forwarded from the target side
   });
 }
 
@@ -1139,39 +1182,6 @@ function buildReplayedTree(opts: {
 
 const NULL_SHA = "0".repeat(40);
 
-/**
- * Stage `removals` (deletes) and `additions` against `idxEnv`'s index in a
- * single `update-index --index-info` call over stdin. `additions` are already
- * "<mode> <sha>\t<path>" lines; `removals` become mode-0 delete lines. Stdin
- * has no length limit, so this is safe for arbitrarily large file lists —
- * unlike `git rm -- <paths>`, whose argv overflows CreateProcess on Windows.
- */
-function applyIndexInfo(
-  idxEnv: { GIT_INDEX_FILE: string },
-  removals: string[],
-  additions: string[],
-): void {
-  if (removals.length === 0 && additions.length === 0) return;
-  const lines = [
-    ...removals.map(p => `0 ${NULL_SHA}\t${p}`),
-    ...additions,
-  ];
-  git(["update-index", "--index-info"], { env: idxEnv, input: lines.join("\n") + "\n" });
-}
-
-/** Allocate a private git index, run `fn` against it, then delete it. */
-function withTmpIndex<T>(label: string, fn: (idxEnv: { GIT_INDEX_FILE: string }) => T): T {
-  const tmpIndex = path.join(
-    os.tmpdir(),
-    `shadow-${label}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
-  );
-  try {
-    return fn({ GIT_INDEX_FILE: tmpIndex });
-  } finally {
-    fs.rmSync(tmpIndex, { force: true });
-  }
-}
-
 /** Build a tree from `refOrTree` with every `subdirs[i]/` stripped — the "outer" slice. */
 function outerOnlyTree(refOrTree: string, subdirs: string[]): string {
   const nonRoot = subdirs.filter(d => d !== "");
@@ -1231,12 +1241,6 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
   });
 }
 
-let _emptyTreeSha: string | null = null;
-function emptyTreeSha(): string {
-  if (_emptyTreeSha === null) _emptyTreeSha = git(["mktree"], { input: "" });
-  return _emptyTreeSha;
-}
-
 /** For each mapping, read `<fromHash>:<m[side]>` and splice it into `base` at
  *  `m.target`. Returns null if any slice ref fails to resolve — caller decides
  *  whether to fall back to bare `base` or halt. Each slice is filtered through
@@ -1276,19 +1280,6 @@ function spliceMappings(
   return composeSubtrees(base, slices);
 }
 
-/**
- * Outcome of composeMergeBaseTree: a base tree SHA, or a halt carrying the
- * reason that selects the operator diagnostic in formatHaltDiagnostic.
- *   outer-divergence       — mapped parents of a real merge disagree on outer
- *                            state (operator-resolvable; full round-trip recipe).
- *   multi-echo-disagreement — several already-replayed (echo) parents disagree.
- *   missing-tree           — a required parent tree or mapped subdir was absent.
- */
-type ComposeHaltKind = "outer-divergence" | "multi-echo-disagreement" | "missing-tree";
-interface ComposeHalt { halt: ComposeHaltKind; }
-function isHalt(r: unknown): r is ComposeHalt {
-  return typeof r === "object" && r !== null && "halt" in r;
-}
 
 /** First mapped parent's full tree. mappedParents[0] is always a valid replayed
  *  commit by construction; an unreadable tree means repo corruption, not an
@@ -1310,7 +1301,7 @@ function firstParentTree(mappedParents: string[], commitShort: string): string {
  *     the same outer. The source commit's scope can't author an outer-state
  *     difference, so divergence halts.
  */
-function reconcileOuter(mappedParents: string[], dc: DirectionConfig): { tree: string } | ComposeHalt {
+function reconcileOuter(mappedParents: string[], dc: DirectionConfig): ComposeResult {
   const targetDirs = targetDirsOf(dc);
   if (mappedParents.length === 2) {
     const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
@@ -1335,7 +1326,7 @@ function reconcileOuter(mappedParents: string[], dc: DirectionConfig): { tree: s
  *     inner, including any backend-only intermediate work) over Mm's outer.
  *   Otherwise: splice the first parent's inner over the echo'd outer.
  *   Multi-echo: the echo'd outers must agree.
- * Returns "none" when no parent is an echo, so the caller continues to the
+ * Returns "not-an-echo" when no parent is an echo, so the caller continues to the
  * parent-count dispatch.
  */
 function resolveEcho(
@@ -1344,7 +1335,7 @@ function resolveEcho(
   shaMapping: Map<string, string>,
   dc: DirectionConfig,
   shadowIgnoreBySourceIdx: RegExp[][],
-): { tree: string } | ComposeHalt | "none" {
+): ComposeResult | "not-an-echo" {
   const skipKey = targetTrailerKey(dc);
   const echoTargets: string[] = [];
   for (const sourceParent of commit.parents) {
@@ -1354,7 +1345,7 @@ function resolveEcho(
       if (mapped) echoTargets.push(mapped);
     }
   }
-  if (echoTargets.length === 0) return "none";
+  if (echoTargets.length === 0) return "not-an-echo";
 
   if (echoTargets.length > 1) {
     const outers = echoTargets.map(t => outerOnlyTree(t, targetDirsOf(dc)));
@@ -1398,7 +1389,7 @@ function composeMergeBaseTree(opts: {
   shaMapping: Map<string, string>;
   dc: DirectionConfig;
   shadowIgnoreBySourceIdx: RegExp[][];
-}): string | ComposeHalt {
+}): ComposeResult {
   const { commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx } = opts;
   const commitShort = commit.hash.slice(0, 8);
   const confined = allTargetsConfined(dc);
@@ -1409,22 +1400,22 @@ function composeMergeBaseTree(opts: {
   // only valid when the first mapped parent is a faithful replay image, but an
   // unmapped source parent resolves to targetInit (the target's root commit),
   // whose stale outer content would otherwise leak through verbatim. resolveEcho
-  // returns "none" when no source parent is an echo, so non-echo merges are
+  // returns "not-an-echo" when no source parent is an echo, so non-echo merges are
   // unaffected.
   const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
-  if (echo !== "none") return isHalt(echo) ? echo : echo.tree;
+  if (echo !== "not-an-echo") return echo;
 
   // 1 parent: outer can't have diverged; inner is that parent's. (fast path)
-  if (mappedParents.length === 1) return firstParentTree(mappedParents, commitShort);
+  if (mappedParents.length === 1) return { tree: firstParentTree(mappedParents, commitShort) };
 
   // Same-repo: the first parent's tree is the correct base verbatim.
-  if (!confined) return firstParentTree(mappedParents, commitShort);
+  if (!confined) return { tree: firstParentTree(mappedParents, commitShort) };
 
   // Cross-repo, ≥2 parents: reconcile the outer, splice first parent's inner.
   const outer = reconcileOuter(mappedParents, dc);
   if (isHalt(outer)) return outer;
   const spliced = spliceMappings(outer.tree, mappedParents[0], "target", dc);
-  return spliced === null ? { halt: "missing-tree" } : spliced;
+  return spliced === null ? { halt: "missing-tree" } : { tree: spliced };
 }
 
 // ── Ancestry resolution ──────────────────────────────────────────────────────
@@ -1454,7 +1445,7 @@ function resolveHaltAwareParents(
   shaMapping: Map<string, string>,
   targetInit: string | null,
   haltedSources: Set<string>,
-  haltReasons: Map<string, HaltReason>,
+  haltRecords: Map<string, HaltRecord>,
 ): string[] {
   if (commit.parents.length === 0) {
     return targetInit ? [targetInit] : [];
@@ -1470,9 +1461,9 @@ function resolveHaltAwareParents(
       continue;
     }
     if (haltedSources.has(parentHash)) {
-      const reason = haltReasons.get(parentHash);
-      if (reason && reason.anchorCommits.length > 0) {
-        for (const ac of reason.anchorCommits) pushUnique(ac);
+      const record = haltRecords.get(parentHash);
+      if (record && record.anchorCommits.length > 0) {
+        for (const ac of record.anchorCommits) pushUnique(ac);
         continue;
       }
     }
@@ -1590,9 +1581,9 @@ function formatHaltDiagnostic(opts: {
   meta: CommitMeta;
   mappedParents: string[];
   dc: DirectionConfig;
-  reason: ComposeHaltKind;
+  cause: ComposeHaltCause;
 }): string {
-  const { commit, meta, mappedParents, dc, reason } = opts;
+  const { commit, meta, mappedParents, dc, cause } = opts;
   const { target, pair } = dc;
   const branchLabel = inferSourceBranch(commit.hash, dc.source.remote) ?? "<source-branch>";
   const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchLabel)}`;
@@ -1600,19 +1591,19 @@ function formatHaltDiagnostic(opts: {
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
 
   const failure =
-    reason === "outer-divergence"
+    cause === "outer-divergence"
       ? (mappedParents.length === 2
-          ? `merge-tree conflict between mapped parents on ${target.remote}`
-          : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`)
-    : reason === "multi-echo-disagreement"
-      ? "multiple already-replayed (echo) parents disagree on outer state"
-    : "a required parent tree or mapped subdirectory was absent during base-tree composition";
+        ? `merge-tree conflict between mapped parents on ${target.remote}`
+        : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`)
+      : cause === "multi-echo-disagreement"
+        ? "multiple already-replayed (echo) parents disagree on outer state"
+        : "a required parent tree or mapped subdirectory was absent during base-tree composition";
 
   // outer-divergence and multi-echo-disagreement are both outer-state
   // disagreements the operator resolves the same way (round-trip), so they
   // share the full recipe and the exact "cannot auto-resolve" headline the
   // recovery tests assert. Only missing-tree is structurally different.
-  const structural = reason === "missing-tree";
+  const structural = cause === "missing-tree";
   const lines: string[] = [
     structural
       ? `${meta.short}: cannot compose replay base tree — branch halted.`
@@ -1647,7 +1638,7 @@ function formatHaltDiagnostic(opts: {
 
   lines.push(
     `  Mapped parents disagree on outer state (files outside ${targetScope}). ` +
-      `The source commit's scope is ${sourceScope}, so it couldn't have authored this outer-state difference.`,
+    `The source commit's scope is ${sourceScope}, so it couldn't have authored this outer-state difference.`,
     ``,
     `Recovery — choose ONE:`,
     ``,
@@ -1703,7 +1694,7 @@ export interface HaltedBranch {
   diagnostic: string;
 }
 
-interface HaltReason {
+interface HaltRecord {
   anchorCommits: string[];
   diagnostic: string;
   commitShort: string;
@@ -1711,7 +1702,25 @@ interface HaltReason {
 
 interface ReplayHalts {
   haltedSources: Set<string>;
-  haltReasons: Map<string, HaltReason>;
+  haltRecords: Map<string, HaltRecord>;
+}
+
+/**
+ * Outcome of composeMergeBaseTree: a base tree, or a halt carrying the cause
+ * that selects the operator diagnostic in formatHaltDiagnostic.
+ *   outer-divergence       — mapped parents of a real merge disagree on outer
+ *                            state (operator-resolvable; full round-trip recipe).
+ *   multi-echo-disagreement — several already-replayed (echo) parents disagree.
+ *   missing-tree           — a required parent tree or mapped subdir was absent.
+ */
+type ComposeHaltCause = "outer-divergence" | "multi-echo-disagreement" | "missing-tree";
+interface ComposeHalt { halt: ComposeHaltCause; }
+// A successful base-tree composition (`{ tree }`) or a halt. Success is always
+// the `{ tree }` shape so `isHalt` discriminates a real union, not `unknown`.
+type ComposeResult = { tree: string } | ComposeHalt;
+
+function isHalt(r: ComposeResult): r is ComposeHalt {
+  return "halt" in r;
 }
 
 // True iff every source-side parent is halted AND unmapped — a commit with at
@@ -1732,20 +1741,20 @@ function markPropagatedHalt(
   commit: TopoCommit,
   meta: CommitMeta,
   haltedSources: Set<string>,
-  haltReasons: Map<string, HaltReason>,
+  haltRecords: Map<string, HaltRecord>,
 ): void {
   haltedSources.add(commit.hash);
   const inheritedAnchorCommits: string[] = [];
   const seenAnchorCommits = new Set<string>();
   for (const p of commit.parents) {
-    const reason = haltReasons.get(p);
-    if (!reason) continue;
-    for (const ac of reason.anchorCommits) {
+    const record = haltRecords.get(p);
+    if (!record) continue;
+    for (const ac of record.anchorCommits) {
       if (!seenAnchorCommits.has(ac)) { inheritedAnchorCommits.push(ac); seenAnchorCommits.add(ac); }
     }
   }
   if (inheritedAnchorCommits.length > 0) {
-    haltReasons.set(commit.hash, { anchorCommits: inheritedAnchorCommits, diagnostic: "", commitShort: meta.short });
+    haltRecords.set(commit.hash, { anchorCommits: inheritedAnchorCommits, diagnostic: "", commitShort: meta.short });
   }
   console.log(`  Skipping ${meta.short} (descended from halted ancestor).`);
 }
@@ -1762,20 +1771,20 @@ function haltCommit(opts: {
   mappedParents: string[];
   dc: DirectionConfig;
   haltedSources: Set<string>;
-  haltReasons: Map<string, HaltReason>;
-  reason: ComposeHaltKind;
+  haltRecords: Map<string, HaltRecord>;
+  cause: ComposeHaltCause;
 }): void {
-  const { commit, meta, mappedParents, dc, haltedSources, haltReasons, reason } = opts;
+  const { commit, meta, mappedParents, dc, haltedSources, haltRecords, cause } = opts;
   haltedSources.add(commit.hash);
-  haltReasons.set(commit.hash, {
+  haltRecords.set(commit.hash, {
     anchorCommits: mappedParents,
-    diagnostic: formatHaltDiagnostic({ commit, meta, mappedParents, dc, reason }),
+    diagnostic: formatHaltDiagnostic({ commit, meta, mappedParents, dc, cause }),
     commitShort: meta.short,
   });
   const summary =
-    reason === "outer-divergence" ? "outer-state divergence between mapped parents"
-    : reason === "multi-echo-disagreement" ? "already-replayed parents disagree on outer state"
-    : "a required parent tree or mapped subdirectory was absent";
+    cause === "outer-divergence" ? "outer-state divergence between mapped parents"
+      : cause === "multi-echo-disagreement" ? "already-replayed parents disagree on outer state"
+        : "a required parent tree or mapped subdirectory was absent";
   console.log(`  ⚠ Halted on ${meta.short}: ${summary}.`);
 }
 
@@ -1807,7 +1816,7 @@ function replayCommits(opts: {
   const addKey = sourceTrailerKey(dc);
 
   const haltedSources = new Set<string>();
-  const haltReasons = new Map<string, HaltReason>();
+  const haltRecords = new Map<string, HaltRecord>();
 
   withTmpIndex("replay", idxEnv => {
     const tmpIndex = idxEnv.GIT_INDEX_FILE;
@@ -1820,7 +1829,7 @@ function replayCommits(opts: {
       const meta = getCommitMeta(commit.hash);
 
       if (isHaltPropagated(commit, haltedSources, shaMapping)) {
-        markPropagatedHalt(commit, meta, haltedSources, haltReasons);
+        markPropagatedHalt(commit, meta, haltedSources, haltRecords);
         continue;
       }
 
@@ -1841,7 +1850,7 @@ function replayCommits(opts: {
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
-      const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons);
+      const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltRecords);
 
       // Per-mapping ignore (self + auto + .shadowignore). Computed before the
       // base tree so composeMergeBaseTree can filter the round-trip source
@@ -1860,10 +1869,10 @@ function replayCommits(opts: {
           // No compose path produced a defensible tree. Halt the branch (other
           // branches in this call keep flowing); the diagnostic surfaces via
           // mirrorHistory's return.
-          haltCommit({ commit, meta, mappedParents, dc, haltedSources, haltReasons, reason: composed.halt });
+          haltCommit({ commit, meta, mappedParents, dc, haltedSources, haltRecords, cause: composed.halt });
           continue;
         }
-        parentTree = composed;
+        parentTree = composed.tree;
       }
 
       const tree = buildReplayedTree({
@@ -1901,7 +1910,7 @@ function replayCommits(opts: {
       for (const sha of absorbed) {
         shaMapping.set(sha, newSHA);
         haltedSources.delete(sha);
-        haltReasons.delete(sha);
+        haltRecords.delete(sha);
       }
       if (absorbed.length > 0) {
         console.log(`  ✓ Replayed${isEcho ? " (recorded)" : ""}, absorbing ${absorbed.length} halted ancestor(s): ${absorbed.map(s => s.slice(0, 7)).join(", ")}.`);
@@ -1911,7 +1920,7 @@ function replayCommits(opts: {
     }
   });
 
-  return { haltedSources, haltReasons };
+  return { haltedSources, haltRecords };
 }
 
 /** Replay one side of a pair onto the other; `from` selects the source. */
@@ -1933,21 +1942,13 @@ export function mirrorHistory(opts: {
   const shaMapping = loadReplayedMappings({ branches, dc });
   console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
 
-  // One in-memory source graph (two batched git calls) is the single source of
-  // truth for the scan: the replay list, the settled-commit frontier, and the
-  // ancestry walks (dropOrphanedCommits, collectAbsorbedHalted) all read it
-  // instead of spawning a `git log` per commit.
+  // One in-memory source graph (two batched git calls)
   const graph = collectSourceGraph(dc, branches);
   const sourceCommits = deriveSourceCommits(graph);
   // Treat echoes (commits forwarded from the target side) as already-replayed
-  // so the load-bearing scan skips them — the dominant cost in the export
-  // direction, where most of the monorepo is echoes of prior imports.
   addEchoMappings(sourceCommits, dc, shaMapping);
   const alreadyReplayed = new Set(shaMapping.keys());
-  // Commits a prior sync already settled (reachable from the per-branch frontier
-  // of newest-replayed commits). Computed after addEchoMappings so echoes — which
-  // only grow shaMapping — widen the frontier and can only add skips, never flip a
-  // drop to load-bearing. Lets the scan skip re-deriving immutable drop verdicts.
+  // Commits a prior sync already settled (reachable from the per-branch frontier of newest-replayed commits). 
   const settled = computeSettledCommits(graph, branches, dc, shaMapping);
   let newToScan = 0, settledDropped = 0;
   for (const c of sourceCommits) {
@@ -1955,9 +1956,9 @@ export function mirrorHistory(opts: {
     if (settled.has(c.hash)) settledDropped++; else newToScan++;
   }
   console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${alreadyReplayed.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
-  const relevantCommits = filterLoadBearingCommits(sourceCommits, dc, alreadyReplayed, settled);
+  const relevantCommits = dropNonLoadBearingCommits(sourceCommits, dc, alreadyReplayed, settled);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
-  const newCommits = filterNotReplayedCommits(relevantCommits, shaMapping, dc);
+  const newCommits = dropEchoCommits(relevantCommits, shaMapping, dc);
   const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, graph);
 
   if (usefulNewCommits.length === 0) {
@@ -1983,21 +1984,21 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltReasons } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, graph });
+  const { haltedSources, haltRecords } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, graph });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're
-  // present in haltReasons only so resolveHaltAwareParents can splice in the
+  // present in haltRecords only so resolveHaltAwareParents can splice in the
   // halt-causer's mapped parents.
   const haltedBranches: HaltedBranch[] = [];
-  for (const [sha, reason] of haltReasons) {
-    if (!reason.diagnostic) continue;
+  for (const [sha, record] of haltRecords) {
+    if (!record.diagnostic) continue;
     haltedBranches.push({
       branch: inferSourceBranch(sha, dc.source.remote),
       commitSha: sha,
-      commitShort: reason.commitShort,
-      mappedParents: reason.anchorCommits,
-      diagnostic: reason.diagnostic,
+      commitShort: record.commitShort,
+      mappedParents: record.anchorCommits,
+      diagnostic: record.diagnostic,
     });
   }
 
