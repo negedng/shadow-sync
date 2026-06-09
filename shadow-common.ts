@@ -747,8 +747,8 @@ function isLoadBearing(
 function dropNonLoadBearingCommits(
   commits: TopoCommit[],
   dc: DirectionConfig,
-  alreadyReplayed: Set<string>,
-  settled: Set<string>,
+  alreadySynced: Set<string>,
+  alreadySettled: Set<string>,
 ): TopoCommit[] {
   // commits arrive --topo-order --reverse (oldest first), so by the time we
   // evaluate a merge, every ancestor's keep/drop decision is already in keptSet.
@@ -759,12 +759,11 @@ function dropNonLoadBearingCommits(
   let i = 0;
   for (const c of commits) {
     i++;
-    // An already-replayed commit was load-bearing-kept in a prior run.
-    if (alreadyReplayed.has(c.hash)) {
+    // An already-synced commit was load-bearing-kept in a prior run.
+    if (alreadySynced.has(c.hash)) {
       keptSet.add(c.hash);
-    } else if (settled.has(c.hash)) {
-      // Reachable from a prior-run frontier and not mapped ⟹ provably dropped in
-      // an earlier sync. Its verdict is immutable, so skip the diff-tree re-check.
+    } else if (alreadySettled.has(c.hash)) {
+      // Reachable from a prior-run frontier and not mapped -> dropped in an earlier sync.
       continue;
     } else if (isLoadBearing(c, dc, keptSet)) {
       keptSet.add(c.hash);
@@ -777,19 +776,7 @@ function dropNonLoadBearingCommits(
 
 /**
  * Map echo commits (source → target SHA) so they count as already-replayed:
- * skipped in the load-bearing scan AND resolvable as parents. An echo is a
- * source commit forwarded FROM the target side — it carries THIS pair's
- * target-direction trailer pointing back at the target SHA. Without this, the
- * export direction (--from a) re-diffs the whole echo history (the bulk of the
- * monorepo) every run; with it, only genuinely-new commits are scanned.
- *
- * Keyed on targetTrailerKey(dc), so a SIBLING pair's trailer (e.g. a
- * frontend→common commit seen by the backend pair) does NOT match — those
- * still replay, preserving cross-pair propagation. This mirrors what
- * dropEchoCommits already does, just early enough to skip the diff,
- * and batches the existence check that would otherwise be a spawn per echo.
- * Adds each echo (source → target SHA) directly into `shaMapping`; commits
- * already mapped are skipped.
+ * Origin: this side, no need to replay
  */
 function addEchoMappings(
   sourceCommits: TopoCommit[],
@@ -853,8 +840,6 @@ function dropEchoCommits(
  * scanned in an earlier run and is now either in shaMapping (kept) or provably
  * dropped — its load-bearing verdict is immutable (it depends only on its own
  * and its ancestors' fixed trees/verdicts), so the scan can skip re-deriving it.
- * Pure in-memory walk over the loaded graph; the only git call is one batched
- * tip resolution. Empty on the first sync (no mapped ancestor ⟹ no frontier).
  */
 function computeSettledCommits(
   graph: SourceGraph,
@@ -1500,6 +1485,7 @@ function collectAbsorbedHalted(
 
 /**
  * Source→target SHA mapping from this pair's shadow branches from trailers: Shadow-replayed-<pair>-<sourceRemote>: <sourceSHA>
+ * Origin: other side, replayed here.
  */
 function loadReplayedMappings(opts: {
   branches: string[];
@@ -1938,34 +1924,34 @@ export function mirrorHistory(opts: {
   const { pair, from, branches } = opts;
   const dc = buildDirectionConfig(pair, from);
 
-  console.log("Scanning history for already-replayed commits...");
-  const shaMapping = loadReplayedMappings({ branches, dc });
-  console.log(`Found ${shaMapping.size} previously replayed commit(s).`);
-
-  // One in-memory source graph (two batched git calls)
+// One in-memory source graph (two batched git calls)
   const graph = collectSourceGraph(dc, branches);
   const sourceCommits = deriveSourceCommits(graph);
-  // Treat echoes (commits forwarded from the target side) as already-replayed
-  addEchoMappings(sourceCommits, dc, shaMapping);
-  const alreadyReplayed = new Set(shaMapping.keys());
+  
+  console.log("Scanning history for already-replayed commits...");
+  // Synced: already replayed (source origin) + echo (target origin) with trailer
+  const syncedShaMap = loadReplayedMappings({ branches, dc });
+  console.log(`Found ${syncedShaMap.size} previously replayed commit(s).`);
+  addEchoMappings(sourceCommits, dc, syncedShaMap);
+  const syncedSourceHash = new Set(syncedShaMap.keys());
   // Commits a prior sync already settled (reachable from the per-branch frontier of newest-replayed commits). 
-  const settled = computeSettledCommits(graph, branches, dc, shaMapping);
+  const settledSourceHash = computeSettledCommits(graph, branches, dc, syncedShaMap);
   let newToScan = 0, settledDropped = 0;
   for (const c of sourceCommits) {
-    if (alreadyReplayed.has(c.hash)) continue;
-    if (settled.has(c.hash)) settledDropped++; else newToScan++;
+    if (syncedSourceHash.has(c.hash)) continue;
+    if (settledSourceHash.has(c.hash)) settledDropped++; else newToScan++;
   }
-  console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${alreadyReplayed.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
-  const relevantCommits = dropNonLoadBearingCommits(sourceCommits, dc, alreadyReplayed, settled);
+  console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${syncedSourceHash.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
+  const relevantCommits = dropNonLoadBearingCommits(sourceCommits, dc, syncedSourceHash, settledSourceHash);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
-  const newCommits = dropEchoCommits(relevantCommits, shaMapping, dc);
-  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, shaMapping, dc.source.remote, graph);
+  const newCommits = dropEchoCommits(relevantCommits, syncedShaMap, dc);
+  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, syncedShaMap, dc.source.remote, graph);
 
   if (usefulNewCommits.length === 0) {
     return {
       mirrored: 0,
-      branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, shaMapping),
-      shaMapping,
+      branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap),
+      shaMapping: syncedShaMap,
       upToDate: true,
       haltedBranches: [],
     };
@@ -1984,7 +1970,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltRecords } = replayCommits({ newCommits: usefulNewCommits, shaMapping, targetInit, dc, graph });
+  const { haltedSources, haltRecords } = replayCommits({ newCommits: usefulNewCommits, shaMapping: syncedShaMap, targetInit, dc, graph });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're
@@ -2012,8 +1998,8 @@ export function mirrorHistory(opts: {
 
   return {
     mirrored: replayedCount,
-    branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, shaMapping),
-    shaMapping,
+    branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap),
+    shaMapping: syncedShaMap,
     upToDate: false,
     haltedBranches,
   };
