@@ -1368,18 +1368,17 @@ function resolveHaltAwareParents(
     if (sha && !seen.has(sha)) { parents.push(sha); seen.add(sha); }
   };
   for (const parentHash of commit.parents) {
+    const haltAnchors = haltedSources.has(parentHash)
+      ? haltRecords.get(parentHash)?.anchorCommits
+      : undefined;
     if (shaMapping.has(parentHash)) {
       pushUnique(shaMapping.get(parentHash));
-      continue;
+    } else if (haltAnchors && haltAnchors.length > 0) {
+      for (const ac of haltAnchors) pushUnique(ac);
+    } else {
+      // not mapped, and either not halted or halted without anchors
+      pushUnique(findEchoAnchor(parentHash, shaMapping) ?? targetInit);
     }
-    if (haltedSources.has(parentHash)) {
-      const record = haltRecords.get(parentHash);
-      if (record && record.anchorCommits.length > 0) {
-        for (const ac of record.anchorCommits) pushUnique(ac);
-        continue;
-      }
-    }
-    pushUnique(findEchoAnchor(parentHash, shaMapping) ?? targetInit);
   }
   return parents;
 }
