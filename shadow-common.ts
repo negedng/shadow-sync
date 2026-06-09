@@ -602,8 +602,8 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
 // calls (rev-list --parents for the edges, log --full-history for the
 // path-touched set), then used as the single source of truth for the whole scan.
 // The replay list (deriveSourceCommits), the settled-commit frontier
-// (computeSettledCommits), and the ancestry walks in dropOrphanedCommits /
-// collectAbsorbedHalted all read it instead of spawning a `git log` per commit.
+// (computeSettledCommits), and the ancestry walks in collectAbsorbedHalted all
+// read it instead of spawning a `git log` per commit.
 interface SourceGraph {
   parents: Map<string, string[]>;
   index: Map<string, number>;     // topo position, 0 = newest; a commit's parents have larger index
@@ -850,53 +850,6 @@ function computeSettledCommits(
     for (const p of graph.parents.get(x) ?? []) stack.push(p);
   }
   return settled;
-}
-
-/**
- * Drops candidates whose replay would orphan: pass 1 walks each branch
- * topo-order newest-first stopping at the first mapped ancestor (mirroring
- * mapBranchesToTargetTips) — anything seen anchors a tip; pass 2 pulls in
- * unmapped candidate parents of kept commits so resolveTargetParents won't
- * fall back to findEchoAnchor with a different topology.
- */
-function dropOrphanedCommits(
-  newCommits: TopoCommit[],
-  branches: string[],
-  shaMapping: Map<string, string>,
-  remote: string,
-  graph: SourceGraph,
-): TopoCommit[] {
-  const newSet = new Set(newCommits.map(c => c.hash));
-  const kept = new Set<string>();
-
-  for (const branch of branches) {
-    const log = git(["log", "--first-parent", "--format=%H", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) fail(`log ${remote}/${branch} failed while dropping orphaned commits: ${log.stderr}`);
-    for (const line of log.stdout.split("\n")) {
-      const hash = line.trim();
-      if (!hash) continue;
-      if (shaMapping.has(hash)) break;
-      if (newSet.has(hash)) kept.add(hash);
-    }
-  }
-
-  const visited = new Set<string>();
-  const stack = Array.from(kept);
-  while (stack.length) {
-    const hash = stack.pop()!;
-    if (visited.has(hash)) continue;
-    visited.add(hash);
-    for (const p of graphParentsOf(graph, hash)) {
-      if (shaMapping.has(p) || visited.has(p)) continue;
-      if (newSet.has(p) && !kept.has(p)) kept.add(p);
-      // Walk through even when p isn't in newSet — passthrough commits
-      // (non-mapped, non-path-touching) can sit between a kept merge and
-      // a deeper kept ancestor on a non-first-parent edge.
-      stack.push(p);
-    }
-  }
-
-  return newCommits.filter(c => kept.has(c.hash));
 }
 
 // ── Ignore patterns ──────────────────────────────────────────────
@@ -1916,11 +1869,10 @@ export function mirrorHistory(opts: {
     if (settledSourceHash.has(c.hash)) settledDropped++; else newToScan++;
   }
   console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${syncedSourceHash.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
-  const relevantCommits = dropNonLoadBearingCommits(sourceCommits, dc, syncedSourceHash, settledSourceHash);
-  console.log(`${relevantCommits.length} new load-bearing commit(s).`);
-  const usefulNewCommits = dropOrphanedCommits(relevantCommits, branches, syncedShaMap, dc.source.remote, graph);
+  const newCommits = dropNonLoadBearingCommits(sourceCommits, dc, syncedSourceHash, settledSourceHash);
+  console.log(`${newCommits.length} new load-bearing commit(s).`);
 
-  if (usefulNewCommits.length === 0) {
+  if (newCommits.length === 0) {
     return {
       mirrored: 0,
       branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap),
@@ -1930,7 +1882,7 @@ export function mirrorHistory(opts: {
     };
   }
 
-  console.log(`Found ${usefulNewCommits.length} new commit(s) to replay.\n`);
+  console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
 
   // Fallback root for orphan parents (see resolveTargetParents).
   const anchorBranch = dc.target.anchorBranch ?? "main";
@@ -1943,7 +1895,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltRecords } = replayCommits({ newCommits: usefulNewCommits, shaMapping: syncedShaMap, targetInit, dc, graph });
+  const { haltedSources, haltRecords } = replayCommits({ newCommits: newCommits, shaMapping: syncedShaMap, targetInit, dc, graph });
 
   // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
   // (descendants that inherited halt-state) carry an empty diagnostic — they're
@@ -1962,11 +1914,11 @@ export function mirrorHistory(opts: {
   }
 
   console.log();
-  const replayedCount = usefulNewCommits.length - haltedSources.size;
+  const replayedCount = newCommits.length - haltedSources.size;
   if (haltedBranches.length > 0) {
     console.log(`Done. ${replayedCount} commit(s) replayed; ${haltedBranches.length} halt(s) (${haltedSources.size} commit(s) blocked).`);
   } else {
-    console.log(`Done. ${usefulNewCommits.length} commit(s) replayed.`);
+    console.log(`Done. ${newCommits.length} commit(s) replayed.`);
   }
 
   return {
