@@ -776,7 +776,11 @@ function dropNonLoadBearingCommits(
 
 /**
  * Map echo commits (source → target SHA) so they count as already-replayed:
- * Origin: this side, no need to replay
+ * Origin: this side, no need to replay.
+ *
+ * Keyed on this pair's target-direction trailer, so a sibling pair's trailer
+ * does NOT match — cross-pair commits (e.g. a frontend→common change reaching
+ * the backend pair via mono) still replay, preserving cross-pair propagation.
  */
 function addEchoMappings(
   sourceCommits: TopoCommit[],
@@ -802,36 +806,6 @@ function addEchoMappings(
   for (const { hash, target } of candidates) {
     if (present.has(target)) shaMapping.set(hash, target);
   }
-}
-
-/**
- * Drop echoes: source commits forwarded FROM the target side, identified by this
- * pair's target-direction trailer. Each echo's source→target SHA is recorded in
- * shaMapping so parent resolution reuses the real target SHA rather than
- * re-replaying it. (Already-replayed commits are excluded upstream by
- * dropNonLoadBearingCommits via alreadyReplayed, so they never reach here.)
- *
- * Cross-pair shadow commits (carrying a sibling pair's trailer) are NOT dropped:
- * when two pairs share a source dir on mono (e.g. common/), a frontend-originated
- * commit reaching backend's pair via the monorepo must replay onto backend's
- * shadow so the original author's commit appears in backend's history rather than
- * being flattened into the integrating merge.
- */
-function dropEchoCommits(
-  allCommits: TopoCommit[],
-  shaMapping: Map<string, string>,
-  dc: DirectionConfig,
-): TopoCommit[] {
-  const skipKey = targetTrailerKey(dc);
-  const skipRe = targetTrailerRegex(dc);
-  const trailersByHash = fetchTrailersBatch(allCommits.map(c => c.hash));
-  return allCommits.filter(c => {
-    const trailers = trailersByHash.get(c.hash) ?? "";
-    if (!hasTrailer(trailers, skipKey)) return true;
-    const target = matchOriginalHash(trailers, skipRe);
-    if (target && refExists(target)) shaMapping.set(c.hash, target);
-    return false;   // echo: forwarded from the target side
-  });
 }
 
 /**
@@ -1944,8 +1918,7 @@ export function mirrorHistory(opts: {
   console.log(`Scanning ${newToScan} new source commit(s) since last replay for load-bearing changes (${sourceCommits.length} reachable; skipping ${syncedSourceHash.size} already replayed/echo, ${settledDropped} settled-dropped)...`);
   const relevantCommits = dropNonLoadBearingCommits(sourceCommits, dc, syncedSourceHash, settledSourceHash);
   console.log(`${relevantCommits.length} new load-bearing commit(s).`);
-  const newCommits = dropEchoCommits(relevantCommits, syncedShaMap, dc);
-  const usefulNewCommits = dropOrphanedCommits(newCommits, branches, syncedShaMap, dc.source.remote, graph);
+  const usefulNewCommits = dropOrphanedCommits(relevantCommits, branches, syncedShaMap, dc.source.remote, graph);
 
   if (usefulNewCommits.length === 0) {
     return {
