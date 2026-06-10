@@ -1,4 +1,4 @@
-#!/usr/bin/env ts-node
+#!/usr/bin/env tsx
 /**
  * shadow-sync.ts — Replay commits between two repos in a pair.
  *
@@ -14,7 +14,7 @@
  */
 import { parseArgs } from "util";
 import {
-  PAIRS, ShadowSyncError,
+  PAIRS, CONFIG_PATH, ShadowSyncError,
   git, refExists, listRemoteBranches, filterBranchesForRemote,
   shadowBranchName, ensureRemote,
   mirrorHistory, syncTags, runPreflightChecks, printPreflightResults,
@@ -63,6 +63,12 @@ export function runSync(options: SyncOptions = {}): SyncResult {
 }
 
 function _runSyncCore(options: SyncOptions): number {
+  // Fail loud, not green: a missing/typo'd config would otherwise be a
+  // permanent silent no-op "success".
+  if (PAIRS.length === 0) {
+    fail(`No pairs configured — config missing or empty at ${CONFIG_PATH}.`);
+  }
+
   const pairName = options.pair;
   const pairsToSync = pairName
     ? PAIRS.filter(p => p.name === pairName)
@@ -98,13 +104,23 @@ function _runSyncCore(options: SyncOptions): number {
     // replay loop to resolve SHA mappings and build trees. A fresh CI runner
     // has neither cached, so both fetches are mandatory up front.
     console.log(`\n══ Syncing pair '${pair.name}' (from ${fromSide}: ${source.remote} → ${target.remote}) ══`);
-    git(["fetch", source.remote]);
-    const targetFetchEarly = git(["fetch", target.remote], { safe: true });
+    // --prune: without it a branch deleted on the source keeps its stale
+    // tracking ref and syncs forever (and stale-shadow detection never fires).
+    const sourceFetch = git(["fetch", "--prune", source.remote], { safe: true });
+    if (!sourceFetch.ok) {
+      console.error(`  ✘ Failed to fetch '${source.remote}': ${sourceFetch.stderr}`);
+      failed++;
+      continue;
+    }
+    const targetFetchEarly = git(["fetch", "--prune", target.remote], { safe: true });
     if (!targetFetchEarly.ok) {
       console.error(`  ⚠ Failed to fetch '${target.remote}': ${targetFetchEarly.stderr}`);
       console.error(`    Continuing with local tracking refs — divergence checks may be stale.`);
     }
 
+    if (options.branch) {
+      console.log(`  ⚠ --branch ${options.branch}: bypassing the branch-filters.json allowlist.`);
+    }
     const branches = options.branch
       ? [options.branch]
       : filterBranchesForRemote(source.remote, listRemoteBranches(source.remote));
@@ -151,7 +167,9 @@ function _runSyncCore(options: SyncOptions): number {
         failed++;
       }
 
-      // Update shadow branches on target's remote
+      // Update shadow branches on target's remote. A failed branch is reported
+      // and counted but doesn't abort the others or the pair's tag sync.
+      let branchFailures = 0;
       for (const branch of validBranches) {
         const shadow = shadowBranchName(pair.name, branch);
         const replayedSHA = result.branchMapping.get(branch);
@@ -198,11 +216,13 @@ function _runSyncCore(options: SyncOptions): number {
               console.log(`  ${shadow}: ${target.remote} has same tree on different topology; leaving target tip in place.`);
               continue;
             }
-            fail(`${shadow}: ${target.remote} diverged with different tree. ` +
+            console.error(`✘ ${shadow}: ${target.remote} diverged with different tree. ` +
                  `Engine cannot fast-forward and force-push is disabled. ` +
                  `Source main may have been rewritten or the shadow ref was edited manually. ` +
                  `Operator must reconcile by either restoring the expected source history or ` +
                  `manually pushing ${replayedSHA} to ${target.remote}/${shadow}.`);
+            branchFailures++;
+            continue;
           }
         }
 
@@ -212,8 +232,17 @@ function _runSyncCore(options: SyncOptions): number {
         }
 
         console.log(`  Pushing to ${target.remote}/${shadow}...`);
-        git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`]);
+        const pushRes = git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`], { safe: true });
+        if (!pushRes.ok) {
+          console.error(`  ✘ ${shadow}: push failed: ${pushRes.stderr}`);
+          branchFailures++;
+          continue;
+        }
         console.log(`  ✓ Pushed.`);
+      }
+      if (branchFailures > 0) {
+        console.error(`  ✘ ${branchFailures} shadow branch update(s) failed on ${pair.name}.`);
+        failed++;
       }
 
       // Tag sync runs in both directions: tags on the source side get
@@ -259,23 +288,43 @@ function _runSyncCore(options: SyncOptions): number {
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
 
+const USAGE = `Usage: npx tsx shadow-sync.ts [options]
+  -p, --pair <name>    Sync only this pair (default: all configured pairs)
+  -r, --remote <name>  Alias for --pair
+  -f, --from <a|b>     Which side's commits to replay (default: b)
+  -b, --branch <name>  Sync only this branch (bypasses branch-filters.json)
+  -n, --dry-run        Replay but push nothing
+  -h, --help           Show this help`;
+
 if (require.main === module) {
-  const { values } = parseArgs({
-    options: {
-      pair:      { type: "string",  short: "p" },
-      remote:    { type: "string",  short: "r" },  // alias for --pair
-      from:      { type: "string",  short: "f" },
-      branch:    { type: "string",  short: "b" },
-      "dry-run": { type: "boolean", short: "n" },
-    },
-    strict: true,
-  });
+  let values: Record<string, string | boolean | undefined>;
+  try {
+    ({ values } = parseArgs({
+      options: {
+        pair:      { type: "string",  short: "p" },
+        remote:    { type: "string",  short: "r" },  // alias for --pair
+        from:      { type: "string",  short: "f" },
+        branch:    { type: "string",  short: "b" },
+        "dry-run": { type: "boolean", short: "n" },
+        help:      { type: "boolean", short: "h" },
+      },
+      strict: true,
+    }));
+  } catch (e: any) {
+    console.error(e.message);
+    console.error(USAGE);
+    process.exit(2);
+  }
+  if (values.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
 
   const result = runSync({
-    pair: values.pair ?? values.remote,
+    pair: (values.pair ?? values.remote) as string | undefined,
     from: (values.from ?? "b") as "a" | "b",
-    branch: values.branch,
-    dryRun: values["dry-run"] ?? false,
+    branch: values.branch as string | undefined,
+    dryRun: (values["dry-run"] as boolean | undefined) ?? false,
     stream: true,
   });
 
