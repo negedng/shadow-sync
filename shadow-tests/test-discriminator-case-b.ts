@@ -126,7 +126,7 @@ async function main() {
     console.log(`  TREESAME-1st: ${mergeBackendTree === mira1BackendTree ? "✓" : "✗"}`);
     if (mergeBackendTree !== mira1BackendTree) {
       console.log("  ✘ Setup error: merge was not TS-1; can't reproduce the variant.");
-      return;
+      process.exit(1);
     }
 
     banner("Round 3: Mira adds a non-TREESAME backend commit");

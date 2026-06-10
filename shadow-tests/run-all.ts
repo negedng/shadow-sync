@@ -40,6 +40,14 @@ function runOne(file: string): Promise<Result> {
     let buf = "";
     child.stdout.on("data", d => { buf += d.toString(); });
     child.stderr.on("data", d => { buf += d.toString(); });
+    child.on("error", err => {
+      resolve({
+        file: file.replace(/\.ts$/, ""),
+        ok: false,
+        output: `${buf}\nspawn failed: ${err.message}`,
+        ms: Date.now() - startedAt,
+      });
+    });
     child.on("exit", code => {
       resolve({
         file: file.replace(/\.ts$/, ""),

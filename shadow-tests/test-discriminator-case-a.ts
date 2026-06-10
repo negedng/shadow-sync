@@ -119,7 +119,7 @@ async function main() {
     console.log(`  exit: ${r.exitCode}`);
     if (r.exitCode !== 0) {
       console.error(r.stdout); console.error(r.stderr);
-      console.log("\n  ✘ HALT at Round 3 --from a"); return;
+      console.log("\n  ✘ HALT at Round 3 --from a"); process.exit(1);
     }
 
     banner("Rounds 4-6: Bea linear commits, --from b, Mira mergeShadow each round");
@@ -129,7 +129,7 @@ async function main() {
       git("push origin main", backend.working);
 
       r = await runSync({ from: "b" });
-      if (r.exitCode !== 0) { console.error(r.stderr); console.log(`✘ round ${i} b`); return; }
+      if (r.exitCode !== 0) { console.error(r.stderr); console.log(`✘ round ${i} b`); process.exit(1); }
 
       git("fetch origin", mono.working);
       git("checkout main", mono.working);
