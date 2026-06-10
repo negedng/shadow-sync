@@ -182,7 +182,11 @@ function _runSyncCore(options: SyncOptions): number {
       if (dryRun) {
         console.log(`\n[DRY RUN] Skipping tag sync.`);
       } else {
-        syncTags({ source, target, shaMapping: result.shaMapping });
+        const tagRes = syncTags({ source, target, shaMapping: result.shaMapping });
+        if (tagRes.failed > 0) {
+          console.error(`  ✘ ${tagRes.failed} tag push(es) failed on ${pair.name}.`);
+          failed++;
+        }
       }
     } catch (err: any) {
       console.error(`  ✘ Failed to sync ${pair.name}: ${err.message}`);

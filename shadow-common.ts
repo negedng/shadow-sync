@@ -1908,7 +1908,7 @@ export function syncTags(opts: {
   source: RepoEndpoint;
   target: RepoEndpoint;
   shaMapping: Map<string, string>;
-}): { pushed: number; skipped: number; upToDate: number } {
+}): { pushed: number; skipped: number; upToDate: number; failed: number } {
   const { source, target, shaMapping } = opts;
 
   // --force: plain --tags refuses to move an existing local tag, so a source
@@ -1922,9 +1922,9 @@ export function syncTags(opts: {
     ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)|%(*objectname)"],
     { safe: true },
   );
-  if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0, upToDate: 0 };
+  if (!listRes.ok || !listRes.stdout) return { pushed: 0, skipped: 0, upToDate: 0, failed: 0 };
   const tagLines = listRes.stdout.split("\n").filter(Boolean);
-  if (tagLines.length === 0) return { pushed: 0, skipped: 0, upToDate: 0 };
+  if (tagLines.length === 0) return { pushed: 0, skipped: 0, upToDate: 0, failed: 0 };
 
   console.log(`\n── Syncing tags (${tagLines.length} candidate(s)) ──`);
 
@@ -1944,6 +1944,7 @@ export function syncTags(opts: {
   let pushed = 0;
   let skipped = 0;
   let upToDate = 0;
+  let failed = 0;
   for (const line of tagLines) {
     // name|objecttype|objectname|peeled-commit (blank if lightweight)
     const sep1 = line.indexOf("|");
@@ -1971,8 +1972,8 @@ export function syncTags(opts: {
       const newBody = tagBodyRes.stdout.replace(/^object [0-9a-f]+/m, `object ${targetCommit}`);
       const mktagRes = git(["mktag"], { input: newBody, safe: true });
       if (!mktagRes.ok || !mktagRes.stdout) {
-        console.log(`  ${name}: mktag failed (${mktagRes.stderr.slice(0, 120)}), skipping`);
-        skipped++;
+        console.log(`  ✘ ${name}: mktag failed (${mktagRes.stderr.slice(0, 120)})`);
+        failed++;
         continue;
       }
       pushSHA = mktagRes.stdout;
@@ -1994,14 +1995,14 @@ export function syncTags(opts: {
       { safe: true },
     );
     if (!pushRes.ok) {
-      console.log(`  ${name}: push failed (${pushRes.stderr.trim().slice(0, 120)}), skipping`);
-      skipped++;
+      console.log(`  ✘ ${name}: push failed (${pushRes.stderr.trim().slice(0, 120)})`);
+      failed++;
       continue;
     }
     console.log(`  ${name}${objectType === "tag" ? " (annotated)" : ""}: ${sourceCommit.slice(0, 8)} → ${targetCommit.slice(0, 8)} ✓`);
     pushed++;
   }
 
-  console.log(`Tags: ${pushed} pushed, ${upToDate} up to date, ${skipped} skipped (source commit not replayed).`);
-  return { pushed, skipped, upToDate };
+  console.log(`Tags: ${pushed} pushed, ${upToDate} up to date, ${skipped} skipped (source commit not replayed), ${failed} failed.`);
+  return { pushed, skipped, upToDate, failed };
 }
