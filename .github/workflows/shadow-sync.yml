@@ -13,8 +13,10 @@ on:
         description: PAT with Contents Read+Write on every repo listed in shadow-config.json.
         required: true
 
+# Shared group with shadow-forward.yml: a pull and a push running concurrently
+# read/write the same shadow refs, so the two directions must serialize.
 concurrency:
-  group: shadow-sync-pull
+  group: shadow-sync
   cancel-in-progress: false
 
 permissions:

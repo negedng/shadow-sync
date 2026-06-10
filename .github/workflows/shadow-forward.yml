@@ -13,8 +13,9 @@ on:
         description: Fine-grained PAT with Contents Read+Write on the B-side repos.
         required: true
 
+# Shared group with shadow-sync.yml — see the note there.
 concurrency:
-  group: shadow-sync-push
+  group: shadow-sync
   cancel-in-progress: false
 
 permissions:
