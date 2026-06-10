@@ -25,6 +25,14 @@
  *             mergeRef integrate with --no-ff.
  *   The flicker surfaces ONLY in the unscoped whole-repo `git log` (no pathspec ->
  *   no history simplification) and in `git log --full-history -- <file>`.
+ *   IDE GRAPH: VS Code's Source Control Graph does NOT run `git log --graph`.
+ *          Per microsoft/vscode (historyProvider.ts -> git.ts log()), it fetches
+ *          `git log --format='%H%n%aN%n%aE%n%at%n%ct%n%P%n%D%n%B' -z --shortstat
+ *          <refs>` (git's DEFAULT order, %P = parent hashes) and lays out the lanes
+ *          CLIENT-SIDE. The visual result — the merged-in lane grouped together,
+ *          ABOVE your own commit REGARDLESS of commit date — matches `--topo-order`
+ *          on the CLI (used here as a proxy), NOT `--date-order`. It is a full-DAG
+ *          view: both sides visible, no path simplification. Own-only = --first-parent.
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
@@ -61,14 +69,20 @@ function createRepo(tmpDir: string, name: string, identity: { email: string; nam
   return { bare, working };
 }
 
-function commitFiles(repo: Repo, files: Record<string, string | null>, msg: string): string {
+/** `date` pins author+committer date (replay preserves both), making --date-order assertions deterministic. */
+function commitFiles(repo: Repo, files: Record<string, string | null>, msg: string, date?: string): string {
   for (const [rel, content] of Object.entries(files)) {
     const full = path.join(repo.working, rel);
     if (content === null) { if (fs.existsSync(full)) fs.unlinkSync(full); }
     else { fs.mkdirSync(path.dirname(full), { recursive: true }); fs.writeFileSync(full, content); }
   }
   git("add -A", repo.working);
-  git(`commit -m "${msg}"`, repo.working);
+  if (date) {
+    execSync(`git commit -m "${msg}"`, { cwd: repo.working, encoding: "utf8", stdio: "pipe",
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+  } else {
+    git(`commit -m "${msg}"`, repo.working);
+  }
   return git("rev-parse HEAD", repo.working);
 }
 
@@ -145,12 +159,16 @@ export default function run(): void {
     assertEqual(runSync({ from: "a" }).exitCode, 0, "[bootstrap --from a]");
 
     // ── Phase 2: backend reaches v2 DIRECTLY ─────────────────────────────────
-    commitFiles(backend, { [EXT_FILE]: "v2\n" }, "Bb backend sets v2 (direct)");
+    // Pin backend NEWER than frontend so date-order and topo-order DISAGREE:
+    // date-order would float Bb (newest) to the top; topo-order keeps the
+    // frontend lane grouped on its second parent. This is how we tell which
+    // ordering VS Code's graph actually uses.
+    commitFiles(backend, { [EXT_FILE]: "v2\n" }, "Bb backend sets v2 (direct)", "2026-01-01T10:20:00");
     git("push origin main", backend.working);
 
-    // ── Phase 3: frontend reaches the SAME v2 via a mid flicker ──────────────
-    commitFiles(frontend, { [EXT_FILE]: "mid\n" }, "Fmid frontend detour to mid");
-    commitFiles(frontend, { [EXT_FILE]: "v2\n" }, "Ffin frontend lands on v2");
+    // ── Phase 3: frontend reaches the SAME v2 via a mid flicker (OLDER dates) ─
+    commitFiles(frontend, { [EXT_FILE]: "mid\n" }, "Fmid frontend detour to mid", "2026-01-01T10:05:00");
+    commitFiles(frontend, { [EXT_FILE]: "v2\n" }, "Ffin frontend lands on v2", "2026-01-01T10:10:00");
     git("push origin main", frontend.working);
 
     // ── Phase 4: pull both into mono's shadows ───────────────────────────────
@@ -227,6 +245,31 @@ export default function run(): void {
       "[BACKEND ff] path-log STILL hides the 'mid' flicker even after a fast-forward");
     assertIncludes(git(`log int-ff --format=%s`, backend.working), "Fmid",
       "[BACKEND ff] the flicker remains visible only in the UNSCOPED whole-repo log");
+
+    // ── Phase 7c: which ordering does the IDE commit graph use? ──────────────
+    // backend's Bb is the NEWEST commit now, so date-order and topo-order
+    // disagree. Print both and let the output decide the model.
+    console.log("\n── BACKEND LEAF: ordering comparison (Bb is newest) ──");
+    const dateOrder = git(`log --graph --date-order --format=%s int-noff`, backend.working);
+    const topoOrder = git(`log --graph --topo-order --format=%s int-noff`, backend.working);
+    console.log("  --date-order:\n" + dateOrder.replace(/^/gm, "      "));
+    console.log("  --topo-order:\n" + topoOrder.replace(/^/gm, "      "));
+    console.log("  Fmid-before-Bb? date:", dateOrder.indexOf("Fmid") < dateOrder.indexOf("Bb backend"),
+                "topo:", topoOrder.indexOf("Fmid") < topoOrder.indexOf("Bb backend"));
+
+    // date-order floats the NEWEST commit (backend Bb) to the top:
+    assertEqual(dateOrder.indexOf("Fmid") > dateOrder.indexOf("Bb backend"), true,
+      "[date-order] newest commit (backend Bb) draws ABOVE the older frontend lane");
+    // topo-order keeps the merged-in frontend lane grouped on its 2nd parent,
+    // ABOVE backend's newer commit — DATE-INDEPENDENT. VS Code fetches with git's
+    // DEFAULT order and lays out lanes client-side from %P; --topo-order is the
+    // CLI proxy that reproduces what you SEE (it does NOT run `git log --graph`).
+    assertEqual(topoOrder.indexOf("Fmid") < topoOrder.indexOf("Bb backend"), true,
+      "[topo-order ~ VS Code layout] frontend lane stays grouped ABOVE backend's NEWER commit (date-independent)");
+    assertIncludes(topoOrder, "Fmid",
+      "[VS Code graph] the other side is visible — full DAG, no path simplification");
+    assertNotIncludes(git(`log --topo-order --first-parent int-noff --format=%s`, backend.working), "Fmid",
+      "[--first-parent] own-side only — the other lane disappears");
 
     // ── Phase 8: FRONTEND leaf — the merge-order LOSER ───────────────────────
     // mono merged backend FIRST, so on every shadow the frontend side sits on a
