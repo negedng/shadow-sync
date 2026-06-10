@@ -54,6 +54,24 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 - `mappings` lists the folder pairs to sync. Each mapping's `a` and `b` are path prefixes on the respective sides (`""` for repo root, `"backend"` for a subdirectory)
 - One pair can carry multiple mappings — e.g. a `backend` mapping for the primary slice plus a `common` mapping for a shared folder that lives at different paths on each side
 - `url` tells the tool how to reach the repo
+- An endpoint may set `"anchorBranch"` (default `"main"`) — the branch whose init commit anchors replayed orphan history on that side. Set it if the repo's mainline is `master`/`trunk`
+
+Optional top-level fields (see `shadow-config.example.json`): `trailers.replayed` (trailer key prefix), `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `shadowBranchPrefix`.
+
+### `branch-filters.json` (required)
+
+Next to `shadow-config.json`, create `branch-filters.json` — an explicit allowlist of which branches sync from each remote (copy from `branch-filters.example.json`):
+
+```json
+{
+  "filters": {
+    "backend-repo": ["main", "release/*"],
+    "main-repo": ["main"]
+  }
+}
+```
+
+Patterns support `*` and `**` globs (`["**"]` allows everything). **The filter is fail-closed: a missing or empty file means zero branches sync.** This is deliberate — the allowlist is the operator's explicit declaration of what leaves a repo, and silently falling back to "sync everything" would defeat it.
 
 ## Usage
 
@@ -117,7 +135,7 @@ The engine adds one `Shadow-replayed-<pair>-<source-remote>` trailer per absorbe
 
 **Hand-built resolution on the shadow ref (always available).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run.
 
-A worked example of both flows is in [`local_tests/conflict_squash/run_scenario.ts`](local_tests/conflict_squash/run_scenario.ts).
+Both flows are exercised end-to-end by `shadow-tests/test-halt-recovery-variants.ts`.
 
 ### `.shadowignore`
 
@@ -186,9 +204,11 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-r` / `--pair` | Pair name | All pairs |
-| `--from` | Direction: `a` or `b` | `b` |
-| `-b` | Branch to sync | All branches |
+| `-p` / `--pair` | Pair name (`-r` / `--remote` is an alias) | All pairs |
+| `-f` / `--from` | Direction: `a` or `b` | `b` |
+| `-b` / `--branch` | Branch to sync (bypasses `branch-filters.json`) | All allowed branches |
+| `-n` / `--dry-run` | Replay but push nothing | off |
+| `-h` / `--help` | Show usage | |
 
 ## Setup
 
@@ -206,14 +226,16 @@ npm install negedng/shadow-sync cross-env tsx
 }
 ```
 
-2. Create `shadow-config.json` from the example:
+2. Create `shadow-config.json` and `branch-filters.json` from the examples:
 
 ```bash
 cp node_modules/shadow-sync/shadow-config.example.json shadow-config.json
-# Edit shadow-config.json with your pair definitions
+cp node_modules/shadow-sync/branch-filters.example.json branch-filters.json
+# Edit shadow-config.json with your pair definitions and
+# branch-filters.json with the branch allowlist per remote
 ```
 
-3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, anchored at the target's init commit (or the closest round-tripped echo when one exists) — so plain `git merge origin/shadow/<pair>/<branch>` always finds a real merge base. The `Shadow-replayed-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
+3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, anchored at the target's init commit (or the closest round-tripped echo when one exists) — so plain `git merge origin/shadow/<pair>/<branch>` always finds a real merge base. The `Shadow-replayed-<pair>-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
 
 ```bash
 npm run sync -- -r backend --from a    # push monorepo changes to external
@@ -236,10 +258,12 @@ Automated tests covering pull, push, merge, branching, binary files, LFS, symlin
 | File | Purpose |
 |------|---------|
 | `shadow-config.example.json` | Example pair definitions, trailers, git config overrides |
+| `branch-filters.example.json` | Example per-remote branch allowlist (required, fail-closed) |
 | `shadow-common.ts` | Config, git helpers, unified replay engine |
 | `shadow-sync.ts` | Single script for both directions (--from a or --from b) |
 | `.shadowignore` | Ignore patterns (auto-discovered from source commit, like `.gitignore`) |
 | `shadow-sync-explained.html` | Detailed technical documentation |
-| `shadow-tests/` | 19 automated tests |
-| `.github/workflows/shadow-sync.yml` | CI pull workflow (cron) |
-| `.github/workflows/shadow-forward.yml` | CI push workflow (on shadow branch push) |
+| `shadow-tests/` | Automated test suite (`npm test`) |
+| `.github/workflows/shadow-sync.yml` | Reusable pull workflow (`workflow_call` / `workflow_dispatch`) |
+| `.github/workflows/shadow-forward.yml` | Reusable push workflow (`workflow_call` / `workflow_dispatch`) |
+| `.github/workflows/test.yml` | CI: runs the test suite on push/PR |

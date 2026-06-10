@@ -2,7 +2,6 @@ node_modules/
 *.js
 *.d.ts
 *.js.map
-!shadow-tests/
 *.local
 .env
 scenario.md

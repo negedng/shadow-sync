@@ -1,0 +1,6 @@
+{
+  "filters": {
+    "backend-repo": ["main", "release/*"],
+    "main-repo": ["main"]
+  }
+}
