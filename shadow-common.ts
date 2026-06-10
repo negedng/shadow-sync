@@ -130,6 +130,8 @@ function validatePair(pair: SyncPair): void {
   const aDirs = new Set<string>();
   const bDirs = new Set<string>();
   for (const m of pair.mappings) {
+    validateMappingDir(pair.name, m.a);
+    validateMappingDir(pair.name, m.b);
     if (aDirs.has(m.a)) fail(`pair "${pair.name}" has duplicate a-dir "${m.a}"`);
     if (bDirs.has(m.b)) fail(`pair "${pair.name}" has duplicate b-dir "${m.b}"`);
     aDirs.add(m.a);
@@ -137,7 +139,28 @@ function validatePair(pair: SyncPair): void {
   }
 }
 
-const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-config.json");
+// All prefix matching and git pathspecs use forward slashes with no leading/
+// trailing slash; anything else silently matches nothing, so reject it here.
+function validateMappingDir(pairName: string, dir: string): void {
+  if (dir === "") return;
+  if (dir.includes("\\")) fail(`pair "${pairName}" mapping dir "${dir}" must use forward slashes`);
+  if (dir.startsWith("/") || dir.endsWith("/")) fail(`pair "${pairName}" mapping dir "${dir}" must not have leading/trailing slashes`);
+  if (dir.split("/").includes("..")) fail(`pair "${pairName}" mapping dir "${dir}" must not contain '..'`);
+}
+
+export class ShadowSyncError extends Error {
+  constructor(msg: string) { super(msg); this.name = "ShadowSyncError"; }
+}
+
+export const CONFIG_PATH = process.env.SHADOW_CONFIG ?? path.join(__dirname, "shadow-config.json");
+
+function parseJsonFile<T>(filePath: string): T {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+  } catch (e: any) {
+    fail(`Failed to parse ${filePath}: ${e.message}`);
+  }
+}
 
 function loadConfig(): ShadowSyncConfig {
   if (!fs.existsSync(CONFIG_PATH)) {
@@ -150,8 +173,7 @@ function loadConfig(): ShadowSyncConfig {
     };
   }
 
-  const raw = fs.readFileSync(CONFIG_PATH, "utf8");
-  const doc = JSON.parse(raw) as Record<string, unknown>;
+  const doc = parseJsonFile<Record<string, unknown>>(CONFIG_PATH);
 
   const trailers = {
     replayed: ((doc.trailers as Record<string, string>)?.replayed) ?? "Shadow-replayed",
@@ -174,17 +196,16 @@ let _shadowBranchPrefix = config.shadowBranchPrefix;
 const MAX_BUFFER = config.maxBuffer;
 
 /** Orchestrator repo root — git commands use paths relative to it, not the cwd. */
-let _repoRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" })
-  .stdout.trim();
+const _repoRootProbe = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+if (_repoRootProbe.error || !_repoRootProbe.stdout) {
+  fail(`Cannot determine repo root (is git installed and cwd inside a repo?): ${_repoRootProbe.error?.message ?? (_repoRootProbe.stderr ?? "").trim()}`);
+}
+let _repoRoot = _repoRootProbe.stdout.trim();
 
 /** Git config overrides for cross-OS consistency. */
 const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
   ([key, value]) => ["-c", `${key}=${value}`],
 );
-
-export class ShadowSyncError extends Error {
-  constructor(msg: string) { super(msg); this.name = "ShadowSyncError"; }
-}
 
 /** Mutates module state — call before each in-process runSync(). */
 export function applyTestOverrides(opts: {
@@ -266,7 +287,9 @@ function filterExistingRefs(refs: string[]): string[] {
     ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
     { safe: true },
   );
-  if (!result.ok || !result.stdout) return [];
+  // Fail loud: an empty result here silently empties shaMapping downstream.
+  if (!result.ok) fail(`for-each-ref failed: ${result.stderr}`);
+  if (!result.stdout) return [];
   const existing = new Set(
     result.stdout.split("\n").filter(Boolean).map(l => l.replace(/^refs\/remotes\//, "")),
   );
@@ -440,13 +463,17 @@ function extractTrailerMapping(logArgs: string[], trailerKey: string): Map<strin
     [...logArgs, `--format=%H %(trailers:key=${trailerKey},valueonly,separator=%x20)`],
     { safe: true },
   );
-  if (!result.ok || !result.stdout) return mapping;
+  // Fail loud: treating a failed log as "nothing replayed yet" would re-replay
+  // the whole history and diverge from any hand-built halt resolution.
+  if (!result.ok) fail(`Failed to read replay trailers (git log): ${result.stderr}`);
+  if (!result.stdout) return mapping;
   for (const line of result.stdout.split("\n")) {
     const parts = line.split(/\s+/).filter(Boolean);
     if (parts.length < 2) continue;
     const targetHash = parts[0];
     for (const src of parts.slice(1)) {
-      if (/^[0-9a-f]{7,40}$/.test(src)) mapping.set(src, targetHash);
+      // Log is newest-first; first occurrence (newest replay) wins.
+      if (/^[0-9a-f]{7,40}$/.test(src) && !mapping.has(src)) mapping.set(src, targetHash);
     }
   }
   return mapping;
@@ -700,7 +727,10 @@ function sliceChangedVsParent(
 function hasKeptExclusiveAncestor(pi: string, p1: string, keptSet: Set<string>): boolean {
   if (keptSet.size === 0) return false;
   const result = git(["log", "--format=%H", pi, `^${p1}`], { safe: true });
-  if (!result.ok) return false;
+  // Fail closed (keep): dropping the merge on a failed log could orphan the
+  // side branch's kept commits from the shadow tip. Same direction as
+  // sliceChangedVsParent's failure path.
+  if (!result.ok) return true;
   for (const line of result.stdout.split("\n")) {
     const h = line.trim();
     if (h && keptSet.has(h)) return true;
@@ -975,7 +1005,7 @@ const BRANCH_FILTERS_PATH = path.join(path.dirname(CONFIG_PATH), "branch-filters
  */
 function loadBranchFilters(): Map<string, RegExp[]> {
   if (!fs.existsSync(BRANCH_FILTERS_PATH)) return new Map();
-  const doc = JSON.parse(fs.readFileSync(BRANCH_FILTERS_PATH, "utf8")) as BranchFilterDoc;
+  const doc = parseJsonFile<BranchFilterDoc>(BRANCH_FILTERS_PATH);
   const out = new Map<string, RegExp[]>();
   for (const [remote, patterns] of Object.entries(doc.filters ?? {})) {
     out.set(remote, (patterns ?? []).map(compileIgnorePattern));
@@ -1814,8 +1844,9 @@ function replayCommits(opts: {
       }
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
-      const newSHA = git(["commit-tree", tree, ...parentArgs, "-m", msg], {
-        env: buildCommitEnv(meta),
+      // Message over stdin — a >32KB message as argv overflows CreateProcess on Windows.
+      const newSHA = git(["commit-tree", tree, ...parentArgs], {
+        env: buildCommitEnv(meta), input: msg,
       });
 
       shaMapping.set(commit.hash, newSHA);
@@ -1945,7 +1976,10 @@ export function syncTags(opts: {
 }): { pushed: number; skipped: number; upToDate: number } {
   const { source, target, shaMapping } = opts;
 
-  git(["fetch", source.remote, "--tags"], { safe: true });
+  // --force: plain --tags refuses to move an existing local tag, so a source
+  // re-tag would otherwise never propagate (and with multiple pairs fetching
+  // into the shared refs/tags namespace, first-fetched would win forever).
+  git(["fetch", source.remote, "--tags", "--force"], { safe: true });
 
   // %(*objectname) dereferences an annotated tag to its commit (empty for
   // lightweight, where %(objectname) is already the commit). Peeling here
