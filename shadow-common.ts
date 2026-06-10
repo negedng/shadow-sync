@@ -369,6 +369,35 @@ export function ensureRemote(endpoint: RepoEndpoint): void {
   }
 }
 
+/** One A/M/D/T record from `diff-tree -r -z` (no -M/-C, so single-path records). */
+interface DiffEntry { newMode: string; newHash: string; status: string; filePath: string }
+
+// Parse `-z` records: ":<modes> <shas> <status>\0<path>\0". -z is load-bearing:
+// it emits paths verbatim, where the default core.quotepath C-quotes paths with
+// non-ASCII/special characters — breaking mapping prefix matches and silently
+// dropping those files from the replay.
+function parseDiffTreeZ(out: string): DiffEntry[] {
+  const entries: DiffEntry[] = [];
+  const tokens = out.split("\0");
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const m = tokens[i].match(/^:\d+ (\d+) [0-9a-f]+ ([0-9a-f]+) ([AMDT])$/);
+    if (!m) continue;
+    entries.push({ newMode: m[1], newHash: m[2], status: m[3], filePath: tokens[i + 1] });
+  }
+  return entries;
+}
+
+/** diff-tree -r -z between two commits, restricted to the synced dirs.
+ *  With a "" source the whole tree is in scope, so the pathspec is skipped
+ *  (it would exclude siblings of more-specific sources). */
+function diffSyncedDirs(parent: string, commit: string, dc: DirectionConfig):
+  { ok: boolean; stderr: string; entries: DiffEntry[] } {
+  const args = ["diff-tree", "-r", "-z", parent, commit];
+  if (!anyRootSource(dc)) args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
+  const res = git(args, { safe: true, raw: true });
+  return { ok: res.ok, stderr: res.stderr, entries: res.ok ? parseDiffTreeZ(res.stdout) : [] };
+}
+
 // True iff `<hash>:<sourceDir>` resolves to a tree. Root ("") is always
 // present; memoized since a non-root slice's presence rarely changes.
 const _slicePresentCache = new Map<string, boolean>();
@@ -396,7 +425,8 @@ function applyIndexInfo(
     ...removals.map(p => `0 ${NULL_SHA}\t${p}`),
     ...additions,
   ];
-  git(["update-index", "--index-info"], { env: idxEnv, input: lines.join("\n") + "\n" });
+  // -z: NUL-terminated records, paths taken verbatim (no C-unquoting).
+  git(["update-index", "-z", "--index-info"], { env: idxEnv, input: lines.join("\0") + "\0" });
 }
 
 /** Allocate a private git index, run `fn` against it, then delete it. */
@@ -548,10 +578,10 @@ export function runPreflightChecks(ref: string): PreflightWarning[] {
   // in update-index --index-info, silently dropping one of them from the
   // replayed tree. Skip the walk on Linux where the index preserves both.
   if (process.platform === "win32" || process.platform === "darwin") {
-    const tree = git(["ls-tree", "-r", "--name-only", ref], { safe: true });
+    const tree = git(["ls-tree", "-r", "--name-only", "-z", ref], { safe: true, raw: true });
     if (tree.ok && tree.stdout) {
       const lower = new Map<string, string>();
-      for (const filePath of tree.stdout.split("\n").filter(Boolean)) {
+      for (const filePath of tree.stdout.split("\0").filter(Boolean)) {
         const existing = lower.get(filePath.toLowerCase());
         if (existing && existing !== filePath) {
           error("CASE_CONFLICT", `Case conflict: '${existing}' and '${filePath}' differ only in case.\n  This will cause data loss on case-insensitive filesystems (Windows/macOS).`);
@@ -715,16 +745,9 @@ function sliceChangedVsParent(
   dc: DirectionConfig,
   ignoreBySrc: RegExp[][],
 ): boolean {
-  const args = ["diff-tree", "-r", parent, commit];
-  if (!anyRootSource(dc)) args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
-  const res = git(args, { safe: true });
-  if (!res.ok) return true;  // fail closed: keep
-  if (!res.stdout) return false;
-  for (const line of res.stdout.split("\n")) {
-    const m = line.match(/^:\d+ \d+ [0-9a-f]+ [0-9a-f]+ [AMDT]\t(.+)$/);
-    if (m && routeSourcePath(m[1], dc, ignoreBySrc) !== null) return true;
-  }
-  return false;
+  const diff = diffSyncedDirs(parent, commit, dc);
+  if (!diff.ok) return true;  // fail closed: keep
+  return diff.entries.some(e => routeSourcePath(e.filePath, dc, ignoreBySrc) !== null);
 }
 
 // Returns true iff `git log pi ^p1` contains any commit in keptSet —
@@ -1047,50 +1070,40 @@ function buildReplayedTree(opts: {
     git(["read-tree", "--empty"], { env: idxEnv });
   }
 
-  // With a "" source the whole tree is in scope, so skip the pathspec filter
-  // (it would exclude siblings of more-specific sources). sourceFirstParent
-  // null = source root, which diffs as all-additions below.
-  let diffOutput: string;
+  // sourceFirstParent null = source root, which lists as all-additions below.
+  let entries: DiffEntry[];
 
   if (sourceFirstParent) {
-    const diffArgs = ["diff-tree", "-r", sourceFirstParent, commitHash];
-    if (!anyRootSource(dc)) diffArgs.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
-    const diffRes = git(diffArgs, { safe: true });
-    if (!diffRes.ok) {
-      fail(`diff-tree failed for ${commitHash}: ${diffRes.stderr}`);
-    }
-    diffOutput = diffRes.stdout;
+    const diff = diffSyncedDirs(sourceFirstParent, commitHash, dc);
+    if (!diff.ok) fail(`diff-tree failed for ${commitHash}: ${diff.stderr}`);
+    entries = diff.entries;
   } else {
-    // No parent to diff against — reshape ls-tree into diff-tree "A" entries.
-    const lsArgs = ["ls-tree", "-r", commitHash];
+    // No parent to diff against — every ls-tree blob is an addition.
+    const lsArgs = ["ls-tree", "-r", "-z", commitHash];
     if (!anyRootSource(dc)) lsArgs.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
-    const lsResult = git(lsArgs, { safe: true });
+    const lsResult = git(lsArgs, { safe: true, raw: true });
     if (!lsResult.ok || !lsResult.stdout) return null;
-    diffOutput = lsResult.stdout.split("\n").filter(Boolean)
-      .map(line => {
-        const m = line.match(/^(\d+)\s+\w+\s+([0-9a-f]+)\t(.+)$/);
-        if (!m) return "";
-        return `:000000 ${m[1]} ${"0".repeat(40)} ${m[2]} A\t${m[3]}`;
-      }).join("\n");
+    entries = [];
+    for (const rec of lsResult.stdout.split("\0")) {
+      const tab = rec.indexOf("\t");
+      const m = tab > 0 ? rec.slice(0, tab).match(/^(\d+) \w+ ([0-9a-f]+)$/) : null;
+      if (m) entries.push({ newMode: m[1], newHash: m[2], status: "A", filePath: rec.slice(tab + 1) });
+    }
   }
 
-  if (!diffOutput) return parentTree ?? null;
+  if (entries.length === 0) return parentTree ?? null;
 
-  // No -M/-C above, so renames surface as D+A — we only handle A/M/D/T.
+  // No -M/-C, so renames surface as D+A — we only handle A/M/D/T.
   const removals: string[] = [];
   const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
-  for (const line of diffOutput.split("\n").filter(Boolean)) {
-    const m = line.match(/^:\d+ (\d+) [0-9a-f]+ ([0-9a-f]+) ([AMDT])\t(.+)$/);
-    if (!m) continue;
-    const [, newMode, newHash, status, filePath] = m;
-
-    const targetPath = routeSourcePath(filePath, dc, shadowIgnorePatternsBySourceIdx);
+  for (const e of entries) {
+    const targetPath = routeSourcePath(e.filePath, dc, shadowIgnorePatternsBySourceIdx);
     if (targetPath === null) continue;
 
-    if (status === "D") {
+    if (e.status === "D") {
       removals.push(targetPath);
     } else {
-      additions.push(`${newMode} ${newHash}\t${targetPath}`);
+      additions.push(`${e.newMode} ${e.newHash}\t${targetPath}`);
     }
   }
 
@@ -1149,9 +1162,9 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
   return withTmpIndex("autoignore", idxEnv => {
     const readRes = git(["read-tree", treeSha], { env: idxEnv, safe: true });
     if (!readRes.ok) return treeSha;
-    const ls = git(["ls-files"], { env: idxEnv, safe: true });
+    const ls = git(["ls-files", "-z"], { env: idxEnv, safe: true, raw: true });
     if (ls.ok && ls.stdout) {
-      const toRemove = ls.stdout.split("\n").filter(Boolean)
+      const toRemove = ls.stdout.split("\0").filter(Boolean)
         .filter(p => ignorePatterns.some(re => re.test(p)));
       // stdin-based delete (see applyIndexInfo) — avoids argv overflow on Windows.
       applyIndexInfo(idxEnv, toRemove, []);

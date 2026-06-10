@@ -103,9 +103,8 @@ function runPullPaths(env: ReturnType<typeof createTestEnv>): void {
     assertIncludes(targetTagBody, "Version 1.0.0", "[paths 4] annotated tag message preserved on target");
     assertIncludes(targetTagBody, `object ${targetTagCommit}`, "[paths 4] annotated tag's object header points to replay");
 
-    // phase 5: unicode-names (CJK)
-    git("config core.quotePath false", env.remoteWorking);
-    git("config core.quotePath false", env.localRepo);
+    // phase 5: unicode-names (CJK). No core.quotePath override — the engine's
+    // -z plumbing parsing must work under the quoting default.
     const uniBranch = "feature/日本語";
     git(`checkout -b "${uniBranch}"`, env.remoteWorking);
     const uniFile = "résumé.ts";
