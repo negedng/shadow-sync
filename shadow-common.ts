@@ -4,6 +4,26 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
+// ── Glossary ──────────────────────────────────────────────────────────────────
+// pair          Two repo endpoints (a/b) + dir mappings; direction chosen via --from.
+// dc            DirectionConfig — a pair resolved into source→target for one run.
+// replay        Re-creating a source commit on the target with remapped paths.
+// trailer       `Shadow-replayed-<pair>-<remote>: <sha>` commit footer. The
+//               persistent source→target mapping: no state file, history IS the state.
+// shadow ref    shadow/<pair>/<branch> on the target remote — the replayed line
+//               the target merges from.
+// echo          A source commit that is itself a replay from the target side;
+//               recorded, never re-replayed (prevents ping-pong duplication).
+// load-bearing  A commit whose mapped+filtered diff changes synced content (or a
+//               merge anchoring such commits). Everything else is dropped.
+// settled       Scanned in a prior run; verdict is immutable, so re-scans skip it.
+// halt          Replay gave up (e.g. mapped parents disagree on outer state). The
+//               branch stops there; the operator resolves; later runs absorb it.
+// inner/outer   Tree regions inside / outside the mapped target dirs.
+// splice        Composing a tree by inserting mapped subtree slices into a base.
+//
+// Deep dive with worked examples: shadow-sync-explained.html.
+
 // ── Module setup ──────────────────────────────────────────────────────────────
 
 export interface RepoEndpoint {
@@ -47,22 +67,17 @@ interface DirectionConfig {
   target: RepoEndpoint;
   /** Direction-flipped pair.mappings. */
   mappings: DirMappingDirected[];
-  /**
-   * Per-mapping auto-ignore patterns derived from intra-pair nested mappings.
-   * When one mapping's source path is the empty string or a strict prefix of
-   * another mapping's source path, the inner path's content is "owned" by the
-   * sibling mapping and must be stripped from the outer mapping's source slice.
-   * Same logic on the target side. Indexed by mapping idx; each entry has
-   * patterns for source-side reads and target-side reads.
-   */
+  /** mappings sorted by source-prefix length desc (longest prefix owns a path),
+   *  carrying each mapping's original idx. */
+  mappingsByDepth: Array<DirMappingDirected & { idx: number }>;
+  /** Per-mapping ignores stripping content owned by a sibling mapping nested
+   *  under this one's source/target dir. Indexed by mapping idx. */
   autoIgnoreBySourceIdx: RegExp[][];
   autoIgnoreByTargetIdx: RegExp[][];
 }
 
-// Build patterns to strip `innerPath/...` content from a tree rooted at `outerPath`.
-// `outerPath === ""` means tree root; `innerPath` must be non-empty and (when
-// outerPath is non-empty) start with `outerPath + "/"`. Returns null if inner
-// is not nested under outer.
+// Patterns stripping `innerPath/...` from a tree rooted at `outerPath`, or
+// null if inner is not nested under outer.
 function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): RegExp[] | null {
   let rel: string | null = null;
   if (outerPath === "") {
@@ -78,11 +93,8 @@ function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): Reg
   return [new RegExp(`^${escaped}$`), new RegExp(`^${escaped}/.*$`)];
 }
 
-// Per-pair, per-mapping auto-ignore: a mapping's source/target slice excludes
-// content owned by sibling mappings nested under it. Trigger is intra-pair
-// nested mappings (e.g. primary at "" with a sibling at "src/common"); the
-// old trigger (multiple pairs on the same remote with overlapping dirs) is
-// gone now that SyncPair.mappings carries N folder mappings per pair.
+// A mapping's slice excludes content owned by sibling mappings nested under it
+// (e.g. primary at "" with a sibling at "src/common").
 function computeAutoIgnorePatterns(
   pair: SyncPair,
 ): { a: RegExp[]; b: RegExp[] }[] {
@@ -105,14 +117,32 @@ function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig 
   const target = from === "a" ? pair.b : pair.a;
   const mappings = pair.mappings.map(m =>
     from === "a" ? { source: m.a, target: m.b } : { source: m.b, target: m.a });
+  const mappingsByDepth = mappings.map((m, idx) => ({ ...m, idx }))
+    .sort((a, b) => b.source.length - a.source.length);
   const autoByMapping = computeAutoIgnorePatterns(pair);
   const autoIgnoreBySourceIdx = autoByMapping.map(p => from === "a" ? p.a : p.b);
   const autoIgnoreByTargetIdx = autoByMapping.map(p => from === "a" ? p.b : p.a);
-  return { pair, source, target, mappings, autoIgnoreBySourceIdx, autoIgnoreByTargetIdx };
+  return { pair, source, target, mappings, mappingsByDepth, autoIgnoreBySourceIdx, autoIgnoreByTargetIdx };
 }
 
-// Derived projections of dc.mappings — recomputed at each call site,
-// matching the on-demand pattern of sourceTrailerKey/targetTrailerKey.
+/**
+ * Route a source file path through the pair's mappings: the longest-source-
+ * prefix mapping owns it, and its ignore patterns apply source-relative.
+ * Returns the mapped target path, or null (no owning mapping / ignored).
+ */
+function routeSourcePath(
+  filePath: string,
+  dc: DirectionConfig,
+  ignoreBySrcIdx: RegExp[][],
+): string | null {
+  const owner = dc.mappingsByDepth.find(m =>
+    m.source === "" || filePath === m.source || filePath.startsWith(`${m.source}/`));
+  if (!owner) return null;
+  const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
+  if ((ignoreBySrcIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) return null;
+  return owner.target ? `${owner.target}/${srcRelative}` : srcRelative;
+}
+
 function sourceDirsOf(dc: DirectionConfig): string[] { return dc.mappings.map(m => m.source); }
 function targetDirsOf(dc: DirectionConfig): string[] { return dc.mappings.map(m => m.target); }
 function anyRootSource(dc: DirectionConfig): boolean { return dc.mappings.some(m => m.source === ""); }
@@ -353,13 +383,9 @@ function slicePresent(hash: string, sourceDir: string): boolean {
   return present;
 }
 
-/**
- * Stage `removals` (deletes) and `additions` against `idxEnv`'s index in a
- * single `update-index --index-info` call over stdin. `additions` are already
- * "<mode> <sha>\t<path>" lines; `removals` become mode-0 delete lines. Stdin
- * has no length limit, so this is safe for arbitrarily large file lists —
- * unlike `git rm -- <paths>`, whose argv overflows CreateProcess on Windows.
- */
+/** Stage `removals` (mode-0 lines) and `additions` ("<mode> <sha>\t<path>"
+ *  lines) in one `update-index --index-info` over stdin — argv-based `git rm`
+ *  overflows CreateProcess on Windows for large file lists. */
 function applyIndexInfo(
   idxEnv: { GIT_INDEX_FILE: string },
   removals: string[],
@@ -402,22 +428,19 @@ function sanitizeTrailerToken(s: string): string {
   return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
-// Pair name is included so two pairs sharing a source remote (e.g. parent pair
-// `backend` and dedicated common pair `common-backend`, both with b.remote =
-// "backend-repo") get distinct trailers. Without it, scanning a shadow ref's
-// history would match the sibling pair's replays brought in via cross-pair
-// merges on the monorepo, polluting shaMapping with the wrong-shape replay.
+// Pair name included so two pairs sharing a source remote get distinct
+// trailers — otherwise cross-pair merges pollute shaMapping with the sibling
+// pair's (wrong-shape) replays.
 function replayedTrailerKey(pairName: string, remote: string): string {
   return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(`${pairName}-${remote}`)}`;
 }
 
-// This direction WRITES this trailer onto target commits: source→target SHA mapping.
+// The trailer this direction WRITES onto target commits.
 function sourceTrailerKey(dc: DirectionConfig): string {
   return replayedTrailerKey(dc.pair.name, dc.source.remote);
 }
 
-// The opposite direction's trailer. Encountering it on a source commit means it's
-// an echo of something this pair already replayed back from the target side.
+// The opposite direction's trailer — on a source commit it marks an echo.
 function targetTrailerKey(dc: DirectionConfig): string {
   return replayedTrailerKey(dc.pair.name, dc.target.remote);
 }
@@ -575,10 +598,8 @@ interface TopoCommit {
   parents: string[];
 }
 
-// Small LRU keyed by commit hash (immutable). The confined-mapping echo check
-// in composeMergeBaseTree re-reads each commit's first parent — on a linear
-// chain that's the previous iteration's commit, so a handful of recent entries
-// captures nearly all hits without retaining every commit's meta.
+// Small LRU: the echo check re-reads each commit's parents, which on a linear
+// chain are the previous iterations' commits — recency captures nearly all hits.
 const META_CACHE_MAX = 256;
 const _commitMetaCache = new Map<string, CommitMeta>();
 function getCommitMeta(hash: string): CommitMeta {
@@ -625,12 +646,8 @@ function buildCommitEnv(meta: CommitMeta): Record<string, string> {
 
 
 // ── Source graph ─────────────────────────────────────────────────────────────
-// The in-memory commit graph: built ONCE per direction from two batched git
-// calls (rev-list --parents for the edges, log --full-history for the
-// path-touched set), then used as the single source of truth for the whole scan.
-// The replay list (deriveSourceCommits), the settled-commit frontier
-// (computeSettledCommits), and the ancestry walks in collectAbsorbedHalted all
-// read it instead of spawning a `git log` per commit.
+// In-memory commit graph, built once per direction from two batched git calls;
+// the whole scan reads it instead of spawning a `git log` per commit.
 interface SourceGraph {
   parents: Map<string, string[]>;
   index: Map<string, number>;     // topo position, 0 = newest; a commit's parents have larger index
@@ -651,9 +668,8 @@ function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGrap
     parents.set(parts[0], parts.slice(1));
     index.set(parts[0], i++);
   }
-  // Call 2: the set of commits whose own diff touched the synced dirs — the
-  // replay list's path filter (deriveSourceCommits emits this ∪ all merges). With
-  // no pathspec (root source) every commit is in scope, so all are touched.
+  // Call 2: commits whose own diff touched the synced dirs. With a root source
+  // there is no pathspec, so every commit is in scope.
   const syncTouched = new Set<string>();
   if (dc.mappings.length > 0 && !anyRootSource(dc)) {
     const t = git(["log", "--full-history", "--format=%H", ...refs, "--", ...sourceDirsOf(dc).map(d => `${d}/`)], { safe: true });
@@ -675,11 +691,9 @@ function graphParentsOf(graph: SourceGraph, hash: string): string[] {
   return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
 }
 
-// The replay list, derived from the graph instead of a second `git log` +
-// fetchTrueParents: `git log --full-history --parents -- <dirs>` is exactly
-// {commits whose own diff touched the dirs} ∪ {all merges} (verified), and the
-// graph already holds the sync-touched set and the true parents. Emitted
-// oldest-first (graph keys are newest-first) so the scan sees ancestors first.
+// The scan list: {sync-touched commits} ∪ {all merges} — equivalent to
+// `git log --full-history --parents -- <dirs>` (verified). Emitted oldest-first
+// so the scan sees ancestors before descendants.
 function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
   const out: TopoCommit[] = [];
   const keys = [...g.parents.keys()];
@@ -695,7 +709,6 @@ function deriveSourceCommits(g: SourceGraph): TopoCommit[] {
 
 // True iff the commit's diff vs `parent`, after mapping + ignore filtering,
 // has any surviving path — i.e. it changes content that flows to the target.
-// O(changed files), mirroring buildReplayedTree's ownership/ignore rules.
 function sliceChangedVsParent(
   parent: string,
   commit: string,
@@ -705,19 +718,11 @@ function sliceChangedVsParent(
   const args = ["diff-tree", "-r", parent, commit];
   if (!anyRootSource(dc)) args.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
   const res = git(args, { safe: true });
-  if (!res.ok) return true;
+  if (!res.ok) return true;  // fail closed: keep
   if (!res.stdout) return false;
-  const sorted = dc.mappings.map((m, i) => ({ source: m.source, idx: i }))
-    .sort((a, b) => b.source.length - a.source.length);
   for (const line of res.stdout.split("\n")) {
     const m = line.match(/^:\d+ \d+ [0-9a-f]+ [0-9a-f]+ [AMDT]\t(.+)$/);
-    if (!m) continue;
-    const filePath = m[1];
-    const owner = sorted.find(o => o.source === "" || filePath === o.source || filePath.startsWith(`${o.source}/`));
-    if (!owner) continue;
-    const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
-    if ((ignoreBySrc[owner.idx] ?? []).some(p => p.test(srcRelative))) continue;
-    return true;
+    if (m && routeSourcePath(m[1], dc, ignoreBySrc) !== null) return true;
   }
   return false;
 }
@@ -754,9 +759,8 @@ function isLoadBearing(
 
   const p1 = c.parents[0];
 
-  // Missing source slice (at c or p1) load-bears, matching the old fingerprint
-  // "" escape. Root is always present, so this only fires for a non-root
-  // mapping whose dir hasn't appeared yet (or just vanished).
+  // A source slice missing at c or p1 (non-root dir not born yet, or just
+  // vanished) always load-bears.
   for (const m of dc.mappings) {
     if (!slicePresent(c.hash, m.source) || !slicePresent(p1, m.source)) return true;
   }
@@ -805,12 +809,9 @@ function dropNonLoadBearingCommits(
 }
 
 /**
- * Map echo commits (source → target SHA) so they count as already-replayed:
- * Origin: this side, no need to replay.
- *
- * Keyed on this pair's target-direction trailer, so a sibling pair's trailer
- * does NOT match — cross-pair commits (e.g. a frontend→common change reaching
- * the backend pair via mono) still replay, preserving cross-pair propagation.
+ * Map echo commits (source → target SHA) so they count as already replayed.
+ * Keyed on this pair's target-direction trailer only — a sibling pair's
+ * trailer must NOT match, so cross-pair commits still replay.
  */
 function addEchoMappings(
   sourceCommits: TopoCommit[],
@@ -839,11 +840,9 @@ function addEchoMappings(
 }
 
 /**
- * Commits a prior sync already settled: everything reachable from the newest
- * already-replayed commit on each branch's first-parent line. Such a commit was
- * scanned in an earlier run and is now either in shaMapping (kept) or provably
- * dropped — its load-bearing verdict is immutable (it depends only on its own
- * and its ancestors' fixed trees/verdicts), so the scan can skip re-deriving it.
+ * Settled = everything reachable from the newest already-replayed commit on
+ * each branch's first-parent line. Those verdicts are immutable (they depend
+ * only on fixed trees/ancestor verdicts), so the scan skips re-deriving them.
  */
 function computeSettledCommits(
   graph: SourceGraph,
@@ -854,14 +853,12 @@ function computeSettledCommits(
   const settled = new Set<string>();
   if (shaMapping.size === 0) return settled;
 
-  // Resolve each branch tip SHA in one for-each-ref (absent refs are omitted).
   const refs = branches.map(b => `refs/remotes/${dc.source.remote}/${b}`);
   const res = git(["for-each-ref", "--format=%(objectname)", ...refs], { safe: true });
   if (!res.ok || !res.stdout) return settled;
   const tips = res.stdout.split("\n").map(s => s.trim()).filter(Boolean);
 
-  // Frontier per branch: walk first-parent until the newest mapped commit C_b.
-  // Running off the end (no mapped ancestor on this line) yields no C_b.
+  // Frontier per branch: first-parent walk to the newest mapped commit (if any).
   const frontier: string[] = [];
   for (const tip of tips) {
     let h: string | undefined = tip;
@@ -869,9 +866,8 @@ function computeSettledCommits(
     if (h) frontier.push(h);
   }
 
-  // Settled = everything reachable from any frontier commit. Frontier-finding is
-  // first-parent (to locate C_b), but this must follow ALL parents — a dropped
-  // commit can sit on a non-first-parent side branch below a mapped merge.
+  // Reachability must follow ALL parents — a dropped commit can sit on a
+  // non-first-parent side branch below a mapped merge.
   const stack = [...frontier];
   while (stack.length) {
     const x = stack.pop()!;
@@ -888,11 +884,9 @@ function computeSettledCommits(
 // source-side metadata for shadow-sync, never replayed onto the target.
 const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
 
-// Read .shadowignore files at every level from sourceDir up to the repo root
-// (gitignore-style: deeper files layer on top of root-level files). File
-// contents are read at the commit's snapshot so patterns can evolve through
-// history. `extraPatterns` (e.g. auto-derived intra-pair nested-mapping
-// patterns) are prepended so the .shadowignore-file layer composes on top.
+// Read .shadowignore files from sourceDir up to the repo root, at the commit's
+// snapshot (patterns can evolve through history). `extraPatterns` (e.g. the
+// auto-derived nested-mapping ignores) are prepended.
 function readShadowIgnorePatterns(
   commitHash: string,
   sourceDir: string,
@@ -1053,12 +1047,9 @@ function buildReplayedTree(opts: {
     git(["read-tree", "--empty"], { env: idxEnv });
   }
 
-  // diff-tree -r format: :oldmode newmode oldhash newhash status\tpath
-  // Any "" source matches the entire tree → skip the pathspec filter so
-  // siblings of more-specific sources (e.g. src/init.txt next to src/common)
-  // aren't excluded. Otherwise pass the non-root dirs to git's pathspec.
-  // sourceFirstParent is the commit's real first parent (from the TopoCommit);
-  // null means a source root, which diffs as all-additions below.
+  // With a "" source the whole tree is in scope, so skip the pathspec filter
+  // (it would exclude siblings of more-specific sources). sourceFirstParent
+  // null = source root, which diffs as all-additions below.
   let diffOutput: string;
 
   if (sourceFirstParent) {
@@ -1070,7 +1061,7 @@ function buildReplayedTree(opts: {
     }
     diffOutput = diffRes.stdout;
   } else {
-    // Source root has no parent tree to diff against — reshape ls-tree into diff-tree's "A" entries so downstream logic sees a normal diff.
+    // No parent to diff against — reshape ls-tree into diff-tree "A" entries.
     const lsArgs = ["ls-tree", "-r", commitHash];
     if (!anyRootSource(dc)) lsArgs.push("--", ...sourceDirsOf(dc).map(d => `${d}/`));
     const lsResult = git(lsArgs, { safe: true });
@@ -1085,12 +1076,6 @@ function buildReplayedTree(opts: {
 
   if (!diffOutput) return parentTree ?? null;
 
-  // Mappings sorted by source-length desc so longest-prefix wins for nested
-  // source dirs. (Disjointness rules out true nesting between two of OUR
-  // mappings, but ordering keeps the fallback unambiguous.)
-  const sortedMappings = dc.mappings.map((m, i) => ({ ...m, idx: i }))
-    .sort((a, b) => b.source.length - a.source.length);
-
   // No -M/-C above, so renames surface as D+A — we only handle A/M/D/T.
   const removals: string[] = [];
   const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
@@ -1099,15 +1084,8 @@ function buildReplayedTree(opts: {
     if (!m) continue;
     const [, newMode, newHash, status, filePath] = m;
 
-    // Pick the owning mapping: first source dir that matches the file path.
-    const owner = sortedMappings.find(om =>
-      om.source === "" || filePath === om.source || filePath.startsWith(`${om.source}/`));
-    if (!owner) continue;
-
-    const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
-    if ((shadowIgnorePatternsBySourceIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) continue;
-
-    const targetPath = owner.target ? `${owner.target}/${srcRelative}` : srcRelative;
+    const targetPath = routeSourcePath(filePath, dc, shadowIgnorePatternsBySourceIdx);
+    if (targetPath === null) continue;
 
     if (status === "D") {
       removals.push(targetPath);
@@ -1115,7 +1093,6 @@ function buildReplayedTree(opts: {
       additions.push(`${newMode} ${newHash}\t${targetPath}`);
     }
   }
-
 
   applyIndexInfo(idxEnv, removals, additions);
 
@@ -1183,13 +1160,9 @@ function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
   });
 }
 
-/** For each mapping, read `<fromHash>:<m[side]>` and splice it into `base` at
- *  `m.target`. Returns null if any slice ref fails to resolve — caller decides
- *  whether to fall back to bare `base` or halt. Each slice is filtered through
- *  the per-mapping intra-pair auto-ignore patterns so paths owned by sibling
- *  mappings (nested under this one's source/target dir) don't bleed into this
- *  mapping's spliced region — the sibling's own splice covers them at the
- *  correct target path. */
+/** For each mapping, read `<fromHash>:<m[side]>` (auto-ignore filtered, so
+ *  sibling-owned paths don't bleed in) and splice it into `base` at `m.target`.
+ *  Returns null if a root slice fails to resolve — caller decides fallback vs halt. */
 function spliceMappings(
   base: string,
   fromHash: string,
@@ -1210,9 +1183,7 @@ function spliceMappings(
       slices.push({ subdir: m.target, content: emptyTreeSha() });
       continue;
     }
-    // extraIgnoreByIdx carries the per-commit .shadowignore (round-trip source
-    // splice only); paths in `fromHash:sub` are already source-dir-relative, so
-    // the patterns match. Union with auto-ignore is harmless if they overlap.
+    // extraIgnoreByIdx = per-commit .shadowignore (round-trip source splice only).
     const patterns = extraIgnoreByIdx
       ? [...(autoPatterns[i] ?? []), ...(extraIgnoreByIdx[i] ?? [])]
       : (autoPatterns[i] ?? []);
@@ -1223,9 +1194,8 @@ function spliceMappings(
 }
 
 
-/** First mapped parent's full tree. mappedParents[0] is always a valid replayed
- *  commit by construction; an unreadable tree means repo corruption, not an
- *  operator-resolvable conflict — so abort the run rather than halt one branch. */
+/** First mapped parent's full tree. Unreadable means repo corruption, not an
+ *  operator-resolvable conflict — abort the run rather than halt one branch. */
 function firstParentTree(mappedParents: string[], commitShort: string): string {
   const treeRes = git(["rev-parse", `${mappedParents[0]}^{tree}`], { safe: true });
   if (!treeRes.ok || !treeRes.stdout) fail(`Cannot read tree of mapped parent ${mappedParents[0]} for ${commitShort}.`);
@@ -1233,15 +1203,10 @@ function firstParentTree(mappedParents: string[], commitShort: string): string {
 }
 
 /**
- * Reconcile the OUTER (files outside target.dir/) across ≥2 mapped parents. The
- * caller splices the first parent's inner over the result, so this only decides
- * outer state.
- *   2 parents, clean merge-tree → the auto-merged outer. Ancestor/descendant
- *     pairs reduce to a fast-forward, preserving outer a first-parent fallback
- *     would drop.
- *   2-parent conflict / 3+ parents → outer-agreement: every parent must share
- *     the same outer. The source commit's scope can't author an outer-state
- *     difference, so divergence halts.
+ * Reconcile the OUTER across ≥2 mapped parents (the caller splices the first
+ * parent's inner over the result). 2 parents + clean merge-tree → auto-merged
+ * outer; otherwise all parents must agree on outer — the source commit's scope
+ * can't author an outer difference, so disagreement halts.
  */
 function reconcileOuter(mappedParents: string[], dc: DirectionConfig): ComposeResult {
   const targetDirs = targetDirsOf(dc);
@@ -1259,17 +1224,11 @@ function reconcileOuter(mappedParents: string[], dc: DirectionConfig): ComposeRe
 }
 
 /**
- * Echo splice: if ≥1 source parent already round-tripped (carries the target
- * trailer), old shadow commits must reflect target's outer state at the time,
- * not a frozen bootstrap snapshot — so splice the inner over the echo'd outer.
- *   Round-trip (echo target is itself a mapped parent — the operator's
- *     resolution merge Mm, kept in the parent set by resolveHaltAwareParents):
- *     splice the CURRENT commit's source-side inner (the operator's resolved
- *     inner, including any backend-only intermediate work) over Mm's outer.
- *   Otherwise: splice the first parent's inner over the echo'd outer.
- *   Multi-echo: the echo'd outers must agree.
- * Returns "not-an-echo" when no parent is an echo, so the caller continues to the
- * parent-count dispatch.
+ * Echo splice: when a source parent already round-tripped, the base must carry
+ * the target's outer state from that echo, not a frozen bootstrap snapshot.
+ * Round-trip (the echo target is itself a mapped parent): splice the CURRENT
+ * commit's source-side inner (the operator's resolution) over the echo'd outer;
+ * otherwise splice the first parent's inner. Multi-echo outers must agree.
  */
 function resolveEcho(
   commit: TopoCommit,
@@ -1309,21 +1268,13 @@ function resolveEcho(
 
 /**
  * Build the base tree for replaying `commit` onto `mappedParents`.
- * buildReplayedTree later overlays diff(firstParent → commit) within the synced
- * region as an ABSOLUTE apply, so the base must already equal the commit's
- * content everywhere that diff won't overwrite. That reduces to one invariant:
- * the base's inner (synced) region must be the FIRST PARENT's inner, and (cross-
- * repo) its outer must be the commit's reconciled outer. Taking any other inner
- * — e.g. an auto-merged tree — drops resolutions that re-assert the first parent
- * (the diff is empty there, so the wrong inner survives verbatim).
- *
- * Cross-repo (target.dir set): reconcile the outer, then splice the first
- *   parent's inner over it. The inner splice lives in exactly ONE place so no
- *   branch can substitute a divergent inner. The lone exception is an echo
- *   round-trip, where the inner is the commit's own resolved source (resolveEcho).
- * Same-repo (no target.dir): the synced region is the whole tree, so
- *   diff(firstParent → commit) covers everything and the first parent's tree is
- *   the correct base verbatim.
+ * buildReplayedTree overlays diff(firstParent → commit) as an ABSOLUTE apply,
+ * so the base must already equal the commit's content wherever that diff is
+ * silent. The invariant: the base's inner is the FIRST PARENT's inner (any
+ * other inner — e.g. auto-merged — silently survives where the diff is empty,
+ * dropping resolutions that re-assert the first parent), and cross-repo the
+ * outer is the reconciled outer. The lone exception is an echo round-trip,
+ * where the inner is the commit's own resolved source (resolveEcho).
  */
 function composeMergeBaseTree(opts: {
   commit: TopoCommit;
@@ -1336,21 +1287,17 @@ function composeMergeBaseTree(opts: {
   const commitShort = commit.hash.slice(0, 8);
   const confined = allTargetsConfined(dc);
 
-  // Echo splice runs first — handles the round-trip case even when the commit
-  // has a single mapped parent that is itself the echo target. It runs
-  // regardless of confinement: the `!confined` first-parent shortcut below is
-  // only valid when the first mapped parent is a faithful replay image, but an
-  // unmapped source parent resolves to targetInit (the target's root commit),
-  // whose stale outer content would otherwise leak through verbatim. resolveEcho
-  // returns "not-an-echo" when no source parent is an echo, so non-echo merges are
-  // unaffected.
+  // Echo splice runs first, regardless of confinement: an unmapped source
+  // parent resolves to targetInit, whose stale outer would otherwise leak
+  // through the first-parent shortcuts below verbatim.
   const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
   if (echo !== "not-an-echo") return echo;
 
   // 1 parent: outer can't have diverged; inner is that parent's. (fast path)
   if (mappedParents.length === 1) return { tree: firstParentTree(mappedParents, commitShort) };
 
-  // Same-repo: the first parent's tree is the correct base verbatim.
+  // Same-repo: the synced region is the whole tree, so the first parent's tree
+  // is the correct base verbatim.
   if (!confined) return { tree: firstParentTree(mappedParents, commitShort) };
 
   // Cross-repo, ≥2 parents: reconcile the outer, splice first parent's inner.
@@ -1414,10 +1361,8 @@ function resolveHaltAwareParents(
 }
 
 /**
- * BFS from the commit's source-side parents through halted unmapped ancestors,
- * stopping at mapped commits. Returns the halted SHAs to encode as
- * `Shadow-replayed` trailers on this commit's replay, so subsequent sync runs
- * see them as already replayed and skip retrying them.
+ * Halted unmapped ancestors reachable through the commit's parents — encoded
+ * as extra trailers on its replay so later runs treat them as replayed.
  */
 function collectAbsorbedHalted(
   commit: TopoCommit,
@@ -1461,11 +1406,8 @@ function loadReplayedMappings(opts: {
   );
 }
 
-/**
- * Newest-first walk to each branch's most recent mapped ancestor. The branch
- * HEAD may be outer-only (didn't touch source.dir/), so we still advance the
- * shadow tip to the most recent commit inside the synced subdir.
- */
+/** Each branch's shadow tip: the newest mapped commit on its first-parent line
+ *  (the branch HEAD itself may be outer-only and unmapped). */
 function mapBranchesToTargetTips(
   remote: string,
   branches: string[],
@@ -1509,14 +1451,9 @@ function inferSourceBranch(commitHash: string, sourceRemote: string): string | n
 }
 
 /**
- * The single halt diagnostic printed when composeMergeBaseTree gives up. Every
- * reason shares a header (commit, failure, mapped parents) and the hand-built
- * escape hatch — a commit on the shadow ref carrying the source→target trailer,
- * which loadReplayedMappings treats as already-replayed on the next run.
- * `outer-divergence` (a real merge whose mapped parents disagree on outer state)
- * additionally gets the full round-trip recovery recipe; the rarer structural
- * failures stop at the escape hatch (so a single-parent echo failure no longer
- * prints a nonsensical "octopus merge" recipe).
+ * Operator diagnostic for a halt. All causes share the header and the
+ * hand-built trailer escape hatch; outer-state disagreements additionally get
+ * the full round-trip recovery recipe.
  */
 function formatHaltDiagnostic(opts: {
   commit: TopoCommit;
@@ -1648,17 +1585,13 @@ interface ReplayHalts {
 }
 
 /**
- * Outcome of composeMergeBaseTree: a base tree, or a halt carrying the cause
- * that selects the operator diagnostic in formatHaltDiagnostic.
- *   outer-divergence       — mapped parents of a real merge disagree on outer
- *                            state (operator-resolvable; full round-trip recipe).
- *   multi-echo-disagreement — several already-replayed (echo) parents disagree.
- *   missing-tree           — a required parent tree or mapped subdir was absent.
+ * Halt causes (select the operator diagnostic in formatHaltDiagnostic):
+ *   outer-divergence        — mapped parents of a real merge disagree on outer.
+ *   multi-echo-disagreement — several echo parents disagree on outer.
+ *   missing-tree            — a required parent tree or mapped subdir was absent.
  */
 type ComposeHaltCause = "outer-divergence" | "multi-echo-disagreement" | "missing-tree";
 interface ComposeHalt { halt: ComposeHaltCause; }
-// A successful base-tree composition (`{ tree }`) or a halt. Success is always
-// the `{ tree }` shape so `isHalt` discriminates a real union, not `unknown`.
 type ComposeResult = { tree: string } | ComposeHalt;
 
 function isHalt(r: ComposeResult): r is ComposeHalt {
@@ -1734,18 +1667,13 @@ function haltCommit(opts: {
 // ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
- * Replay newCommits in topo order, mutating `shaMapping` so each replayed
- * commit is visible to later parent resolution in the same batch.
+ * Replay newCommits in topo order, mutating `shaMapping` so each replay is
+ * visible to later parent resolution in the same batch.
  *
- * Halt semantics: when neither compose function produces a tree (caller
- * invokes `haltCommit`), the failing commit is added to `haltedSources`
- * — NOT to `shaMapping`. Subsequent commits whose source parents are ALL
- * halted+unmapped are halted in turn. A commit with at least one mapped
- * parent (e.g. the operator's round-trip merge `R_be` carrying `Mm` as the
- * second parent via the existing trailer mapping) replays normally; the
- * absorption step collects halted source ancestors reachable through its
- * parents and encodes them as extra `Shadow-replayed` trailers, so on the
- * next sync run `loadReplayedMappings` treats them as already replayed.
+ * Halt semantics: a halted commit goes into `haltedSources`, NOT `shaMapping`.
+ * Commits whose parents are ALL halted+unmapped halt in turn; a commit with
+ * at least one mapped parent replays normally and absorbs reachable halted
+ * ancestors as extra trailers (already-replayed on the next run).
  */
 function replayCommits(opts: {
   newCommits: TopoCommit[];
@@ -1831,9 +1759,6 @@ function replayCommits(opts: {
         continue;
       }
 
-      // Absorption: collect halted source ancestors reachable from this commit
-      // through its source-side parents. They become additional Shadow-replayed
-      // trailers so the next sync sees them as already mapped and skips them.
       const absorbed = collectAbsorbedHalted(commit, haltedSources, shaMapping, graph);
 
       let msg = isEcho
@@ -1927,10 +1852,7 @@ export function mirrorHistory(opts: {
 
   const { haltedSources, haltRecords } = replayCommits({ newCommits: newCommits, shaMapping: syncedShaMap, targetInit, dc, graph });
 
-  // Only surface ORIGINAL halts (non-empty diagnostic). Propagated halts
-  // (descendants that inherited halt-state) carry an empty diagnostic — they're
-  // present in haltRecords only so resolveHaltAwareParents can splice in the
-  // halt-causer's mapped parents.
+  // Only surface ORIGINAL halts; propagated ones carry an empty diagnostic.
   const haltedBranches: HaltedBranch[] = [];
   for (const [sha, record] of haltRecords) {
     if (!record.diagnostic) continue;
@@ -1981,10 +1903,8 @@ export function syncTags(opts: {
   // into the shared refs/tags namespace, first-fetched would win forever).
   git(["fetch", source.remote, "--tags", "--force"], { safe: true });
 
-  // %(*objectname) dereferences an annotated tag to its commit (empty for
-  // lightweight, where %(objectname) is already the commit). Peeling here
-  // avoids a `git rev-parse` spawn per tag — the real cost when thousands of
-  // tags point at commits not yet replayed.
+  // %(*objectname) peels annotated tags to their commit (empty for lightweight)
+  // — avoids a rev-parse spawn per tag.
   const listRes = git(
     ["for-each-ref", "refs/tags", "--format=%(refname:short)|%(objecttype)|%(objectname)|%(*objectname)"],
     { safe: true },
@@ -1995,10 +1915,8 @@ export function syncTags(opts: {
 
   console.log(`\n── Syncing tags (${tagLines.length} candidate(s)) ──`);
 
-  // Live snapshot of the target's current tags so we skip ones already correct
-  // instead of re-force-pushing every tag each run. Must be ls-remote (the
-  // target's real state): the local refs/tags/* are the SOURCE tags fetched
-  // above into the same namespace, so comparing against them would be wrong.
+  // Skip already-correct tags. Must be ls-remote: local refs/tags/* hold the
+  // SOURCE tags fetched above, not the target's state.
   const remoteTags = new Map<string, string>();
   const lr = git(["ls-remote", "--tags", target.remote], { safe: true });
   if (lr.ok) {
@@ -2014,8 +1932,7 @@ export function syncTags(opts: {
   let skipped = 0;
   let upToDate = 0;
   for (const line of tagLines) {
-    // name | objecttype | objectname | *objectname(peeled commit, blank if lightweight)
-    // name/type can't contain '|'; the trailing two fields are hex/blank.
+    // name|objecttype|objectname|peeled-commit (blank if lightweight)
     const sep1 = line.indexOf("|");
     const sep2 = line.indexOf("|", sep1 + 1);
     const sep3 = line.indexOf("|", sep2 + 1);
@@ -2028,8 +1945,7 @@ export function syncTags(opts: {
 
     const targetCommit = shaMapping.get(sourceCommit);
     if (!targetCommit) {
-      // Common and expected (tags on commits not yet merged into the synced
-      // branch). Count, don't log per-tag — there can be thousands.
+      // Expected (tag on an unreplayed commit); don't log — can be thousands.
       skipped++;
       continue;
     }
@@ -2051,9 +1967,8 @@ export function syncTags(opts: {
       pushSHA = targetCommit;
     }
 
-    // Already correct on the target (byte-identical tag object / same commit) —
-    // nothing to do. pushSHA fingerprints the whole tag, so a re-annotation
-    // (same commit, new message/tagger) still differs and falls through.
+    // pushSHA fingerprints the whole tag, so a re-annotation (same commit,
+    // new message/tagger) still differs and falls through to the push.
     if (remoteTags.get(name) === pushSHA) {
       upToDate++;
       continue;

@@ -120,12 +120,8 @@ async function main() {
     const lsTree = git(`ls-tree -r --name-only ${mcA}`, mono.working);
     for (const line of lsTree.split("\n").filter(Boolean)) console.log(`    ${line}`);
 
-    // Helper: get backend/ subtree SHA, or empty-tree SHA if backend/ doesn't exist.
+    // backend/ subtree SHAs, or the empty-tree SHA where backend/ doesn't exist.
     const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-    function getBackendTree(sha: string): string {
-      const r = execSync(`git rev-parse ${sha}:backend 2>nul`, { cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-      return r || EMPTY_TREE;
-    }
     let mcABackendTree: string, mcAp1Tree: string, mcAp2Tree: string;
     try {
       mcABackendTree = git("rev-parse HEAD:backend", mono.working);

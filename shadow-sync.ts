@@ -99,10 +99,8 @@ function _runSyncCore(options: SyncOptions): number {
     ensureRemote(pair.a);
     ensureRemote(pair.b);
 
-    // Fetch both remotes before replay. Target-side objects (fallback parent,
-    // existing shadow branches for the dedup scan) must exist locally for the
-    // replay loop to resolve SHA mappings and build trees. A fresh CI runner
-    // has neither cached, so both fetches are mandatory up front.
+    // Both fetches are mandatory up front: target-side objects (fallback
+    // parent, shadow refs for the dedup scan) must exist locally for replay.
     console.log(`\n══ Syncing pair '${pair.name}' (from ${fromSide}: ${source.remote} → ${target.remote}) ══`);
     // --prune: without it a branch deleted on the source keeps its stale
     // tracking ref and syncs forever (and stale-shadow detection never fires).
@@ -167,89 +165,20 @@ function _runSyncCore(options: SyncOptions): number {
         failed++;
       }
 
-      // Update shadow branches on target's remote. A failed branch is reported
-      // and counted but doesn't abort the others or the pair's tag sync.
-      let branchFailures = 0;
-      for (const branch of validBranches) {
-        const shadow = shadowBranchName(pair.name, branch);
-        const replayedSHA = result.branchMapping.get(branch);
-
-        if (!replayedSHA) {
-          console.log(result.upToDate
-            ? `  ${shadow}: already up to date.`
-            : `  ${shadow}: no mapping found, skipping.`);
-          continue;
-        }
-
-        const currentSHA = refExists(`${target.remote}/${shadow}`)
-          ? git(["rev-parse", `${target.remote}/${shadow}`])
-          : null;
-
-        if (currentSHA === replayedSHA) {
-          console.log(`  ${shadow} is up to date.`);
-          continue;
-        }
-
-        if (currentSHA) {
-          const isAncestor = git(
-            ["merge-base", "--is-ancestor", replayedSHA, currentSHA], { safe: true },
-          ).ok;
-          if (isAncestor) {
-            console.log(`  ${shadow} is up to date (${target.remote} is ahead or equal).`);
-            continue;
-          }
-        }
-
-        // Fast-forward only on shadow refs (C6). If the divergent target
-        // tip has the same TREE as the replay (residual sibling-merge case
-        // --full-history doesn't cover), leave it in place. If the trees
-        // differ, halt — this only happens after source rewrite or manual
-        // edits to the shadow ref, both against policy.
-        if (currentSHA) {
-          const isFF = git(
-            ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
-          ).ok;
-          if (!isFF) {
-            const currentTree = git(["rev-parse", `${currentSHA}^{tree}`]);
-            const replayedTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
-            if (currentTree === replayedTree) {
-              console.log(`  ${shadow}: ${target.remote} has same tree on different topology; leaving target tip in place.`);
-              continue;
-            }
-            console.error(`✘ ${shadow}: ${target.remote} diverged with different tree. ` +
-                 `Engine cannot fast-forward and force-push is disabled. ` +
-                 `Source main may have been rewritten or the shadow ref was edited manually. ` +
-                 `Operator must reconcile by either restoring the expected source history or ` +
-                 `manually pushing ${replayedSHA} to ${target.remote}/${shadow}.`);
-            branchFailures++;
-            continue;
-          }
-        }
-
-        if (dryRun) {
-          console.log(`  [DRY RUN] would push ${replayedSHA} → ${target.remote}/${shadow}`);
-          continue;
-        }
-
-        console.log(`  Pushing to ${target.remote}/${shadow}...`);
-        const pushRes = git(["push", target.remote, `${replayedSHA}:refs/heads/${shadow}`], { safe: true });
-        if (!pushRes.ok) {
-          console.error(`  ✘ ${shadow}: push failed: ${pushRes.stderr}`);
-          branchFailures++;
-          continue;
-        }
-        console.log(`  ✓ Pushed.`);
-      }
+      const branchFailures = pushShadowBranches({
+        pairName: pair.name,
+        targetRemote: target.remote,
+        branches: validBranches,
+        branchMapping: result.branchMapping,
+        upToDate: result.upToDate,
+        dryRun,
+      });
       if (branchFailures > 0) {
         console.error(`  ✘ ${branchFailures} shadow branch update(s) failed on ${pair.name}.`);
         failed++;
       }
 
-      // Tag sync runs in both directions: tags on the source side get
-      // recreated on the target pointing at the replayed commit. Annotated
-      // tags get a fresh tag object (same name/tagger/message); lightweight
-      // tags become refs/tags/<name> pointing at the replay. Tags whose
-      // source commit was dropped (no shaMapping entry) are skipped.
+      // Tags on the source side are recreated on the target at the replayed commit.
       if (dryRun) {
         console.log(`\n[DRY RUN] Skipping tag sync.`);
       } else {
@@ -284,6 +213,91 @@ function _runSyncCore(options: SyncOptions): number {
 
   console.log("\n✓ All syncs completed successfully.");
   return 0;
+}
+
+/**
+ * Push each branch's replayed tip to its shadow ref on the target remote.
+ * Fast-forward only (C6): a divergent target tip with the SAME tree is left in
+ * place (residual sibling-merge case --full-history doesn't cover); a
+ * different tree is reported as a failure — that only happens after a source
+ * rewrite or a manual shadow-ref edit, both against policy. A failed branch
+ * doesn't abort the others. Returns the failure count.
+ */
+function pushShadowBranches(opts: {
+  pairName: string;
+  targetRemote: string;
+  branches: string[];
+  branchMapping: Map<string, string>;
+  upToDate: boolean;
+  dryRun: boolean;
+}): number {
+  const { pairName, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
+  let failures = 0;
+
+  for (const branch of branches) {
+    const shadow = shadowBranchName(pairName, branch);
+    const replayedSHA = branchMapping.get(branch);
+
+    if (!replayedSHA) {
+      console.log(upToDate
+        ? `  ${shadow}: already up to date.`
+        : `  ${shadow}: no mapping found, skipping.`);
+      continue;
+    }
+
+    const currentSHA = refExists(`${targetRemote}/${shadow}`)
+      ? git(["rev-parse", `${targetRemote}/${shadow}`])
+      : null;
+
+    if (currentSHA === replayedSHA) {
+      console.log(`  ${shadow} is up to date.`);
+      continue;
+    }
+
+    if (currentSHA) {
+      const isAncestor = git(
+        ["merge-base", "--is-ancestor", replayedSHA, currentSHA], { safe: true },
+      ).ok;
+      if (isAncestor) {
+        console.log(`  ${shadow} is up to date (${targetRemote} is ahead or equal).`);
+        continue;
+      }
+      const isFF = git(
+        ["merge-base", "--is-ancestor", currentSHA, replayedSHA], { safe: true },
+      ).ok;
+      if (!isFF) {
+        const currentTree = git(["rev-parse", `${currentSHA}^{tree}`]);
+        const replayedTree = git(["rev-parse", `${replayedSHA}^{tree}`]);
+        if (currentTree === replayedTree) {
+          console.log(`  ${shadow}: ${targetRemote} has same tree on different topology; leaving target tip in place.`);
+          continue;
+        }
+        console.error(`✘ ${shadow}: ${targetRemote} diverged with different tree. ` +
+             `Engine cannot fast-forward and force-push is disabled. ` +
+             `Source main may have been rewritten or the shadow ref was edited manually. ` +
+             `Operator must reconcile by either restoring the expected source history or ` +
+             `manually pushing ${replayedSHA} to ${targetRemote}/${shadow}.`);
+        failures++;
+        continue;
+      }
+    }
+
+    if (dryRun) {
+      console.log(`  [DRY RUN] would push ${replayedSHA} → ${targetRemote}/${shadow}`);
+      continue;
+    }
+
+    console.log(`  Pushing to ${targetRemote}/${shadow}...`);
+    const pushRes = git(["push", targetRemote, `${replayedSHA}:refs/heads/${shadow}`], { safe: true });
+    if (!pushRes.ok) {
+      console.error(`  ✘ ${shadow}: push failed: ${pushRes.stderr}`);
+      failures++;
+      continue;
+    }
+    console.log(`  ✓ Pushed.`);
+  }
+
+  return failures;
 }
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
