@@ -131,7 +131,9 @@ git push origin core-dev
 npm run sync -- --from b
 ```
 
-The engine adds one `Shadow-replayed-<pair>-<source-remote>` trailer per absorbed source SHA on the new shadow commit. On subsequent runs `loadReplayedMappings` reads those trailers and skips the absorbed commits, so the squash is idempotent.
+The squash carries its own `Shadow-replayed-<pair>-<source-remote>` trailer plus one `Shadow-absorbed-<pair>-<source-remote>` trailer per absorbed source SHA. On subsequent runs `loadReplayedMappings` reads those trailers and skips the absorbed commits, so the squash is idempotent.
+
+Absorbed mappings are **lineage-scoped**: the squash stands in for an absorbed commit only on branches that contain the resolving merge (`R_be`). A branch that forked off the halted commit *before* the resolution landed does not inherit the squash — its shadow ref stays at the last faithful commit and the engine halts it with its own recipe: merge the resolved branch's **shadow ref** into the fork (the ref carries the resolution echo, which preserves the fork's own content during the absorbing replay), push, and re-run. Legacy squashes (absorbed SHAs under the replayed key) keep their old globally-valid behavior.
 
 **Hand-built resolution on the shadow ref (always available).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run.
 

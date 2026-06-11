@@ -17,6 +17,10 @@
  *   multi-echo-octopus-halts        — 3-parent octopus whose 2nd/3rd parents carry echo trailers halts
  *   multi-echo-octopus-recovery     — recovery from the octopus halt
  *   halted-partial-tip-first-parent — mapBranchesToTargetTips picks project-a's tip via first-parent walk
+ *   fork-from-absorbed-same-run     — branch forked off a halted commit stays halted when the trunk
+ *                                     squash-resolves; recovers by merging the resolved shadow ref
+ *   fork-from-absorbed-late-filter  — same fork, but seen only after recovery: Shadow-absorbed
+ *                                     trailers alone must scope the squash to the trunk's lineage
  *
  * Run: npx tsx shadow-tests/test-halt-recovery-variants.ts
  */
@@ -197,7 +201,7 @@ async function runAll(): Promise<void> {
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
       assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
         `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${info.bm}`),
+      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${info.bm}`),
         `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
 
       // backend/feature.ts (Bcx's content) must be present on the shadow ref tree
@@ -323,10 +327,10 @@ async function runAll(): Promise<void> {
       assert(sqHash.length === 40, "shadow ref must exist post-absorption");
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
 
-      // sq must carry trailers for BOTH halted source SHAs (Bm AND Bm+1).
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${info.bm}`),
+      // sq must carry absorbed trailers for BOTH halted source SHAs (Bm AND Bm+1).
+      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${info.bm}`),
         `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${bmPlus1}`),
+      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${bmPlus1}`),
         `sq missing absorbed Bm+1 trailer for ${bmPlus1}\n${sqMsg}`);
 
       // post-halt.ts (Bm+1's content) must survive in sq's tree. If
@@ -477,7 +481,7 @@ async function runAll(): Promise<void> {
       // Squashed shadow commit must carry trailers for BOTH R_be (its own) and Bm (absorbed halt).
       assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
         `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${bm}`),
+      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${bm}`),
         `sq missing absorbed Bm trailer for ${bm}\n${sqMsg}`);
 
       // Tree content: api.ts (from Bc1) + notes.txt (from Mc) + feat.ts (from Mp).
@@ -596,6 +600,167 @@ async function runAll(): Promise<void> {
     }
   }
 
+  /** "hash path" entries of a tree's inner slice, prefix stripped, sorted. */
+  function innerTree(cwd: string, ref: string, prefix = ""): string[] {
+    const raw = gitOut(`ls-tree -r ${ref}${prefix ? ` -- ${prefix}` : ""}`, cwd);
+    return raw.split("\n").filter(Boolean).map(line => {
+      const [meta, p] = line.split("\t");
+      const hash = meta.split(/\s+/)[2];
+      return `${hash} ${prefix && p.startsWith(prefix) ? p.slice(prefix.length) : p}`;
+    }).sort();
+  }
+
+  /** Fork `side` off the halted Bm with one commit Bs1; returns Bs1's SHA. */
+  function forkSideFromHalt(env: TestEnv, bm: string): string {
+    git(`checkout -b side ${bm}`, env.remoteWorking);
+    writeFile(env.remoteWorking, "side.ts", "side work v1\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bs1"', env.remoteWorking);
+    const bs1 = gitOut("rev-parse HEAD", env.remoteWorking);
+    git("push origin side", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+    return bs1;
+  }
+
+  /** Operator recovery for a stranded fork: merge the resolved branch's
+   *  shadow ref into side (the ref carries the resolution echo). */
+  function mergeShadowIntoSide(env: TestEnv): string {
+    git("fetch origin --prune", env.remoteWorking);
+    git("checkout side", env.remoteWorking);
+    try {
+      git('merge --no-ff origin/shadow/backend/core-dev -m "Sm"', env.remoteWorking);
+    } catch {
+      git("add -A", env.remoteWorking);
+      git('commit --no-edit', env.remoteWorking);
+    }
+    git("push origin side", env.remoteWorking);
+    const sm = gitOut("rev-parse HEAD", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+    return sm;
+  }
+
+  // A branch forks off the halted Bm; the trunk recovers via the squash. The
+  // fork must NOT inherit the squash (silent content lie) — it halts with the
+  // absorbed-elsewhere diagnostic until the resolution is merged into it.
+  function runForkFromAbsorbedSameRun(): void {
+    const { env, info } = setupAndFailReplay("fork-absorbed-same-run");
+    try {
+      setBranchFiltersForTesting(new Map([
+        ["origin", ["core-dev", "project", "side"].map(compileIgnorePattern)],
+        ["team",   ["core-dev", "project", "side"].map(compileIgnorePattern)],
+      ]));
+      const bs1 = forkSideFromHalt(env, info.bm);
+
+      // Pre-recovery sync: original halt persists; side's partial tip is the
+      // last faithful commit (Bcx'), pinned for the no-move assertion below.
+      const h = runCiSync(env);
+      assert(h.status !== 0, "expected halt to persist with side in filter");
+      git("fetch origin --prune", env.localRepo);
+      const sideTipBefore = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+
+      const { mm } = roundTripResolution(env);
+
+      // Recovery sync: trunk resolves into the squash, but the fork is now
+      // stranded — run must FAIL with the promoted diagnostic, and the fork's
+      // shadow ref must NOT move to the squash.
+      const r = runCiSync(env);
+      assert(r.status !== 0, "recovery sync must fail while the fork is stranded");
+      const out = r.stdout + r.stderr;
+      assert(/squash-resolved on another (branch|lineage)/.test(out),
+        `expected absorbed-elsewhere diagnostic, got:\n${out}`);
+      git("fetch origin --prune", env.localRepo);
+      const sq = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sideTipAfter = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      assertEqual(sideTipAfter, sideTipBefore, "stranded fork's shadow ref must not move");
+      assert(sideTipAfter !== sq, "stranded fork's shadow ref must not inherit the squash");
+
+      // Operator merges the resolution into side → next sync absorbs Bs1.
+      const sm = mergeShadowIntoSide(env);
+      const r2 = runCiSync(env);
+      assertEqual(r2.status, 0, `sync after fork recovery: ${r2.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideMsg = gitOut(`log -1 --format=%B ${sideTip}`, env.localRepo);
+      assert(sideMsg.includes(`Shadow-replayed-backend-team: ${sm}`),
+        `side tip missing own Sm trailer\n${sideMsg}`);
+      assert(sideMsg.includes(`Shadow-absorbed-backend-team: ${bs1}`),
+        `side tip missing absorbed Bs1 trailer\n${sideMsg}`);
+
+      // Parents: [squash (Bs1's anchor), Mm (echo of the merged shadow ref)].
+      const parents = gitOut(`log -1 --format=%P ${sideTip}`, env.localRepo).split(/\s+/);
+      assertEqual(parents.join(" "), `${sq} ${mm}`, "side tip parents = [sq, Mm]");
+
+      // Tree fidelity: the shadow's inner slice equals Sm's source tree exactly
+      // — fork content present, nothing leaked from commits the fork never had.
+      const src = innerTree(env.remoteWorking, sm);
+      const shadow = innerTree(env.localRepo, sideTip, "backend/");
+      assertEqual(shadow.join("\n"), src.join("\n"), "shadow side tree must equal source side tree");
+
+      // Idempotent re-run.
+      const r3 = runCiSync(env);
+      assertEqual(r3.status, 0, `idempotent re-run: ${r3.stderr}`);
+      git("fetch origin --prune", env.localRepo);
+      assertEqual(gitOut("rev-parse origin/shadow/backend/side", env.localRepo), sideTip,
+        "side tip stable across re-runs");
+    } finally {
+      env.cleanup();
+    }
+  }
+
+  // Same fork, but the branch enters the filter only AFTER the trunk
+  // recovered — there is no in-run halt state, so the foreign-squash check
+  // must come from the Shadow-absorbed trailers alone.
+  function runForkFromAbsorbedLateFilter(): void {
+    const { env, info } = setupAndFailReplay("fork-absorbed-late-filter");
+    try {
+      const bs1 = forkSideFromHalt(env, info.bm);
+
+      // Trunk recovers while side is invisible to the engine.
+      roundTripResolution(env);
+      const r1 = runCiSync(env);
+      assertEqual(r1.status, 0, `recovery sync (side not in filter): ${r1.stderr}`);
+      git("fetch origin --prune", env.localRepo);
+      const sq = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+
+      // side enters the filter: trailer-derived scoping must halt the fork.
+      setBranchFiltersForTesting(new Map([
+        ["origin", ["core-dev", "project", "side"].map(compileIgnorePattern)],
+        ["team",   ["core-dev", "project", "side"].map(compileIgnorePattern)],
+      ]));
+      const r2 = runCiSync(env);
+      assert(r2.status !== 0, "first sync with side in filter must halt the stranded fork");
+      const out = r2.stdout + r2.stderr;
+      assert(/squash-resolved on another (branch|lineage)/.test(out),
+        `expected absorbed-elsewhere diagnostic, got:\n${out}`);
+
+      // The fork's shadow ref is created at the last FAITHFUL tip — neither
+      // the squash nor a tree containing the fork's unsynced work.
+      git("fetch origin --prune", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      assert(sideTip !== sq, "stranded fork must not be created at the squash");
+      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/side", env.localRepo);
+      assert(!tree.includes("backend/side.ts"), `faithful partial tip must predate Bs1; tree:\n${tree}`);
+      assert(!tree.includes("backend/post-halt.ts"), `no squash content may leak onto the fork; tree:\n${tree}`);
+
+      // Recovery: merge the resolved shadow ref into side, then re-sync.
+      const sm = mergeShadowIntoSide(env);
+      const r3 = runCiSync(env);
+      assertEqual(r3.status, 0, `sync after fork recovery: ${r3.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const sideTip2 = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideMsg = gitOut(`log -1 --format=%B ${sideTip2}`, env.localRepo);
+      assert(sideMsg.includes(`Shadow-absorbed-backend-team: ${bs1}`),
+        `side tip missing absorbed Bs1 trailer\n${sideMsg}`);
+      const src = innerTree(env.remoteWorking, sm);
+      const shadow = innerTree(env.localRepo, sideTip2, "backend/");
+      assertEqual(shadow.join("\n"), src.join("\n"), "shadow side tree must equal source side tree");
+    } finally {
+      env.cleanup();
+    }
+  }
+
   const subs: Array<[string, () => void]> = [
     ["happy-round-trip", runHappyRoundTrip],
     ["idempotent-rerun", runIdempotentRerun],
@@ -605,6 +770,8 @@ async function runAll(): Promise<void> {
     ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
     ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
     ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
+    ["fork-from-absorbed-same-run", runForkFromAbsorbedSameRun],
+    ["fork-from-absorbed-late-filter", runForkFromAbsorbedLateFilter],
   ];
   let failed = 0;
   try {

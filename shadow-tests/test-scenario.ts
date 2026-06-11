@@ -1235,10 +1235,10 @@ async function runScenario(): Promise<void> {
     assertParents(mono, Brec_mono, [Bca_mono, Bcb_mono, Mm],
       "[halt-recovery] Brec'_mono = octopus(Bca'_mono, Bcb'_mono, Mm) — multi-trailer squash");
 
-    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Bm}`)) {
+    if (!Brec_monoMsg.includes(`Shadow-absorbed-backend-backend: ${Bm}`)) {
       throw new Error(`[halt-recovery] squash missing absorbed-Bm trailer for ${Bm}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
-    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Bn1}`)) {
+    if (!Brec_monoMsg.includes(`Shadow-absorbed-backend-backend: ${Bn1}`)) {
       throw new Error(`[halt-recovery] squash missing absorbed-Bn1 trailer for ${Bn1}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
     if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Brec}`)) {

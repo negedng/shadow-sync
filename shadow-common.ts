@@ -50,7 +50,7 @@ export interface SyncPair {
 
 interface ShadowSyncConfig {
   pairs: SyncPair[];
-  trailers: { replayed: string };
+  trailers: { replayed: string; absorbed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
   shadowBranchPrefix: string;
@@ -196,7 +196,7 @@ function loadConfig(): ShadowSyncConfig {
   if (!fs.existsSync(CONFIG_PATH)) {
     return {
       pairs: [],
-      trailers: { replayed: "Shadow-replayed" },
+      trailers: { replayed: "Shadow-replayed", absorbed: "Shadow-absorbed" },
       gitConfigOverrides: {},
       maxBuffer: 50 * 1024 * 1024,
       shadowBranchPrefix: "shadow",
@@ -207,6 +207,7 @@ function loadConfig(): ShadowSyncConfig {
 
   const trailers = {
     replayed: ((doc.trailers as Record<string, string>)?.replayed) ?? "Shadow-replayed",
+    absorbed: ((doc.trailers as Record<string, string>)?.absorbed) ?? "Shadow-absorbed",
   };
   const gitConfigOverrides = (doc.gitConfigOverrides as Record<string, string>) ?? {};
   const maxBuffer = (doc.maxBuffer as number) ?? 50 * 1024 * 1024;
@@ -222,6 +223,7 @@ const config = loadConfig();
 
 export const PAIRS: SyncPair[] = [...config.pairs];
 const REPLAYED_TRAILER = config.trailers.replayed;
+const ABSORBED_TRAILER = config.trailers.absorbed;
 let _shadowBranchPrefix = config.shadowBranchPrefix;
 const MAX_BUFFER = config.maxBuffer;
 
@@ -484,6 +486,14 @@ function targetTrailerRegex(dc: DirectionConfig): RegExp {
   return replayedTrailerRegex(dc.pair.name, dc.target.remote);
 }
 
+// The squash-absorption trailer this direction WRITES. An absorbed value names
+// a halted source commit folded into this commit's squash; it is a faithful
+// counterpart only for lineages containing the commit named by the same
+// commit's own replayed trailer (the absorber).
+function absorbedTrailerKey(dc: DirectionConfig): string {
+  return `${ABSORBED_TRAILER}-${sanitizeTrailerToken(`${dc.pair.name}-${dc.source.remote}`)}`;
+}
+
 
 export function appendTrailer(message: string, trailer: string): string {
   const result = git(["interpret-trailers", "--trailer", trailer],
@@ -501,35 +511,54 @@ function hasTrailer(trailers: string, key: string): boolean {
 
 function stripReplayedTrailers(message: string): string {
   return message.split("\n")
-    .filter(l => !l.startsWith(REPLAYED_TRAILER))
+    .filter(l => !l.startsWith(REPLAYED_TRAILER) && !l.startsWith(ABSORBED_TRAILER))
     .join("\n").trimEnd();
 }
 
+/** Squash-absorbed replay counterpart: `target` stands in for the absorbed
+ *  source commit only on lineages that contain `absorber` (the squash's own
+ *  source commit). */
+interface AbsorbedEntry { target: string; absorber: string }
+type AbsorbedMap = Map<string, AbsorbedEntry[]>;
+
+interface ScopedMappings { direct: Map<string, string>; absorbed: AbsorbedMap }
+
 /**
- * Build source→target SHA mapping from commits carrying `<trailerKey>: <sha>`
- * trailers. One target commit may carry multiple such trailers (primary +
- * absorbed-halted ancestors), so we emit all values space-separated per line.
+ * Build source→target mappings from replay trailers. Replayed values are
+ * direct (globally valid) counterparts; absorbed values are squash-resolved
+ * and scoped to the lineage of the same commit's own (first) replayed value.
+ * Legacy squashes carry absorbed SHAs under the replayed key (own first) —
+ * those load as direct, preserving pre-scoping behavior.
  */
-function extractTrailerMapping(logArgs: string[], trailerKey: string): Map<string, string> {
-  const mapping = new Map<string, string>();
+function extractTrailerMappings(logArgs: string[], replayedKey: string, absorbedKey: string): ScopedMappings {
+  const direct = new Map<string, string>();
+  const absorbed: AbsorbedMap = new Map();
   const result = git(
-    [...logArgs, `--format=%H %(trailers:key=${trailerKey},valueonly,separator=%x20)`],
+    [...logArgs, `--format=%H%x01%(trailers:key=${replayedKey},valueonly,separator=%x20)%x01%(trailers:key=${absorbedKey},valueonly,separator=%x20)`],
     { safe: true },
   );
   // Fail loud: treating a failed log as "nothing replayed yet" would re-replay
   // the whole history and diverge from any hand-built halt resolution.
   if (!result.ok) fail(`Failed to read replay trailers (git log): ${result.stderr}`);
-  if (!result.stdout) return mapping;
+  if (!result.stdout) return { direct, absorbed };
+  const isSha = (s: string) => /^[0-9a-f]{7,40}$/.test(s);
   for (const line of result.stdout.split("\n")) {
-    const parts = line.split(/\s+/).filter(Boolean);
-    if (parts.length < 2) continue;
-    const targetHash = parts[0];
-    for (const src of parts.slice(1)) {
+    const [targetHash, replayedRaw, absorbedRaw] = line.split("\x01");
+    if (!targetHash || !replayedRaw) continue;
+    const replayedVals = replayedRaw.split(/\s+/).filter(isSha);
+    if (replayedVals.length === 0) continue;
+    for (const src of replayedVals) {
       // Log is newest-first; first occurrence (newest replay) wins.
-      if (/^[0-9a-f]{7,40}$/.test(src) && !mapping.has(src)) mapping.set(src, targetHash);
+      if (!direct.has(src)) direct.set(src, targetHash);
+    }
+    const absorber = replayedVals[0];
+    for (const src of (absorbedRaw ?? "").split(/\s+/).filter(isSha)) {
+      const list = absorbed.get(src) ?? [];
+      list.push({ target: targetHash, absorber });
+      absorbed.set(src, list);
     }
   }
-  return mapping;
+  return { direct, absorbed };
 }
 
 
@@ -872,9 +901,10 @@ function computeSettledCommits(
   branches: string[],
   dc: DirectionConfig,
   shaMapping: Map<string, string>,
+  absorbedMap: AbsorbedMap,
 ): Set<string> {
   const settled = new Set<string>();
-  if (shaMapping.size === 0) return settled;
+  if (shaMapping.size === 0 && absorbedMap.size === 0) return settled;
 
   const refs = branches.map(b => `refs/remotes/${dc.source.remote}/${b}`);
   const res = git(["for-each-ref", "--format=%(objectname)", ...refs], { safe: true });
@@ -885,7 +915,7 @@ function computeSettledCommits(
   const frontier: string[] = [];
   for (const tip of tips) {
     let h: string | undefined = tip;
-    while (h && !shaMapping.has(h)) h = graphParentsOf(graph, h)[0];
+    while (h && !shaMapping.has(h) && !absorbedMap.has(h)) h = graphParentsOf(graph, h)[0];
     if (h) frontier.push(h);
   }
 
@@ -1336,21 +1366,38 @@ function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): st
   return null;
 }
 
+// True iff `ancestor` is an ancestor of (or equals) `descendant` on the source
+// side. Missing objects read as not-an-ancestor — fail closed toward halting.
+function isSourceAncestor(ancestor: string, descendant: string): boolean {
+  if (ancestor === descendant) return true;
+  return git(["merge-base", "--is-ancestor", ancestor, descendant], { safe: true }).ok;
+}
+
+interface ResolvedParents {
+  parents: string[];
+  /** Set when a parent's only counterparts are squash-absorbed on lineages
+   *  this commit doesn't descend from — the caller halts. */
+  foreignAbsorbed?: { parent: string; entries: AbsorbedEntry[] };
+}
+
 /**
  * Find target side parent from source side hash:
- * 1. parent recorded in shaMapping
- * 2. parent is in a Halt state
- * 3. unknown parents replaced by root
+ * 1. parent recorded in shaMapping (direct replay)
+ * 2. parent is in a Halt state (substitute its anchors)
+ * 3. parent squash-absorbed: its squash stands in only if this commit
+ *    descends from the absorber; foreign lineages halt instead
+ * 4. unknown parents replaced by echo anchor or root
  */
 function resolveHaltAwareParents(
   commit: TopoCommit,
   shaMapping: Map<string, string>,
+  absorbedMap: AbsorbedMap,
   targetInit: string | null,
   haltedSources: Set<string>,
   haltRecords: Map<string, HaltRecord>,
-): string[] {
+): ResolvedParents {
   if (commit.parents.length === 0) {
-    return targetInit ? [targetInit] : [];
+    return { parents: targetInit ? [targetInit] : [] };
   }
   const parents: string[] = [];
   const seen = new Set<string>();
@@ -1361,16 +1408,23 @@ function resolveHaltAwareParents(
     const haltAnchors = haltedSources.has(parentHash)
       ? haltRecords.get(parentHash)?.anchorCommits
       : undefined;
+    const absorbedEntries = absorbedMap.get(parentHash);
     if (shaMapping.has(parentHash)) {
       pushUnique(shaMapping.get(parentHash));
     } else if (haltAnchors && haltAnchors.length > 0) {
       for (const ac of haltAnchors) pushUnique(ac);
+    } else if (absorbedEntries && absorbedEntries.length > 0) {
+      const valid = absorbedEntries.find(e => isSourceAncestor(e.absorber, commit.hash));
+      if (!valid) {
+        return { parents, foreignAbsorbed: { parent: parentHash, entries: absorbedEntries } };
+      }
+      pushUnique(valid.target);
     } else {
       // not mapped, and either not halted or halted without anchors
       pushUnique(findEchoAnchor(parentHash, shaMapping) ?? targetInit);
     }
   }
-  return parents;
+  return { parents };
 }
 
 /**
@@ -1398,33 +1452,49 @@ function collectAbsorbedHalted(
 }
 
 /**
- * Source→target SHA mapping from this pair's shadow branches from trailers: Shadow-replayed-<pair>-<sourceRemote>: <sourceSHA>
+ * Source→target SHA mappings from this pair's shadow branches' trailers:
+ * Shadow-replayed-<pair>-<sourceRemote> (direct) + Shadow-absorbed-… (scoped).
  * Origin: other side, replayed here.
  */
 function loadReplayedMappings(opts: {
   branches: string[];
   dc: DirectionConfig;
-}): Map<string, string> {
+}): ScopedMappings {
   const { branches, dc } = opts;
   const candidateRefs = branches.map(b => `${dc.target.remote}/${shadowBranchName(dc.pair.name, b)}`);
   const shadowRefs = filterExistingRefs(candidateRefs);
 
   if (shadowRefs.length === 0) {
-    return new Map();
+    return { direct: new Map(), absorbed: new Map() };
   }
   const addKey = sourceTrailerKey(dc);
-  return extractTrailerMapping(
+  return extractTrailerMappings(
     ["log", ...shadowRefs, `--grep=^${addKey}`],
     addKey,
+    absorbedTrailerKey(dc),
   );
 }
 
-/** Each branch's shadow tip: the newest mapped commit on its first-parent line
- *  (the branch HEAD itself may be outer-only and unmapped). */
+/** Flat source→target view (direct wins; else first absorbed entry) — for
+ *  consumers without lineage context (tag sync). Matches pre-scoping behavior. */
+function flattenMappings(direct: Map<string, string>, absorbed: AbsorbedMap): Map<string, string> {
+  const flat = new Map(direct);
+  for (const [src, entries] of absorbed) {
+    if (!flat.has(src) && entries.length > 0) flat.set(src, entries[0].target);
+  }
+  return flat;
+}
+
+/** Each branch's shadow tip: the newest faithfully mapped commit on its
+ *  first-parent line (the branch HEAD itself may be outer-only and unmapped).
+ *  Squash-absorbed counterparts count only on lineages containing their
+ *  absorber — a fork stranded behind a foreign squash keeps its last faithful
+ *  tip instead of inheriting the squash's tree. */
 function mapBranchesToTargetTips(
   remote: string,
   branches: string[],
   shaMapping: Map<string, string>,
+  absorbedMap: AbsorbedMap,
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
@@ -1432,10 +1502,11 @@ function mapBranchesToTargetTips(
     if (!log.ok) {
       fail(`Failed to list commits for ${remote}/${branch}: ${log.stderr}`);
     }
-    for (const line of log.stdout.split("\n")) {
-      const hash = line.trim();
-      if (!hash) continue;
-      const replayed = shaMapping.get(hash);
+    const hashes = log.stdout.split("\n").map(l => l.trim()).filter(Boolean);
+    const tip = hashes[0];
+    for (const hash of hashes) {
+      const replayed = shaMapping.get(hash)
+        ?? absorbedMap.get(hash)?.find(e => isSourceAncestor(e.absorber, tip))?.target;
       if (replayed) {
         branchMapping.set(branch, replayed);
         break;
@@ -1590,6 +1661,8 @@ interface HaltRecord {
   anchorCommits: string[];
   diagnostic: string;
   commitShort: string;
+  /** The original halted ancestor this record traces back to. */
+  rootHalt?: string;
 }
 
 interface ReplayHalts {
@@ -1634,15 +1707,17 @@ function markPropagatedHalt(
   haltedSources.add(commit.hash);
   const inheritedAnchorCommits: string[] = [];
   const seenAnchorCommits = new Set<string>();
+  let rootHalt: string | undefined;
   for (const p of commit.parents) {
     const record = haltRecords.get(p);
     if (!record) continue;
+    rootHalt = rootHalt ?? record.rootHalt ?? p;
     for (const ac of record.anchorCommits) {
       if (!seenAnchorCommits.has(ac)) { inheritedAnchorCommits.push(ac); seenAnchorCommits.add(ac); }
     }
   }
-  if (inheritedAnchorCommits.length > 0) {
-    haltRecords.set(commit.hash, { anchorCommits: inheritedAnchorCommits, diagnostic: "", commitShort: meta.short });
+  if (inheritedAnchorCommits.length > 0 || rootHalt) {
+    haltRecords.set(commit.hash, { anchorCommits: inheritedAnchorCommits, diagnostic: "", commitShort: meta.short, rootHalt });
   }
   console.log(`  Skipping ${meta.short} (descended from halted ancestor).`);
 }
@@ -1668,12 +1743,85 @@ function haltCommit(opts: {
     anchorCommits: mappedParents,
     diagnostic: formatHaltDiagnostic({ commit, meta, mappedParents, dc, cause }),
     commitShort: meta.short,
+    rootHalt: commit.hash,
   });
   const summary =
     cause === "outer-divergence" ? "outer-state divergence between mapped parents"
       : cause === "multi-echo-disagreement" ? "already-replayed parents disagree on outer state"
         : "a required parent tree or mapped subdirectory was absent";
   console.log(`  ⚠ Halted on ${meta.short}: ${summary}.`);
+}
+
+/**
+ * Diagnostic for a commit stranded behind a squash-absorbed ancestor: the
+ * ancestor's halt was resolved on another lineage, so its squash counterpart
+ * is not a faithful replay base here. The recovery merges the resolved
+ * branch's SHADOW ref (not the branch itself): the ref carries the resolution
+ * echo, and the echo round-trip splice is what preserves this branch's own
+ * content during the absorbing replay.
+ */
+function formatAbsorbedElsewhereDiagnostic(opts: {
+  commitSha: string;
+  commitShort: string;
+  absorbedAncestor: string;
+  entries: AbsorbedEntry[];
+  dc: DirectionConfig;
+}): string {
+  const { commitSha, commitShort, absorbedAncestor, entries, dc } = opts;
+  const branchLabel = inferSourceBranch(commitSha, dc.source.remote) ?? "<source-branch>";
+  const e = entries[0];
+  const resolvedBranch = inferSourceBranch(e.absorber, dc.source.remote) ?? "<resolved-branch>";
+  const resolvedShadowRef = shadowBranchName(dc.pair.name, resolvedBranch);
+  const trailer = `${sourceTrailerKey(dc)}: ${commitSha}`;
+  return [
+    `${commitShort}: ancestor was squash-resolved on another branch — branch halted.`,
+    ``,
+    `  Source commit:    ${commitSha}  (${commitShort})`,
+    `  Halted ancestor:  ${absorbedAncestor}`,
+    `  Squash replay:    ${e.target}`,
+    `  Resolution at:    ${e.absorber}  (on '${resolvedBranch}')`,
+    ``,
+    `This branch forked from the halted ancestor before the resolution landed,`,
+    `so the squash's tree is not a faithful replay base for it.`,
+    ``,
+    `Recovery: on ${dc.source.remote}, merge the resolved branch's shadow ref into`,
+    `${branchLabel} (the ref carries the resolution echo, which preserves this`,
+    `branch's own content during replay):`,
+    `    git checkout ${branchLabel}`,
+    `    git merge origin/${resolvedShadowRef}`,
+    `Then push and re-run this sync — the stranded commits are absorbed into the`,
+    `merge's replay automatically.`,
+    ``,
+    `(Alternative) Hand-build a resolution commit on this branch's shadow ref`,
+    `with this trailer in its message body (exact text):`,
+    ``,
+    `        ${trailer}`,
+  ].join("\n");
+}
+
+/** Halt a commit whose parent's only replay counterparts are squashes on
+ *  foreign lineages. Anchors = the squash targets, so a later recovery merge
+ *  (which absorbs this commit) gets the squash as a replay parent. */
+function haltAbsorbedElsewhere(opts: {
+  commit: TopoCommit;
+  meta: CommitMeta;
+  foreign: { parent: string; entries: AbsorbedEntry[] };
+  dc: DirectionConfig;
+  haltedSources: Set<string>;
+  haltRecords: Map<string, HaltRecord>;
+}): void {
+  const { commit, meta, foreign, dc, haltedSources, haltRecords } = opts;
+  haltedSources.add(commit.hash);
+  haltRecords.set(commit.hash, {
+    anchorCommits: foreign.entries.map(e => e.target),
+    diagnostic: formatAbsorbedElsewhereDiagnostic({
+      commitSha: commit.hash, commitShort: meta.short,
+      absorbedAncestor: foreign.parent, entries: foreign.entries, dc,
+    }),
+    commitShort: meta.short,
+    rootHalt: foreign.parent,
+  });
+  console.log(`  ⚠ Halted on ${meta.short}: ancestor ${foreign.parent.slice(0, 7)} was squash-resolved on another lineage.`);
 }
 
 
@@ -1691,12 +1839,14 @@ function haltCommit(opts: {
 function replayCommits(opts: {
   newCommits: TopoCommit[];
   shaMapping: Map<string, string>;
+  absorbedMap: AbsorbedMap;
   targetInit: string | null;
   dc: DirectionConfig;
   graph: SourceGraph;
 }): ReplayHalts {
-  const { newCommits, shaMapping, targetInit, dc, graph } = opts;
+  const { newCommits, shaMapping, absorbedMap, targetInit, dc, graph } = opts;
   const addKey = sourceTrailerKey(dc);
+  const absKey = absorbedTrailerKey(dc);
 
   const haltedSources = new Set<string>();
   const haltRecords = new Map<string, HaltRecord>();
@@ -1733,7 +1883,12 @@ function replayCommits(opts: {
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
-      const mappedParents = resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltRecords);
+      const resolved = resolveHaltAwareParents(commit, shaMapping, absorbedMap, targetInit, haltedSources, haltRecords);
+      if (resolved.foreignAbsorbed) {
+        haltAbsorbedElsewhere({ commit, meta, foreign: resolved.foreignAbsorbed, dc, haltedSources, haltRecords });
+        continue;
+      }
+      const mappedParents = resolved.parents;
 
       // Per-mapping ignore (self + auto + .shadowignore). Computed before the
       // base tree so composeMergeBaseTree can filter the round-trip source
@@ -1778,7 +1933,7 @@ function replayCommits(opts: {
         ? appendTrailer(stripReplayedTrailers(meta.message), `${addKey}: ${commit.hash}`)
         : appendTrailer(meta.message, `${addKey}: ${commit.hash}`);
       for (const sha of absorbed) {
-        msg = appendTrailer(msg, `${addKey}: ${sha}`);
+        msg = appendTrailer(msg, `${absKey}: ${sha}`);
       }
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
@@ -1789,7 +1944,12 @@ function replayCommits(opts: {
 
       shaMapping.set(commit.hash, newSHA);
       for (const sha of absorbed) {
-        shaMapping.set(sha, newSHA);
+        // Scoped, not direct: the squash stands in for the absorbed commit
+        // only on lineages containing this commit (the absorber). Stranded
+        // forks keep their propagated halt records and surface via rootHalt.
+        const list = absorbedMap.get(sha) ?? [];
+        list.push({ target: newSHA, absorber: commit.hash });
+        absorbedMap.set(sha, list);
         haltedSources.delete(sha);
         haltRecords.delete(sha);
       }
@@ -1825,12 +1985,12 @@ export function mirrorHistory(opts: {
   
   console.log("Scanning history for already-replayed commits...");
   // Synced: already replayed (source origin) + echo (target origin) with trailer
-  const syncedShaMap = loadReplayedMappings({ branches, dc });
-  console.log(`Found ${syncedShaMap.size} previously replayed commit(s).`);
+  const { direct: syncedShaMap, absorbed: absorbedMap } = loadReplayedMappings({ branches, dc });
+  console.log(`Found ${syncedShaMap.size} previously replayed commit(s)${absorbedMap.size > 0 ? ` (+${absorbedMap.size} squash-absorbed)` : ""}.`);
   addEchoMappings(sourceCommits, dc, syncedShaMap);
-  const syncedSourceHash = new Set(syncedShaMap.keys());
-  // Commits a prior sync already settled (reachable from the per-branch frontier of newest-replayed commits). 
-  const settledSourceHash = computeSettledCommits(graph, branches, dc, syncedShaMap);
+  const syncedSourceHash = new Set([...syncedShaMap.keys(), ...absorbedMap.keys()]);
+  // Commits a prior sync already settled (reachable from the per-branch frontier of newest-replayed commits).
+  const settledSourceHash = computeSettledCommits(graph, branches, dc, syncedShaMap, absorbedMap);
   let newToScan = 0, settledDropped = 0;
   for (const c of sourceCommits) {
     if (syncedSourceHash.has(c.hash)) continue;
@@ -1843,8 +2003,8 @@ export function mirrorHistory(opts: {
   if (newCommits.length === 0) {
     return {
       mirrored: 0,
-      branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap),
-      shaMapping: syncedShaMap,
+      branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
+      shaMapping: flattenMappings(syncedShaMap, absorbedMap),
       upToDate: true,
       haltedBranches: [],
     };
@@ -1863,18 +2023,38 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltRecords } = replayCommits({ newCommits: newCommits, shaMapping: syncedShaMap, targetInit, dc, graph });
+  const { haltedSources, haltRecords } = replayCommits({ newCommits: newCommits, shaMapping: syncedShaMap, absorbedMap, targetInit, dc, graph });
 
-  // Only surface ORIGINAL halts; propagated ones carry an empty diagnostic.
+  // Surface ORIGINAL halts (diagnostic present). Stranded propagated commits
+  // whose root halt was squash-absorbed on another lineage get a promoted
+  // diagnostic — one per root halt, not one per stranded commit.
   const haltedBranches: HaltedBranch[] = [];
+  const surfacedRoots = new Set<string>();
   for (const [sha, record] of haltRecords) {
     if (!record.diagnostic) continue;
+    if (record.rootHalt) surfacedRoots.add(record.rootHalt);
     haltedBranches.push({
       branch: inferSourceBranch(sha, dc.source.remote),
       commitSha: sha,
       commitShort: record.commitShort,
       mappedParents: record.anchorCommits,
       diagnostic: record.diagnostic,
+    });
+  }
+  for (const [sha, record] of haltRecords) {
+    if (record.diagnostic || !record.rootHalt || surfacedRoots.has(record.rootHalt)) continue;
+    const entries = absorbedMap.get(record.rootHalt);
+    if (!entries || entries.length === 0) continue; // root still pending — it surfaces itself above
+    surfacedRoots.add(record.rootHalt);
+    haltedBranches.push({
+      branch: inferSourceBranch(sha, dc.source.remote),
+      commitSha: sha,
+      commitShort: record.commitShort,
+      mappedParents: record.anchorCommits,
+      diagnostic: formatAbsorbedElsewhereDiagnostic({
+        commitSha: sha, commitShort: record.commitShort,
+        absorbedAncestor: record.rootHalt, entries, dc,
+      }),
     });
   }
 
@@ -1888,8 +2068,8 @@ export function mirrorHistory(opts: {
 
   return {
     mirrored: replayedCount,
-    branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap),
-    shaMapping: syncedShaMap,
+    branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
+    shaMapping: flattenMappings(syncedShaMap, absorbedMap),
     upToDate: false,
     haltedBranches,
   };
