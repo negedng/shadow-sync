@@ -1385,7 +1385,7 @@ function composeMergeBaseTree(opts: {
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
 function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
   const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
-  if (!result.ok) return null;
+  if (!result.ok) fail(`Ancestry walk failed for ${parentHash}: ${result.stderr}`);
   for (const line of result.stdout.split("\n")) {
     const hash = line.trim();
     if (!hash) continue;
@@ -1943,9 +1943,14 @@ function replayCommits(opts: {
         parentTree = composed.tree;
       }
 
+      // Diff against the source first parent only when its mapping is real.
+      // An orphan parent (targetInit fallback) has no synced history to diff
+      // against, so the commit replays its full slice via the root path.
+      const useSourceParent = commit.parents.length > 0 && mappedParents[0] !== targetInit;
+
       const tree = buildReplayedTree({
         commitHash: commit.hash,
-        sourceFirstParent: commit.parents[0] ?? null,
+        sourceFirstParent: useSourceParent ? commit.parents[0] : null,
         dc,
         parentTree,
         tmpIndex,
