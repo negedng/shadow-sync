@@ -58,6 +58,8 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 
 Optional top-level fields (see `shadow-config.example.json`): `trailers.replayed` (trailer key prefix), `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `shadowBranchPrefix`.
 
+A pair may set `"shadowPrefix"` to replace its whole `<prefix>/<name>` shadow namespace — e.g. `"shadowPrefix": "sb"` puts the pair's shadow refs at `sb/main` instead of `shadow/backend/main` (slashes are allowed: `"s/b"` works too). Prefixes must not collide or nest across pairs. To change it on a live deployment, first rename the existing shadow refs on **every** remote that holds them (the target side of each sync direction), run `git fetch --prune --all` in the orchestrator clone, then flip the config — done in that order, the next sync is a no-op and history continues incrementally. Flipping the config without renaming the refs makes the engine treat the deployment as un-synced and re-replay everything.
+
 ### `branch-filters.json` (required)
 
 Next to `shadow-config.json`, create `branch-filters.json` — an explicit allowlist of which branches sync from each remote (copy from `branch-filters.example.json`):

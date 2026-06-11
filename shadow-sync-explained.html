@@ -1081,7 +1081,7 @@ In:  refExists("HEAD~10")                Out: true (if history is that deep), el
 
 <div class="card fn-card">
 <h4><code>listRemoteBranches(remote): string[]</code></h4>
-<p>Branches on a remote, minus <code>shadow/&hellip;</code> entries and the <code>HEAD</code> pointer.</p>
+<p>Branches on a remote, minus shadow namespaces (<code>shadow/&hellip;</code> plus every pair's <code>shadowPrefix/&hellip;</code>) and the <code>HEAD</code> pointer.</p>
 <pre><code>In:  origin has: main, feat-a, shadow/backend/main, HEAD-&gt;main
      listRemoteBranches("origin")
 Out: ["main", "feat-a"]
@@ -1092,11 +1092,13 @@ Out: []</code></pre>
 
 <div class="card fn-card">
 <h4><code>shadowBranchName(pairName, branch): string</code></h4>
-<p>Compose the <code>&lt;prefix&gt;/&lt;pair&gt;/&lt;branch&gt;</code> ref name. Prefix defaults to <code>"shadow"</code>; overridable via config.</p>
+<p>Compose the <code>&lt;prefix&gt;/&lt;pair&gt;/&lt;branch&gt;</code> ref name. Prefix defaults to <code>"shadow"</code>; overridable via config. A pair's <code>shadowPrefix</code> replaces the whole namespace: <code>&lt;shadowPrefix&gt;/&lt;branch&gt;</code>.</p>
 <pre><code>In:  shadowBranchName("backend", "main")        Out: "shadow/backend/main"
 In:  shadowBranchName("frontend", "feat/x")     Out: "shadow/frontend/feat/x"
 In:  (prefix configured to "mirror") shadowBranchName("bk", "main")
-                                                Out: "mirror/bk/main"</code></pre>
+                                                Out: "mirror/bk/main"
+In:  (pair sets shadowPrefix "sb") shadowBranchName("backend", "main")
+                                                Out: "sb/main"</code></pre>
 </div>
 
 <div class="card fn-card">

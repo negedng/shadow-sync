@@ -10,8 +10,9 @@ import * as os from "os";
 // replay        Re-creating a source commit on the target with remapped paths.
 // trailer       `Shadow-replayed-<pair>-<remote>: <sha>` commit footer. The
 //               persistent source→target mapping: no state file, history IS the state.
-// shadow ref    shadow/<pair>/<branch> on the target remote — the replayed line
-//               the target merges from.
+// shadow ref    <prefix>/<pair>/<branch> on the target remote — the replayed
+//               line the target merges from. A pair's `shadowPrefix` replaces
+//               the whole namespace: <shadowPrefix>/<branch> (e.g. sb/main).
 // echo          A source commit that is itself a replay from the target side;
 //               recorded, never re-replayed (prevents ping-pong duplication).
 // load-bearing  A commit whose mapped+filtered diff changes synced content (or a
@@ -39,8 +40,12 @@ export interface DirMapping {
 }
 
 export interface SyncPair {
-  /** Baked into shadow branch names — renaming breaks dedup. */
+  /** Baked into trailer keys — renaming breaks dedup. */
   name: string;
+  /** Shadow refs live at `<shadowPrefix>/<branch>` instead of the default
+   *  `<global prefix>/<name>/<branch>`. Changing it on a live deployment
+   *  requires renaming the existing shadow refs on every remote first. */
+  shadowPrefix?: string;
   /** Symmetric: direction is chosen at runtime via --from. */
   a: RepoEndpoint;
   b: RepoEndpoint;
@@ -154,6 +159,10 @@ function validatePair(pair: SyncPair): void {
   if (!pair.mappings || pair.mappings.length === 0) {
     fail(`pair "${pair.name}" must declare at least one mapping`);
   }
+  const sp = pair.shadowPrefix;
+  if (sp != null && (sp === "" || sp.includes("\\") || sp.startsWith("/") || sp.endsWith("/") || sp.split("/").includes(".."))) {
+    fail(`pair "${pair.name}" shadowPrefix "${sp}" must be a non-empty forward-slash path with no leading/trailing slash or '..'`);
+  }
   // Only exact-duplicate source/target dirs within a side are ambiguous —
   // nested dirs (e.g. "" + "src/common") route deterministically via
   // longest-prefix in buildReplayedTree.
@@ -166,6 +175,21 @@ function validatePair(pair: SyncPair): void {
     if (bDirs.has(m.b)) fail(`pair "${pair.name}" has duplicate b-dir "${m.b}"`);
     aDirs.add(m.a);
     bDirs.add(m.b);
+  }
+}
+
+// Shadow namespaces must not collide or nest across pairs — listRemoteBranches
+// excludes refs by prefix, so overlap would hide one pair's branches from another.
+function validatePairs(pairs: SyncPair[], globalPrefix: string): void {
+  for (const pair of pairs) validatePair(pair);
+  const namespaces = pairs.map(p => p.shadowPrefix ?? `${globalPrefix}/${p.name}`);
+  for (let i = 0; i < namespaces.length; i++) {
+    for (let j = i + 1; j < namespaces.length; j++) {
+      const [a, b] = [namespaces[i], namespaces[j]];
+      if (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)) {
+        fail(`pairs "${pairs[i].name}" and "${pairs[j].name}" have overlapping shadow namespaces ("${a}" vs "${b}")`);
+      }
+    }
   }
 }
 
@@ -214,7 +238,7 @@ function loadConfig(): ShadowSyncConfig {
   const shadowBranchPrefix = (doc.shadowBranchPrefix as string) ?? "shadow";
 
   const pairs = (doc.pairs as SyncPair[]) ?? [];
-  for (const pair of pairs) validatePair(pair);
+  validatePairs(pairs, shadowBranchPrefix);
 
   return { pairs, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
 }
@@ -245,11 +269,14 @@ export function applyTestOverrides(opts: {
   pairs: SyncPair[];
   shadowBranchPrefix?: string;
 }): void {
+  // Validate before mutating module state so a rejected override can't poison
+  // a later in-process run.
+  const prefix = opts.shadowBranchPrefix ?? _shadowBranchPrefix;
+  validatePairs(opts.pairs, prefix);
   _repoRoot = opts.repoRoot;
-  for (const pair of opts.pairs) validatePair(pair);
+  _shadowBranchPrefix = prefix;
   PAIRS.length = 0;
   PAIRS.push(...opts.pairs);
-  if (opts.shadowBranchPrefix != null) _shadowBranchPrefix = opts.shadowBranchPrefix;
 }
 
 
@@ -354,11 +381,13 @@ export function listRemoteBranches(remote: string): string[] {
     .map(l => l.trim())
     .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
     .map(l => l.replace(`${remote}/`, ""))
-    .filter(b => !b.startsWith(`${_shadowBranchPrefix}/`));
+    .filter(b => !b.startsWith(`${_shadowBranchPrefix}/`) &&
+      !PAIRS.some(p => p.shadowPrefix && b.startsWith(`${p.shadowPrefix}/`)));
 }
 
 export function shadowBranchName(pairName: string, branch: string): string {
-  return `${_shadowBranchPrefix}/${pairName}/${branch}`;
+  const custom = PAIRS.find(p => p.name === pairName)?.shadowPrefix;
+  return custom != null ? `${custom}/${branch}` : `${_shadowBranchPrefix}/${pairName}/${branch}`;
 }
 
 /** Ensure a git remote is configured at the endpoint's URL — add or update as needed. */
@@ -1549,7 +1578,8 @@ function formatHaltDiagnostic(opts: {
   const { commit, meta, mappedParents, dc, cause } = opts;
   const { target, pair } = dc;
   const branchLabel = inferSourceBranch(commit.hash, dc.source.remote) ?? "<source-branch>";
-  const shadowRef = `refs/heads/${shadowBranchName(pair.name, branchLabel)}`;
+  const shadowName = shadowBranchName(pair.name, branchLabel);
+  const shadowRef = `refs/heads/${shadowName}`;
   const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
 
@@ -1612,9 +1642,9 @@ function formatHaltDiagnostic(opts: {
     `       source merge with ≥3 mapped parents, merge the corresponding branches`,
     `       sequentially or as a single octopus on ${target.remote}.`,
     `    2. Run shadow-sync in the other direction so Mm is replayed onto`,
-    `       ${dc.source.remote}'s shadow ref (\`shadow/${pair.name}/${branchLabel}\`).`,
+    `       ${dc.source.remote}'s shadow ref (\`${shadowName}\`).`,
     `    3. On ${dc.source.remote}, merge that shadow ref into the working branch`,
-    `       (\`git merge origin/shadow/${pair.name}/${branchLabel}\`) and push.`,
+    `       (\`git merge origin/${shadowName}\`) and push.`,
     `    4. Re-run this sync. The engine absorbs ${meta.short} (and any`,
     `       descendants halted with it) into the resulting merge's replay`,
     `       automatically — no flags needed.`,
