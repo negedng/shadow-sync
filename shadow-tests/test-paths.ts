@@ -8,14 +8,17 @@
  *      (formerly test-pull-warnings.ts)
  *   C. branches — feature, feature-range, orphan, custom branch prefix
  *      (formerly test-pull-branches.ts)
- *   D. shadowignore — ignore patterns + history audit
+ *   D. shadowignore — ignore patterns, rename in/out of ignore,
+ *      unignore-by-pattern-removal, history audit
  *      (formerly test-push-shadowignore.ts)
+ *   E. multi-level .shadowignore + implicit self-strip
+ *   F. multi-pair root .shadowignore — root cascades into every pair
  */
 import * as fs from "fs";
 import * as path from "path";
 import { execSync, spawnSync } from "child_process";
 import {
-  createTestEnv, commitOnRemote, commitOnLocal,
+  createTestEnv, addRemote, commitOnRemote, commitOnLocal,
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile,
   getShadowLogFull, getExternalShadowLogFull,
@@ -365,6 +368,60 @@ function runShadowignoreBehavior(env1: ReturnType<typeof createTestEnv>): void {
       "should not sync later\n",
       "[shadowignore 3] secret.mid update blocked by shadowignore",
     );
+
+    // phase 4: rename INTO ignore — engine diffs without -M, so a rename is a
+    // D+A pair: the delete replays (old path leaves the shadow), the add is
+    // blocked (content must not escape under the ignored name).
+    commitOnLocal(env1, { "renamed-into.ts": "rename me\n" }, "Add renamed-into.ts (pre-rename)");
+    const r4a = runPush(env1);
+    assertEqual(r4a.status, 0, "[shadowignore 4: rename-into] pre-rename push should succeed");
+    assertEqual(readExternalShadowFile(env1, "renamed-into.ts"), "rename me\n", "[shadowignore 4] renamed-into.ts on shadow pre-rename");
+
+    commitOnLocal(env1, {
+      "renamed-into.ts": null,
+      "renamed-into.mid": "rename me\n",
+    }, "Rename renamed-into.ts -> renamed-into.mid (into ignore)");
+    const r4b = runPush(env1);
+    assertEqual(r4b.status, 0, "[shadowignore 4] rename push should succeed");
+    assertEqual(readExternalShadowFile(env1, "renamed-into.ts"), null, "[shadowignore 4] old path deleted on shadow");
+    assertEqual(readExternalShadowFile(env1, "renamed-into.mid"), null, "[shadowignore 4] content must NOT leak via the ignored new name");
+
+    // phase 5: rename OUT of ignore — the add side lands outside the filter,
+    // so the previously hidden content surfaces at the new name.
+    commitOnLocal(env1, {
+      "escape.mid": "hidden v1\n",
+      "carrier.ts": "keeps the commit load-bearing\n",
+    }, "Add escape.mid (ignored) + carrier.ts");
+    const r5a = runPush(env1);
+    assertEqual(r5a.status, 0, "[shadowignore 5: rename-out] setup push should succeed");
+    assertEqual(readExternalShadowFile(env1, "escape.mid"), null, "[shadowignore 5] escape.mid blocked while ignored");
+    assertEqual(readExternalShadowFile(env1, "carrier.ts"), "keeps the commit load-bearing\n", "[shadowignore 5] carrier.ts on shadow");
+
+    commitOnLocal(env1, {
+      "escape.mid": null,
+      "escape.ts": "hidden v1\n",
+    }, "Rename escape.mid -> escape.ts (out of ignore)");
+    const r5b = runPush(env1);
+    assertEqual(r5b.status, 0, "[shadowignore 5] rename push should succeed");
+    assertEqual(readExternalShadowFile(env1, "escape.ts"), "hidden v1\n", "[shadowignore 5] content surfaces at the unignored name");
+    assertEqual(readExternalShadowFile(env1, "escape.mid"), null, "[shadowignore 5] old ignored path still absent");
+
+    // phase 6: unignore by pattern removal — block-not-purge: dropping the
+    // pattern resurrects nothing by itself (the diff overlay only carries
+    // changed paths); the file returns on its next edit.
+    commitOnLocal(env1, { ".shadowignore": "**/CLAUDE.md\n" }, "Drop the *.mid ignore pattern");
+    const r6a = runPush(env1);
+    assertEqual(r6a.status, 0, "[shadowignore 6: unignore] pattern-removal push should succeed");
+    assertEqual(
+      readExternalShadowFile(env1, "secret.mid"),
+      "should not sync later\n",
+      "[shadowignore 6] pattern removal alone does NOT resurrect blocked content",
+    );
+
+    commitOnLocal(env1, { "secret.mid": "now public\n" }, "Update secret.mid post-unignore");
+    const r6b = runPush(env1);
+    assertEqual(r6b.status, 0, "[shadowignore 6] post-unignore push should succeed");
+    assertEqual(readExternalShadowFile(env1, "secret.mid"), "now public\n", "[shadowignore 6] edit after pattern removal syncs");
   }
 }
 
@@ -439,9 +496,55 @@ function runShadowignoreMultiLevel(): void {
   }
 }
 
+// ── F. multi-pair root .shadowignore — root cascades into every pair ────────
+// One mono, two pairs on separate external remotes. The mono-root
+// .shadowignore applies to both pairs' exports; a pair-level .shadowignore
+// stays scoped to its own pair.
+function runShadowignoreMultiPairRoot(): void {
+  const env = createTestEnv("shadowignore-multipair", "frontend");
+  try {
+    const backend = addRemote(env, "backend-team", "backend");
+
+    const writeAt = (rel: string, content: string) => {
+      const full = path.join(env.localRepo, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, content);
+    };
+    writeAt(".shadowignore",          "*.tmp\n");
+    writeAt("frontend/.shadowignore", "private/\n");
+    writeAt("frontend/app.ts",        "fe app\n");
+    writeAt("frontend/scratch.tmp",   "fe tmp\n");
+    writeAt("frontend/private/x.ts",  "fe private\n");
+    writeAt("backend/api.ts",         "be api\n");
+    writeAt("backend/cache.tmp",      "be tmp\n");
+    writeAt("backend/private/y.ts",   "be private\n");
+    git("add -A", env.localRepo);
+    git('commit -m "multi-pair shadowignore setup"', env.localRepo);
+
+    const rf = runPush(env, "frontend pair push");
+    assertEqual(rf.status, 0, "[multi-pair] frontend push should succeed");
+    const rb = runPush(env, "backend pair push", [], backend);
+    assertEqual(rb.status, 0, "[multi-pair] backend push should succeed");
+
+    // Root *.tmp cascades into BOTH pairs.
+    assertEqual(readExternalShadowFile(env, "app.ts"),             "fe app\n", "[multi-pair] frontend app.ts kept");
+    assertEqual(readExternalShadowFile(env, "scratch.tmp"),        null,       "[multi-pair] frontend *.tmp dropped via root ignore");
+    assertEqual(readExternalShadowFile(env, "api.ts", backend),    "be api\n", "[multi-pair] backend api.ts kept");
+    assertEqual(readExternalShadowFile(env, "cache.tmp", backend), null,       "[multi-pair] backend *.tmp dropped via root ignore");
+    // Pair-level ignore stays scoped: frontend/private/ blocked, backend's syncs.
+    assertEqual(readExternalShadowFile(env, "private/x.ts"),          null,           "[multi-pair] frontend pair-level private/ dropped");
+    assertEqual(readExternalShadowFile(env, "private/y.ts", backend), "be private\n", "[multi-pair] backend private/ unaffected by frontend's pair-level ignore");
+    // Self-strip holds on both targets.
+    assertEqual(readExternalShadowFile(env, ".shadowignore"),          null, "[multi-pair] .shadowignore not on frontend shadow");
+    assertEqual(readExternalShadowFile(env, ".shadowignore", backend), null, "[multi-pair] .shadowignore not on backend shadow");
+  } finally {
+    env.cleanup();
+  }
+}
+
 export default function run(): void {
   // Not a filter test — wildcard.
-  setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
+  setTestBranchAllowlist({ origin: ["**"], team: ["**"], "backend-team": ["**"] });
   try {
 
   // env1: shared across branches-default, shadowignore-behavior, and paths.
@@ -461,6 +564,7 @@ export default function run(): void {
   runBranchesCustomPrefix();
   runShadowignoreNeverInTree();
   runShadowignoreMultiLevel();
+  runShadowignoreMultiPairRoot();
 
   } finally {
     setTestBranchAllowlist();
