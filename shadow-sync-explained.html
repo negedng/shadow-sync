@@ -1429,7 +1429,7 @@ Out: tree-SHA = baseTree's files + a new backend/ populated from subtreeContent<
 </div>
 
 <div class="card fn-card">
-<h4><code>composeMergeBaseTree({ commit, mappedParents, shaMapping, dc }): string | null</code></h4>
+<h4><code>composeMergeBaseTree({ commit, mappedParents, syncedShaMap, dc }): string | null</code></h4>
 <p>Build the base tree for replaying <code>commit</code> onto <code>mappedParents</code>. <code>buildReplayedTree</code> later overlays the source-side diff on top, carrying the user&rsquo;s merge resolution into the replay. Branches on whether the mapping currently being replayed has a non-empty target path (the engine processes one mapping at a time within a pair, so &ldquo;<code>target.dir</code>&rdquo; below refers to the current mapping&rsquo;s target path):</p>
 <ul>
 <li><strong>Cross-repo (<code>target.dir</code> set)</strong>. Echo splice (≥1 source parent carries the target trailer) &rarr; splice the shadow chain&rsquo;s <code>target.dir/</code> over the echo&rsquo;d target&rsquo;s outer files, refreshing the shadow chain&rsquo;s outer state; multi-echo requires the echo outers to agree. Runs before the 1-parent shortcut so 1-parent commits on top of an echo still take the round-trip path. No echo + 1 parent &rarr; that tree. No echo + 2 parents with clean <code>merge-tree</code> &rarr; that. No echo + (merge-tree conflict / 3+ parents) &rarr; outer-agreement: mapped parents must agree outside <code>target.dir/</code>; splice <code>[0]</code>&rsquo;s inner over the shared outer. Outer divergence &rarr; null; caller halts.</li>
@@ -1476,11 +1476,11 @@ Out: P''s tree (1-parent shortcut, same as cross-repo)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>collectAbsorbedHalted(commit, haltedSources, shaMapping): string[]</code></h4>
+<h4><code>collectAbsorbedHalted(commit, haltedSources, syncedShaMap): string[]</code></h4>
 <p>Round-trip absorption walk. BFS from <code>commit</code>&rsquo;s source-side parents through halted unmapped ancestors, stopping at mapped commits. The returned SHAs become additional <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailers on <code>commit</code>&rsquo;s replay, so <code>loadReplayedMappings</code> treats them as already-replayed on the next run and skips them. This is how a single squashed shadow commit absorbs <code>Bm</code> and any descendants halted with it after the operator&rsquo;s round-trip merge arrives.</p>
 <pre><code>In:  commit = R_be (BE-side merge of [Bm, Mm'_on_be] after the round-trip)
      haltedSources = { Bm, Bm+1, Bm+2 }   (Bm halted; Bm+1/Bm+2 propagated)
-     shaMapping has Bp1', Bp2m' (and Mm'_on_be → Mm via the existing trailer)
+     syncedShaMap has Bp1', Bp2m' (and Mm'_on_be → Mm via the existing trailer)
 Out: [ Bm, Bm+1, Bm+2 ]
      (walk starts at R_be.parents, hops through halted ancestors,
       stops where it hits clean mapped commits Bp1' / Bp2m')
@@ -1521,12 +1521,12 @@ Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
 </div>
 
 <div class="card fn-card">
-<h4><code>resolveHaltAwareParents(commit, shaMapping, targetInit, haltedSources, haltReasons): string[]</code></h4>
+<h4><code>resolveHaltAwareParents(commit, syncedShaMap, targetInit, haltedSources, haltReasons): string[]</code></h4>
 <p>Like <code>resolveTargetParents</code>, but when a source parent is in <code>haltedSources</code>, splice in the FULL set of mapped parents the halt-causer had (from <code>haltReasons</code>) rather than letting <code>findEchoAnchor</code> pick one non-deterministically. This keeps the previously-pushed shadow tip (which <code>mapBranchesToTargetTips</code> chose by the same newest-first walk) in the resulting parent set, so the round-trip absorption&rsquo;s FF push remains valid.</p>
 <pre><code>In:  commit = R_be (parents = [Bm, Mm'_on_be])
      haltedSources = { Bm }
      haltReasons[Bm] = { mappedParents: [Bp1x', Bp2m'], ... }
-     shaMapping[Mm'_on_be] = Mm (via the existing skip trailer)
+     syncedShaMap[Mm'_on_be] = Mm (via the existing skip trailer)
 Out: [ Bp1x', Bp2m', Mm ]
      (Bm expanded to ALL of its halt mappedParents; Mm appended from
       the second R_be parent. Bp1x' was the previous shadow tip on
@@ -1539,7 +1539,7 @@ Out: identical to resolveTargetParents (single mapping per source parent)</code>
 <h3 class="fn-group">Parent resolution</h3>
 
 <div class="card fn-card">
-<h4><code>findEchoAnchor(parentHash, shaMapping): string | null</code></h4>
+<h4><code>findEchoAnchor(parentHash, syncedShaMap): string | null</code></h4>
 <p>For an unmapped parent: walk its ancestors newest-first, return the first one in the SHA mapping.</p>
 <pre><code>In:  parentHash = Bc3 (not in mapping); ancestors: Bc2 (not mapped), Bc1 (mapped → Bc1')
 Out: "Bc1'"
@@ -1554,7 +1554,7 @@ Out: parentHash's own mapped value (the log walk includes the starting hash)
 In:  parentHash = Ff1'_mono on shadow/frontend/main — a cross-pair shadow
      commit reached via a mono merge while we're syncing the backend pair.
      Its ancestry walks Ff1'_mono → Fe_init'_mono → Mc0 (mono's root).
-     shaMapping has Mc0 → Mc0'_be.
+     syncedShaMap has Mc0 → Mc0'_be.
 Out: "Mc0'_be" — every shadow ref is anchored into mono's main lineage because
      resolveTargetParents falls back to targetInit (= mono root) for source
      roots during the very first --from b sync. So even cross-pair shadow
@@ -1562,13 +1562,13 @@ Out: "Mc0'_be" — every shadow ref is anchored into mono's main lineage because
 </div>
 
 <div class="card fn-card">
-<h4><code>resolveTargetParents(commit, shaMapping, targetInit): string[]</code></h4>
+<h4><code>resolveTargetParents(commit, syncedShaMap, targetInit): string[]</code></h4>
 <p>Map each source parent to the target side. Mapped → use that; unmapped → fall back to <code>findEchoAnchor</code>, then <code>targetInit</code>. Roots without <code>targetInit</code> produce <code>[]</code>. Duplicates removed.</p>
-<pre><code>In:  commit = Bt2 (parents [Bc4, Br2]); shaMapping = { Bc4→Bc4', Br2→Br2' }
+<pre><code>In:  commit = Bt2 (parents [Bc4, Br2]); syncedShaMap = { Bc4→Bc4', Br2→Br2' }
 Out: ["Bc4'", "Br2'"]
 
 In:  commit = Br2 (parents [Bc4, Mr1']); Bc4→Bc4' mapped;
-     Mr1' carries Shadow-replayed-monorepo: Mr1, so shaMapping[Mr1'] = Mr1
+     Mr1' carries Shadow-replayed-monorepo: Mr1, so syncedShaMap[Mr1'] = Mr1
      (the literal monorepo-native commit, shared by SHA)
 Out: ["Bc4'", "Mr1"]   ← second parent is the original target-side commit object
 
@@ -1582,7 +1582,7 @@ In:  commit = Mf1 on monorepo→backend (backend pair, syncing the nested
      common mapping), where two leaf pairs both carry a "common"
      mapping rooted at mono:common/ and Mf1 = mono engineer's merge of
      shadow/frontend/main into main.
-     Mf1.parents = [Mc0, Ff1'_mono]. Mc0 → Mc0'_be via shaMapping.
+     Mf1.parents = [Mc0, Ff1'_mono]. Mc0 → Mc0'_be via syncedShaMap.
      Ff1'_mono carries the frontend pair's trailer (cross-pair from the
      backend pair's perspective); findEchoAnchor walks its ancestry through
      the shadow-ref chain to Mc0 → returns Mc0'_be.
@@ -1608,9 +1608,9 @@ Out: Map {}  (skips the git log call entirely)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>filterNotReplayedCommits(allCommits, shaMapping, dc): TopoCommit[]</code></h4>
+<h4><code>filterNotReplayedCommits(allCommits, syncedShaMap, dc): TopoCommit[]</code></h4>
 <p>Drop (a) commits already mapped and (b) echo commits carrying the target&rsquo;s
-<code>dc.skipTrailerKey</code>. Mutates <code>shaMapping</code> to record echo&rarr;original when
+<code>dc.skipTrailerKey</code>. Mutates <code>syncedShaMap</code> to record echo&rarr;original when
 the original is still locally reachable. Commits carrying a <em>cross-pair</em>
 <code>Shadow-replayed-*</code> trailer (a sibling pair&rsquo;s key, not ours) are <strong>kept</strong>
 in the candidate list so the original author&rsquo;s commit replays onto the receiving pair&rsquo;s
@@ -1621,10 +1621,10 @@ same-pair-trailer rule now (see <code>filterLoadBearingCommits</code>).</p>
 <pre><code>Direction: backend→monorepo (so dc.skipTrailerKey = Shadow-replayed-backend-monorepo).
 
 In:  allCommits = [Bc3, Mr1', Bt2]
-     Bc3 is already in shaMapping (replayed in a previous run)
+     Bc3 is already in syncedShaMap (replayed in a previous run)
      Mr1' carries Shadow-replayed-backend-monorepo: Mr1, and Mr1 exists locally on monorepo
      Bt2 is new with no trailers
-Out: [Bt2]; shaMapping mutated to include { Mr1' → Mr1 }
+Out: [Bt2]; syncedShaMap mutated to include { Mr1' → Mr1 }
      (subsequent replays whose parent is Mr1' will resolve to the literal Mr1)
 
 In:  Bt2 carries Shadow-replayed-frontend-frontend-repo: Ft2 (cross-pair shadow commit)
@@ -1636,7 +1636,7 @@ Out: [Bt2] — KEPT in the candidate list (cross-pair trailer is not ours);
      cross-pair trailer.
 
 In:  Mr1' carries the trailer but Mr1 isn't present locally (e.g. monorepo wasn't fetched)
-Out: Mr1' is still dropped from output, but NOT recorded in shaMapping
+Out: Mr1' is still dropped from output, but NOT recorded in syncedShaMap
      (no usable target-side anchor to point at)
 
 In:  Two pairs share mono:common/ via a nested-common mapping on each. After a
@@ -1656,7 +1656,7 @@ Out: Ff1'_mono is KEPT in the candidate list (cross-pair trailer isn't ours);
 </div>
 
 <div class="card fn-card">
-<h4><code>dropOrphanedCommits(newCommits, branches, shaMapping, remote): TopoCommit[]</code></h4>
+<h4><code>dropOrphanedCommits(newCommits, branches, syncedShaMap, remote): TopoCommit[]</code></h4>
 <p>Drops candidates whose replay would orphan on the target. Pass 1 mirrors <code>mapBranchesToTargetTips</code>: per branch, walk newest-first, stop at the first mapped ancestor &mdash; candidates seen along the way anchor a tip. Pass 2 pulls in unmapped candidate parents of kept commits so <code>resolveTargetParents</code> doesn&rsquo;t fall back to <code>findEchoAnchor</code> with a different topology. Without this step, orphaned target commits aren&rsquo;t reachable from any shadow ref, so the next sync&rsquo;s <code>loadReplayedMappings</code> can&rsquo;t see them and re-replays the same source commit every cycle.</p>
 <pre><code>In:  branches = ["project"]
      newCommits = [Bt1, Bc3, Bt2], all between backend-repo/project's tip
@@ -1682,8 +1682,8 @@ Out: [...without Mt2]  — without this drop, Mt2'_fe replays as an orphan
 </div>
 
 <div class="card fn-card">
-<h4><code>mapBranchesToTargetTips(remote, branches, shaMapping): Map&lt;branch, targetSHA&gt;</code></h4>
-<p>Per branch, walk newest-first and return the first commit in <code>shaMapping</code>. The branch HEAD may be outer-only (didn&rsquo;t touch <code>source.dir/</code>), so we still advance to the most recent mapped ancestor.</p>
+<h4><code>mapBranchesToTargetTips(remote, branches, syncedShaMap): Map&lt;branch, targetSHA&gt;</code></h4>
+<p>Per branch, walk newest-first and return the first commit in <code>syncedShaMap</code>. The branch HEAD may be outer-only (didn&rsquo;t touch <code>source.dir/</code>), so we still advance to the most recent mapped ancestor.</p>
 <pre><code>In:  branches = ["project"]; project's tip = Bt3 (outer-only, e.g. a CI tweak);
      one commit back is Bf1 (touches backend/) mapped to Bf1'
 Out: Map { "project" → "Bf1'" }
@@ -1698,20 +1698,20 @@ Out: Map { "project" → "Bt3'", "main" → "Bc4'" }</code></pre>
 <h3 class="fn-group">Orchestration</h3>
 
 <div class="card fn-card">
-<h4><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc, pair, autoIgnorePatterns }): ReplayHalts</code></h4>
-<p>The replay loop. For each commit, for each mapping in <code>dc.mappings</code>: <code>resolveHaltAwareParents</code> → <code>composeMergeBaseTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>shaMapping</code>. Per-commit <code>.shadowignore</code> reads at <code>{mapping.source}/.shadowignore</code> are appended to that mapping&rsquo;s entry in <code>autoIgnoreBySourceIdx</code> (the intra-pair nested-mapping pre-computed list) before tree building.</p>
+<h4><code>replayCommits({ newCommits, syncedShaMap, targetInit, source, target, dc, pair, autoIgnorePatterns }): ReplayHalts</code></h4>
+<p>The replay loop. For each commit, for each mapping in <code>dc.mappings</code>: <code>resolveHaltAwareParents</code> → <code>composeMergeBaseTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>syncedShaMap</code>. Per-commit <code>.shadowignore</code> reads at <code>{mapping.source}/.shadowignore</code> are appended to that mapping&rsquo;s entry in <code>autoIgnoreBySourceIdx</code> (the intra-pair nested-mapping pre-computed list) before tree building.</p>
 <p>When <code>composeMergeBaseTree</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatUnresolvableMergeError</code> into <code>haltReasons</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>mappedParents</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeMergeBaseTree</code>'s echo-splice branch recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltReasons }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
-<pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; shaMapping = {} initially
+<pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; syncedShaMap = {} initially
      targetInit = monorepo's init;
      dc.mappings = [{ source: "", target: "backend" }]   (single mapping)
 Out: { haltedSources: Set(), haltReasons: Map() };
-     shaMapping mutated to { Bc3 → Bc3', Bt2 → Bt2' }
+     syncedShaMap mutated to { Bc3 → Bc3', Bt2 → Bt2' }
      Bc3' rooted on its mapped parent; Bt2' has parents [Bc4', Br2']
 
 In:  newCommits[i] is a merge whose mapped parents disagree on outer state
 Out: that commit's hash is added to haltedSources;
      haltReasons[hash] = { mappedParents, diagnostic, commitShort };
-     no commit-tree runs for it, shaMapping has no entry; loop proceeds
+     no commit-tree runs for it, syncedShaMap has no entry; loop proceeds
      to subsequent commits in the batch
 
 In:  later batch contains R_be = merge(Bm, Mm'_on_be) where Bm is in haltedSources
@@ -1719,7 +1719,7 @@ In:  later batch contains R_be = merge(Bm, Mm'_on_be) where Bm is in haltedSourc
 Out: R_be replays via composeMergeBaseTree's round-trip branch;
      collectAbsorbedHalted returns [Bm] (plus any halted descendants);
      R_be's commit message gains a Shadow-replayed trailer per absorbed sha;
-     shaMapping.set(Bm, R_be'); haltedSources.delete(Bm)
+     syncedShaMap.set(Bm, R_be'); haltedSources.delete(Bm)
 
 In:  newCommits[i]'s buildReplayedTree returns null (source content went missing)
 Out: that commit is logged "Skipping ... (source content missing)" and skipped;
@@ -1727,7 +1727,7 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
 </div>
 
 <div class="card fn-card">
-<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches }): { mirrored, branchMapping, shaMapping, upToDate, haltedBranches }</code></h4>
+<h4 id="fn-mirrorHistory"><code>mirrorHistory({ pair, from, branches }): { mirrored, branchMapping, syncedShaMap, upToDate, haltedBranches }</code></h4>
 <p>The replay engine&rsquo;s public entry point. Composes <code>computeAutoIgnorePatterns</code> → <code>loadReplayedMappings</code> → <code>collectSourceCommits</code> → <code>filterNotReplayedCommits</code> → <code>dropOrphanedCommits</code> → <code>replayCommits</code> → <code>mapBranchesToTargetTips</code> for one pair, one direction. Projects original (non-empty-diagnostic) entries from <code>replayCommits</code>&rsquo;s halt records into <code>haltedBranches: HaltedBranch[]</code>; propagated halts on descendants stay internal. Does not throw on unresolvable merges &mdash; the caller (<code>_runSyncCore</code>) prints each <code>diagnostic</code> to stderr and increments its failed-pair counter, but other branches in the same pair still push.</p>
 <pre><code>In:  Fresh bootstrap of the backend pair, --from b
      (backend repo has commits Bc0..Bc4, Br1..Br2, Bt1..Bt3, Bf1;
@@ -1735,14 +1735,14 @@ Out: that commit is logged "Skipping ... (source content missing)" and skipped;
 Out: { mirrored: 11,
        branchMapping: Map { "project" → "Bt3'", "main" → "Bc4'",
                             "core-x" → "Br2'", "bug/core-x/fix" → "Bf1'" },
-       shaMapping: 11 entries source→target,
+       syncedShaMap: 11 entries source→target,
        upToDate: false,
        haltedBranches: [] }
 
 In:  Steady state — backend hasn't moved since the last sync
 Out: { mirrored: 0,
        branchMapping: Map { "project" → "Bt3'", ... },
-       shaMapping: 11 existing entries loaded from trailers,
+       syncedShaMap: 11 existing entries loaded from trailers,
        upToDate: true,
        haltedBranches: [] }
 
@@ -1751,7 +1751,7 @@ In:  newCommits contains a merge Bm whose mapped parents disagree on outer state
 Out: { mirrored: <n-1>,    // Bm is not counted
        branchMapping: clean branches advance to their new tips;
                       Bm's branch points at its last clean ancestor,
-       shaMapping: entries for everything except Bm (and its halt-propagated heirs),
+       syncedShaMap: entries for everything except Bm (and its halt-propagated heirs),
        upToDate: false,
        haltedBranches: [{ branch: "project", commitSha: Bm,
                           commitShort: "abc1234",
@@ -1760,10 +1760,10 @@ Out: { mirrored: <n-1>,    // Bm is not counted
 </div>
 
 <div class="card fn-card">
-<h4><code>syncTags({ source, target, shaMapping }): { pushed, skipped }</code></h4>
-<p>Recreate source-side tags on target pointing at the replayed commits. Annotated tags get a fresh tag object (same name/tagger/message, new <code>object</code> line). Tags whose source commit was dropped from replay (no <code>shaMapping</code> entry) are skipped.</p>
+<h4><code>syncTags({ source, target, syncedShaMap }): { pushed, skipped }</code></h4>
+<p>Recreate source-side tags on target pointing at the replayed commits. Annotated tags get a fresh tag object (same name/tagger/message, new <code>object</code> line). Tags whose source commit was dropped from replay (no <code>syncedShaMap</code> entry) are skipped.</p>
 <pre><code>In:  source has v1.0 (annotated → commit a) and v1.1 (lightweight → b)
-     shaMapping = { a → a', b → b' }
+     syncedShaMap = { a → a', b → b' }
 Out: { pushed: 2, skipped: 0 }
      target has refs/tags/v1.0 (new tag object pointing at a')
      and refs/tags/v1.1 → b'
@@ -1889,8 +1889,8 @@ Out: { exitCode: 1,
                 merge that brings new in-scope content from the 2nd parent).</li>
             </ul>
           </li>
-          <li><strong><code>filterNotReplayedCommits(allCommits, shaMapping, dc)</code></strong>
-            &mdash; drop commits already in <code>shaMapping</code> and echoes carrying our own
+          <li><strong><code>filterNotReplayedCommits(allCommits, syncedShaMap, dc)</code></strong>
+            &mdash; drop commits already in <code>syncedShaMap</code> and echoes carrying our own
             trailer.</li>
           <li><strong><code>dropOrphanedCommits(...)</code></strong> &mdash; drop commits that no
             branch&rsquo;s tip-walk would resolve to (would replay-then-orphan every cycle).</li>
@@ -1900,11 +1900,11 @@ Out: { exitCode: 1,
                 used as fallback parent for orphan source commits.</li>
             </ul>
           </li>
-          <li><strong><code>replayCommits({ newCommits, shaMapping, targetInit, source, target, dc,
+          <li><strong><code>replayCommits({ newCommits, syncedShaMap, targetInit, source, target, dc,
             pair, autoIgnorePatterns })</code></strong> &mdash; per-commit loop; returns
             <code>{ haltedSources, haltReasons }</code>. <em>Walkthroughs A/B/C below pick up here;
             walkthrough D covers the halt branch.</em></li>
-          <li><strong><code>mapBranchesToTargetTips(source.remote, branches, shaMapping)</code></strong>
+          <li><strong><code>mapBranchesToTargetTips(source.remote, branches, syncedShaMap)</code></strong>
             &rarr; <code>Map&lt;branch, targetSHA&gt;</code> &mdash; walk each branch newest-first to
             find the first mapped ancestor.</li>
           <li>per branch: compare target&rsquo;s existing shadow ref to the new tip
@@ -1914,7 +1914,7 @@ Out: { exitCode: 1,
                 <a href="#merge">&sect;7</a>.</li>
             </ul>
           </li>
-          <li>if pair has tags: <strong><code>syncTags({ source, target, shaMapping })</code></strong>.</li>
+          <li>if pair has tags: <strong><code>syncTags({ source, target, syncedShaMap })</code></strong>.</li>
         </ul>
       </li>
     </ul>
@@ -1926,7 +1926,7 @@ Out: { exitCode: 1,
 <p>
   <strong>Shape:</strong> one new linear commit <code>X</code> on <code>source/feature</code>; its
   single source-side parent <code>P</code> already has a shadow equivalent <code>P'</code> in
-  <code>shaMapping</code>. The vast majority of replays look like this.
+  <code>syncedShaMap</code>. The vast majority of replays look like this.
 </p>
 
 <div class="diagram">source:   P ── X            target shadow:  P'  (after replay → P' ── X')</div>
@@ -1946,13 +1946,13 @@ Out: { exitCode: 1,
       </li>
       <li><strong><code>hasTrailer(meta.trailers, dc.addTrailerKey)</code></strong> &rarr;
         <code>false</code> &mdash; X isn&rsquo;t an echo from the other direction.</li>
-      <li><strong><code>resolveTargetParents(X, shaMapping, targetInit)</code></strong> &rarr;
+      <li><strong><code>resolveTargetParents(X, syncedShaMap, targetInit)</code></strong> &rarr;
         <code>[P']</code>.
         <ul>
-          <li><code>shaMapping.get(P)</code> &rarr; <code>P'</code> (direct hit, no fallback needed).</li>
+          <li><code>syncedShaMap.get(P)</code> &rarr; <code>P'</code> (direct hit, no fallback needed).</li>
         </ul>
       </li>
-      <li><strong><code>composeMergeBaseTree({ commit, mappedParents, shaMapping, dc })</code></strong>
+      <li><strong><code>composeMergeBaseTree({ commit, mappedParents, syncedShaMap, dc })</code></strong>
         &rarr; <code>P'.tree</code>.
         <ul>
           <li>Echo lookup: <code>P</code> doesn&rsquo;t carry <code>dc.skipTrailerKey</code> &mdash;
@@ -1993,7 +1993,7 @@ Out: { exitCode: 1,
             <code>GIT_COMMITTER_*</code> so authorship/timestamps survive the replay.</li>
         </ul>
       </li>
-      <li><code>shaMapping.set(X.hash, X'.hash)</code> &mdash; in-memory only; the trailer on the new
+      <li><code>syncedShaMap.set(X.hash, X'.hash)</code> &mdash; in-memory only; the trailer on the new
         commit is what persists.</li>
     </ul>
   </li>
@@ -2013,7 +2013,7 @@ Out: { exitCode: 1,
   <code>main</code>. Both source parents <code>A</code> (main tip) and <code>B</code> (feature tip)
   are native source-side commits &mdash; neither carries the cross-direction trailer
   (<code>dc.skipTrailerKey</code>). Both already have shadow equivalents <code>A'</code>,
-  <code>B'</code> in <code>shaMapping</code>, and <code>git merge-tree A' B'</code> produces a clean
+  <code>B'</code> in <code>syncedShaMap</code>, and <code>git merge-tree A' B'</code> produces a clean
   tree.
 </p>
 
@@ -2031,14 +2031,14 @@ Out: { exitCode: 1,
     <ul>
       <li><code>getCommitMeta(M.hash)</code> &mdash; same as A.</li>
       <li><code>hasTrailer(...)</code> &rarr; <code>false</code> &mdash; same as A.</li>
-      <li><strong><code>resolveTargetParents(M, shaMapping, targetInit)</code></strong> &rarr;
+      <li><strong><code>resolveTargetParents(M, syncedShaMap, targetInit)</code></strong> &rarr;
         <code>[A', B']</code>.
         <ul>
           <li>Loops over <code>commit.parents</code> = <code>[A, B]</code>; both hit
-            <code>shaMapping</code> directly.</li>
+            <code>syncedShaMap</code> directly.</li>
         </ul>
       </li>
-      <li><strong><code>composeMergeBaseTree({ commit, mappedParents: [A', B'], shaMapping, dc })</code></strong>
+      <li><strong><code>composeMergeBaseTree({ commit, mappedParents: [A', B'], syncedShaMap, dc })</code></strong>
         &rarr; <code>T<sub>merged</sub></code>.
         <ul>
           <li>Echo lookup: neither parent carries <code>dc.skipTrailerKey</code> &mdash; this is a
@@ -2065,7 +2065,7 @@ Out: { exitCode: 1,
       <li><code>appendTrailer(...)</code> &mdash; same as A.</li>
       <li><strong><code>git commit-tree tree -p A' -p B' -m msg</code></strong> &rarr;
         <code>M'</code> &mdash; same two-parent topology as M.</li>
-      <li><code>shaMapping.set(M.hash, M'.hash)</code>.</li>
+      <li><code>syncedShaMap.set(M.hash, M'.hash)</code>.</li>
     </ul>
   </li>
 </ul>
@@ -2103,7 +2103,7 @@ Out: { exitCode: 1,
                        X─ M       (M = "land shadow into main")
    echo'd:        E' ──┘
                        ↑
-                       shaMapping: E' → E (the original target-side commit)
+                       syncedShaMap: E' → E (the original target-side commit)
 
    result on target shadow:   P' ──┐
                                    X─ M'   (parents = [P', E])
@@ -2119,17 +2119,17 @@ Out: { exitCode: 1,
       <li><code>getCommitMeta(M.hash)</code> &mdash; same as A/B.</li>
       <li><code>hasTrailer(meta.trailers, dc.addTrailerKey)</code> &rarr; <code>false</code> &mdash;
         M itself isn&rsquo;t an echo (M was authored on the source side, <em>around</em> the echo).</li>
-      <li><strong><code>resolveTargetParents(M, shaMapping, targetInit)</code></strong> &rarr;
+      <li><strong><code>resolveTargetParents(M, syncedShaMap, targetInit)</code></strong> &rarr;
         <code>[P', E]</code>.
         <ul>
-          <li><code>shaMapping.get(P)</code> &rarr; <code>P'</code> (regular shadow lookup).</li>
-          <li><code>shaMapping.get(E')</code> &rarr; <code>E</code> &mdash; the echo&rsquo;s
+          <li><code>syncedShaMap.get(P)</code> &rarr; <code>P'</code> (regular shadow lookup).</li>
+          <li><code>syncedShaMap.get(E')</code> &rarr; <code>E</code> &mdash; the echo&rsquo;s
             <code>Shadow-replayed-&lt;pair&gt;-&lt;target-remote&gt;</code> trailer was loaded into
-            <code>shaMapping</code> by the common-setup step, so <code>E'</code> maps back to its
+            <code>syncedShaMap</code> by the common-setup step, so <code>E'</code> maps back to its
             original target-side commit <code>E</code>.</li>
         </ul>
       </li>
-      <li><strong><code>composeMergeBaseTree({ commit, mappedParents, shaMapping, dc })</code></strong>
+      <li><strong><code>composeMergeBaseTree({ commit, mappedParents, syncedShaMap, dc })</code></strong>
         &rarr; composed tree via the echo-splice branch.
         <ul>
           <li>iterates <code>commit.parents</code> looking for <code>dc.skipTrailerKey</code>:
@@ -2137,7 +2137,7 @@ Out: { exitCode: 1,
               <li><code>getCommitMeta(E')</code> &mdash; called per parent; the inner
                 <code>hasTrailer(parentMeta.trailers, dc.skipTrailerKey)</code> hits true for
                 <code>E'</code>.</li>
-              <li><code>shaMapping.get(E')</code> &rarr; <code>E</code> &mdash; promotes this to
+              <li><code>syncedShaMap.get(E')</code> &rarr; <code>E</code> &mdash; promotes this to
                 <code>echoTargetSHA</code>; loop breaks.</li>
             </ul>
           </li>
@@ -2167,7 +2167,7 @@ Out: { exitCode: 1,
       <li><strong><code>git commit-tree tree -p P' -p E -m msg</code></strong> &rarr; <code>M'</code>
         &mdash; two-parent topology preserved, but the second parent is the original target commit
         rather than a shadow ref.</li>
-      <li><code>shaMapping.set(M.hash, M'.hash)</code>.</li>
+      <li><code>syncedShaMap.set(M.hash, M'.hash)</code>.</li>
     </ul>
   </li>
 </ul>
@@ -2213,7 +2213,7 @@ Out: { exitCode: 1,
     <ul>
       <li><code>getCommitMeta</code>, <code>hasTrailer</code>, <code>resolveTargetParents</code> &rarr;
         <code>[A', B']</code> &mdash; same as B.</li>
-      <li><strong><code>composeMergeBaseTree({ commit: M, mappedParents: [A', B'], shaMapping, dc })</code></strong>
+      <li><strong><code>composeMergeBaseTree({ commit: M, mappedParents: [A', B'], syncedShaMap, dc })</code></strong>
         &rarr; <code>null</code>.
         <ul>
           <li>Echo lookup: neither parent carries <code>dc.skipTrailerKey</code> &mdash; same as B.</li>
@@ -2255,7 +2255,7 @@ Out: { exitCode: 1,
     parents, the round-trip recipe, and (as alternative) the hand-built shell commands targeting
     <code>refs/heads/shadow/{pair}/{branch}</code>.</li>
   <li><strong><code>haltedSources.add(M.hash)</code></strong> &mdash; mark the source merge as
-    halted. M is NOT added to <code>shaMapping</code>, so later descendants either inherit the
+    halted. M is NOT added to <code>syncedShaMap</code>, so later descendants either inherit the
     halt (via the all-parents-halted check) or absorb it via the round-trip path (D2).</li>
   <li><strong><code>haltReasons.set(M.hash, &hellip;)</code></strong> &mdash; store
     <code>mappedParents</code> (used by <code>resolveHaltAwareParents</code> when an escaping
@@ -2283,7 +2283,7 @@ Out: { exitCode: 1,
   <li><em>next CI cycle (<code>--from b</code>):</em>
     <ul>
       <li><code>filterNotReplayedCommits</code> picks up <code>Mm'_on_source</code>&rsquo;s skip
-        trailer, records <code>shaMapping[Mm'_on_source] = Mm</code>, and filters it out of the
+        trailer, records <code>syncedShaMap[Mm'_on_source] = Mm</code>, and filters it out of the
         work list. <code>R_be</code> stays in the work list (no trailer of its own yet).</li>
       <li>the replay loop reaches <code>R_be</code>. Its parents are <code>[Bm, Mm'_on_source]</code>.
         Not all halted+unmapped (Mm'_on_source is mapped) &rarr; proceed.</li>
@@ -2301,13 +2301,13 @@ Out: { exitCode: 1,
       <li><strong><code>buildReplayedTree</code></strong> applies <code>R_be</code>&rsquo;s
         small source-diff vs first parent on top of the composed tree (typically a no-op
         because <code>R_be</code>&rsquo;s tree is the operator&rsquo;s merge result already).</li>
-      <li><strong><code>collectAbsorbedHalted(R_be, haltedSources, shaMapping)</code></strong>
+      <li><strong><code>collectAbsorbedHalted(R_be, haltedSources, syncedShaMap)</code></strong>
         &rarr; <code>[Bm]</code> (and any other halted ancestors reachable through
         <code>R_be</code>&rsquo;s parents).</li>
       <li><strong><code>git commit-tree tree -p A' -p B' -p Mm -m msg</code></strong> &rarr;
         <code>sq</code>. Message: <code>R_be</code>&rsquo;s original message + one
         <code>Shadow-replayed-&lt;key&gt;: R_be</code> trailer + one per absorbed SHA.</li>
-      <li><code>shaMapping.set(R_be, sq); shaMapping.set(Bm, sq); haltedSources.delete(Bm)</code>
+      <li><code>syncedShaMap.set(R_be, sq); syncedShaMap.set(Bm, sq); haltedSources.delete(Bm)</code>
         &mdash; <code>Bm</code> is now mapped via <code>sq</code>&rsquo;s extra trailer; next
         sync runs <code>loadReplayedMappings</code> picks it up and skips it.</li>
     </ul>
@@ -2323,7 +2323,7 @@ Out: { exitCode: 1,
     <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;: M.hash</code> in the message
     body. Push.</li>
   <li>on the next sync, <code>loadReplayedMappings</code> (common setup) picks up that trailer,
-    places M into <code>shaMapping</code>, and <code>filterNotReplayedCommits</code> drops M
+    places M into <code>syncedShaMap</code>, and <code>filterNotReplayedCommits</code> drops M
     from the work list. Sync proceeds without revisiting the halt.</li>
 </ul>
 

@@ -185,7 +185,7 @@ function _runSyncCore(options: SyncOptions): number {
       } else if (options.skipTags) {
         console.log(`\nSkipping tag sync (--skip-tags).`);
       } else {
-        const tagRes = syncTags({ source, target, shaMapping: result.shaMapping });
+        const tagRes = syncTags({ source, target, syncedShaMap: result.syncedShaMap });
         if (tagRes.failed > 0) {
           console.error(`  ✘ ${tagRes.failed} tag push(es) failed on ${pair.name}.`);
           failed++;
@@ -224,7 +224,7 @@ function _runSyncCore(options: SyncOptions): number {
 
 /**
  * Push each branch's replayed tip to its shadow ref on the target remote.
- * Fast-forward only (C6): a divergent target tip with the SAME tree is left in
+ * Fast-forward only: a divergent target tip with the SAME tree is left in
  * place (residual sibling-merge case --full-history doesn't cover); a
  * different tree is reported as a failure — that only happens after a source
  * rewrite or a manual shadow-ref edit, both against policy. A failed branch

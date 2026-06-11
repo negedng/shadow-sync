@@ -165,7 +165,7 @@ function validatePair(pair: SyncPair): void {
   }
   // Only exact-duplicate source/target dirs within a side are ambiguous —
   // nested dirs (e.g. "" + "src/common") route deterministically via
-  // longest-prefix in buildReplayedTree.
+  // longest-prefix in routeSourcePath.
   const aDirs = new Set<string>();
   const bDirs = new Set<string>();
   for (const m of pair.mappings) {
@@ -346,7 +346,7 @@ function filterExistingRefs(refs: string[]): string[] {
     ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
     { safe: true },
   );
-  // Fail loud: an empty result here silently empties shaMapping downstream.
+  // Fail loud: an empty result here silently empties syncedShaMap downstream.
   if (!result.ok) fail(`for-each-ref failed: ${result.stderr}`);
   if (!result.stdout) return [];
   const existing = new Set(
@@ -490,7 +490,7 @@ function sanitizeTrailerToken(s: string): string {
 }
 
 // Pair name included so two pairs sharing a source remote get distinct
-// trailers — otherwise cross-pair merges pollute shaMapping with the sibling
+// trailers — otherwise cross-pair merges pollute syncedShaMap with the sibling
 // pair's (wrong-shape) replays.
 function replayedTrailerKey(pairName: string, remote: string): string {
   return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(`${pairName}-${remote}`)}`;
@@ -897,26 +897,26 @@ function dropNonLoadBearingCommits(
 function addEchoMappings(
   sourceCommits: TopoCommit[],
   dc: DirectionConfig,
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
 ): void {
-  const skipKey = targetTrailerKey(dc);
-  const skipRe = targetTrailerRegex(dc);
-  const pending = sourceCommits.filter(c => !shaMapping.has(c.hash)).map(c => c.hash);
+  const echoKey = targetTrailerKey(dc);
+  const echoRe = targetTrailerRegex(dc);
+  const pending = sourceCommits.filter(c => !syncedShaMap.has(c.hash)).map(c => c.hash);
   if (pending.length === 0) return;
 
   const trailersByHash = fetchTrailersBatch(pending);
   const candidates: Array<{ hash: string; target: string }> = [];
   for (const hash of pending) {
     const trailers = trailersByHash.get(hash) ?? "";
-    if (!hasTrailer(trailers, skipKey)) continue;
-    const target = matchOriginalHash(trailers, skipRe);
+    if (!hasTrailer(trailers, echoKey)) continue;
+    const target = matchOriginalHash(trailers, echoRe);
     if (target) candidates.push({ hash, target });
   }
   if (candidates.length === 0) return;
 
   const present = batchObjectsExist(candidates.map(c => c.target));
   for (const { hash, target } of candidates) {
-    if (present.has(target)) shaMapping.set(hash, target);
+    if (present.has(target)) syncedShaMap.set(hash, target);
   }
 }
 
@@ -929,11 +929,11 @@ function computeSettledCommits(
   graph: SourceGraph,
   branches: string[],
   dc: DirectionConfig,
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
   absorbedMap: AbsorbedMap,
 ): Set<string> {
   const settled = new Set<string>();
-  if (shaMapping.size === 0 && absorbedMap.size === 0) return settled;
+  if (syncedShaMap.size === 0 && absorbedMap.size === 0) return settled;
 
   const refs = branches.map(b => `refs/remotes/${dc.source.remote}/${b}`);
   const res = git(["for-each-ref", "--format=%(objectname)", ...refs], { safe: true });
@@ -944,7 +944,7 @@ function computeSettledCommits(
   const frontier: string[] = [];
   for (const tip of tips) {
     let h: string | undefined = tip;
-    while (h && !shaMapping.has(h) && !absorbedMap.has(h)) h = graphParentsOf(graph, h)[0];
+    while (h && !syncedShaMap.has(h) && !absorbedMap.has(h)) h = graphParentsOf(graph, h)[0];
     if (h) frontier.push(h);
   }
 
@@ -1006,7 +1006,7 @@ function readShadowIgnorePatterns(
 
 // Compile a single .shadowignore line per gitignore semantics, translated
 // from `ignoreDir`-relative paths into `sourceDir`-relative paths (the space
-// matched by effectiveSourceTree / buildReplayedTree).
+// matched by routeSourcePath / filterTreeByIgnore).
 //
 // Returns null if the pattern targets a sibling subtree outside sourceDir.
 // Negation (`!pattern`) is not supported and silently dropped.
@@ -1305,16 +1305,16 @@ function reconcileOuter(mappedParents: string[], dc: DirectionConfig): ComposeRe
 function resolveEcho(
   commit: TopoCommit,
   mappedParents: string[],
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
   dc: DirectionConfig,
   shadowIgnoreBySourceIdx: RegExp[][],
 ): ComposeResult | "not-an-echo" {
-  const skipKey = targetTrailerKey(dc);
+  const echoKey = targetTrailerKey(dc);
   const echoTargets: string[] = [];
   for (const sourceParent of commit.parents) {
     const parentMeta = getCommitMeta(sourceParent);
-    if (hasTrailer(parentMeta.trailers, skipKey)) {
-      const mapped = shaMapping.get(sourceParent);
+    if (hasTrailer(parentMeta.trailers, echoKey)) {
+      const mapped = syncedShaMap.get(sourceParent);
       if (mapped) echoTargets.push(mapped);
     }
   }
@@ -1339,30 +1339,29 @@ function resolveEcho(
 }
 
 /**
- * Build the base tree for replaying `commit` onto `mappedParents`.
- * buildReplayedTree overlays diff(firstParent → commit) as an ABSOLUTE apply,
- * so the base must already equal the commit's content wherever that diff is
- * silent. The invariant: the base's inner is the FIRST PARENT's inner (any
- * other inner — e.g. auto-merged — silently survives where the diff is empty,
- * dropping resolutions that re-assert the first parent), and cross-repo the
- * outer is the reconciled outer. The lone exception is an echo round-trip,
- * where the inner is the commit's own resolved source (resolveEcho).
+ * Base tree for replaying `commit` onto `mappedParents`. Invariant: inner =
+ * the FIRST PARENT's inner, outer = the reconciled outer; the one exception
+ * is an echo round-trip, where resolveEcho splices the commit's own resolved
+ * source. Why first parent: buildReplayedTree overlays diff(firstParent →
+ * commit) as an ABSOLUTE apply, so any other inner (e.g. auto-merged)
+ * silently survives where the diff is empty, dropping resolutions that
+ * re-assert the first parent.
  */
 function composeMergeBaseTree(opts: {
   commit: TopoCommit;
   mappedParents: string[];
-  shaMapping: Map<string, string>;
+  syncedShaMap: Map<string, string>;
   dc: DirectionConfig;
   shadowIgnoreBySourceIdx: RegExp[][];
 }): ComposeResult {
-  const { commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx } = opts;
+  const { commit, mappedParents, syncedShaMap, dc, shadowIgnoreBySourceIdx } = opts;
   const commitShort = commit.hash.slice(0, 8);
   const confined = allTargetsConfined(dc);
 
   // Echo splice runs first, regardless of confinement: an unmapped source
   // parent resolves to targetInit, whose stale outer would otherwise leak
   // through the first-parent shortcuts below verbatim.
-  const echo = resolveEcho(commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx);
+  const echo = resolveEcho(commit, mappedParents, syncedShaMap, dc, shadowIgnoreBySourceIdx);
   if (echo !== "not-an-echo") return echo;
 
   // 1 parent: outer can't have diverged; inner is that parent's. (fast path)
@@ -1383,13 +1382,13 @@ function composeMergeBaseTree(opts: {
 
 
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
-function findEchoAnchor(parentHash: string, shaMapping: Map<string, string>): string | null {
+function findEchoAnchor(parentHash: string, syncedShaMap: Map<string, string>): string | null {
   const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
   if (!result.ok) fail(`Ancestry walk failed for ${parentHash}: ${result.stderr}`);
   for (const line of result.stdout.split("\n")) {
     const hash = line.trim();
     if (!hash) continue;
-    const mapped = shaMapping.get(hash);
+    const mapped = syncedShaMap.get(hash);
     if (mapped) return mapped;
   }
   return null;
@@ -1411,7 +1410,7 @@ interface ResolvedParents {
 
 /**
  * Find target side parent from source side hash:
- * 1. parent recorded in shaMapping (direct replay)
+ * 1. parent recorded in syncedShaMap (direct replay)
  * 2. parent is in a Halt state (substitute its anchors)
  * 3. parent squash-absorbed: its squash stands in only if this commit
  *    descends from the absorber; foreign lineages halt instead
@@ -1419,7 +1418,7 @@ interface ResolvedParents {
  */
 function resolveHaltAwareParents(
   commit: TopoCommit,
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
   absorbedMap: AbsorbedMap,
   targetInit: string | null,
   haltedSources: Set<string>,
@@ -1438,8 +1437,8 @@ function resolveHaltAwareParents(
       ? haltRecords.get(parentHash)?.anchorCommits
       : undefined;
     const absorbedEntries = absorbedMap.get(parentHash);
-    if (shaMapping.has(parentHash)) {
-      pushUnique(shaMapping.get(parentHash));
+    if (syncedShaMap.has(parentHash)) {
+      pushUnique(syncedShaMap.get(parentHash));
     } else if (haltAnchors && haltAnchors.length > 0) {
       for (const ac of haltAnchors) pushUnique(ac);
     } else if (absorbedEntries && absorbedEntries.length > 0) {
@@ -1450,7 +1449,7 @@ function resolveHaltAwareParents(
       pushUnique(valid.target);
     } else {
       // not mapped, and either not halted or halted without anchors
-      pushUnique(findEchoAnchor(parentHash, shaMapping) ?? targetInit);
+      pushUnique(findEchoAnchor(parentHash, syncedShaMap) ?? targetInit);
     }
   }
   return { parents };
@@ -1463,7 +1462,7 @@ function resolveHaltAwareParents(
 function collectAbsorbedHalted(
   commit: TopoCommit,
   haltedSources: Set<string>,
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
   graph: SourceGraph,
 ): string[] {
   const absorbed = new Set<string>();
@@ -1471,7 +1470,7 @@ function collectAbsorbedHalted(
   const stack = [...commit.parents];
   while (stack.length) {
     const p = stack.pop()!;
-    if (seen.has(p) || shaMapping.has(p)) continue;
+    if (seen.has(p) || syncedShaMap.has(p)) continue;
     seen.add(p);
     if (!haltedSources.has(p)) continue;
     absorbed.add(p);
@@ -1496,10 +1495,10 @@ function loadReplayedMappings(opts: {
   if (shadowRefs.length === 0) {
     return { direct: new Map(), absorbed: new Map() };
   }
-  const addKey = sourceTrailerKey(dc);
+  const replayedKey = sourceTrailerKey(dc);
   return extractTrailerMappings(
-    ["log", ...shadowRefs, `--grep=^${addKey}`],
-    addKey,
+    ["log", ...shadowRefs, `--grep=^${replayedKey}`],
+    replayedKey,
     absorbedTrailerKey(dc),
   );
 }
@@ -1522,7 +1521,7 @@ function flattenMappings(direct: Map<string, string>, absorbed: AbsorbedMap): Ma
 function mapBranchesToTargetTips(
   remote: string,
   branches: string[],
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
   absorbedMap: AbsorbedMap,
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
@@ -1534,7 +1533,7 @@ function mapBranchesToTargetTips(
     const hashes = log.stdout.split("\n").map(l => l.trim()).filter(Boolean);
     const tip = hashes[0];
     for (const hash of hashes) {
-      const replayed = shaMapping.get(hash)
+      const replayed = syncedShaMap.get(hash)
         ?? absorbedMap.get(hash)?.find(e => isSourceAncestor(e.absorber, tip))?.target;
       if (replayed) {
         branchMapping.set(branch, replayed);
@@ -1583,14 +1582,7 @@ function formatHaltDiagnostic(opts: {
   const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
 
-  const failure =
-    cause === "outer-divergence"
-      ? (mappedParents.length === 2
-        ? `merge-tree conflict between mapped parents on ${target.remote}`
-        : `octopus merge with ${mappedParents.length} mapped parents on ${target.remote} (no auto-resolution)`)
-      : cause === "multi-echo-disagreement"
-        ? "multiple already-replayed (echo) parents disagree on outer state"
-        : "a required parent tree or mapped subdirectory was absent during base-tree composition";
+  const failure = HALT_CAUSES[cause].failure(mappedParents, target.remote);
 
   // outer-divergence and multi-echo-disagreement are both outer-state
   // disagreements the operator resolves the same way (round-trip), so they
@@ -1700,13 +1692,25 @@ interface ReplayHalts {
   haltRecords: Map<string, HaltRecord>;
 }
 
-/**
- * Halt causes (select the operator diagnostic in formatHaltDiagnostic):
- *   outer-divergence        — mapped parents of a real merge disagree on outer.
- *   multi-echo-disagreement — several echo parents disagree on outer.
- *   missing-tree            — a required parent tree or mapped subdir was absent.
- */
-type ComposeHaltCause = "outer-divergence" | "multi-echo-disagreement" | "missing-tree";
+// Operator text per halt cause: `summary` for the one-line log, `failure` for
+// the diagnostic's "Failure:" line.
+const HALT_CAUSES = {
+  "outer-divergence": {
+    summary: "outer-state divergence between mapped parents",
+    failure: (parents: string[], remote: string) => parents.length === 2
+      ? `merge-tree conflict between mapped parents on ${remote}`
+      : `octopus merge with ${parents.length} mapped parents on ${remote} (no auto-resolution)`,
+  },
+  "multi-echo-disagreement": {
+    summary: "already-replayed parents disagree on outer state",
+    failure: () => "multiple already-replayed (echo) parents disagree on outer state",
+  },
+  "missing-tree": {
+    summary: "a required parent tree or mapped subdirectory was absent",
+    failure: () => "a required parent tree or mapped subdirectory was absent during base-tree composition",
+  },
+};
+type ComposeHaltCause = keyof typeof HALT_CAUSES;
 interface ComposeHalt { halt: ComposeHaltCause; }
 type ComposeResult = { tree: string } | ComposeHalt;
 
@@ -1719,10 +1723,10 @@ function isHalt(r: ComposeResult): r is ComposeHalt {
 function isHaltPropagated(
   commit: TopoCommit,
   haltedSources: Set<string>,
-  shaMapping: Map<string, string>,
+  syncedShaMap: Map<string, string>,
 ): boolean {
   if (commit.parents.length === 0) return false;
-  return commit.parents.every(p => haltedSources.has(p) && !shaMapping.has(p));
+  return commit.parents.every(p => haltedSources.has(p) && !syncedShaMap.has(p));
 }
 
 /**
@@ -1775,11 +1779,7 @@ function haltCommit(opts: {
     commitShort: meta.short,
     rootHalt: commit.hash,
   });
-  const summary =
-    cause === "outer-divergence" ? "outer-state divergence between mapped parents"
-      : cause === "multi-echo-disagreement" ? "already-replayed parents disagree on outer state"
-        : "a required parent tree or mapped subdirectory was absent";
-  console.log(`  ⚠ Halted on ${meta.short}: ${summary}.`);
+  console.log(`  ⚠ Halted on ${meta.short}: ${HALT_CAUSES[cause].summary}.`);
 }
 
 /**
@@ -1858,25 +1858,25 @@ function haltAbsorbedElsewhere(opts: {
 // ── Mirror orchestration ──────────────────────────────────────────────────────
 
 /**
- * Replay newCommits in topo order, mutating `shaMapping` so each replay is
+ * Replay newCommits in topo order, mutating `syncedShaMap` so each replay is
  * visible to later parent resolution in the same batch.
  *
- * Halt semantics: a halted commit goes into `haltedSources`, NOT `shaMapping`.
+ * Halt semantics: a halted commit goes into `haltedSources`, NOT `syncedShaMap`.
  * Commits whose parents are ALL halted+unmapped halt in turn; a commit with
  * at least one mapped parent replays normally and absorbs reachable halted
  * ancestors as extra trailers (already-replayed on the next run).
  */
 function replayCommits(opts: {
   newCommits: TopoCommit[];
-  shaMapping: Map<string, string>;
+  syncedShaMap: Map<string, string>;
   absorbedMap: AbsorbedMap;
   targetInit: string | null;
   dc: DirectionConfig;
   graph: SourceGraph;
 }): ReplayHalts {
-  const { newCommits, shaMapping, absorbedMap, targetInit, dc, graph } = opts;
-  const addKey = sourceTrailerKey(dc);
-  const absKey = absorbedTrailerKey(dc);
+  const { newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph } = opts;
+  const replayedKey = sourceTrailerKey(dc);
+  const absorbedKey = absorbedTrailerKey(dc);
 
   const haltedSources = new Set<string>();
   const haltRecords = new Map<string, HaltRecord>();
@@ -1891,13 +1891,13 @@ function replayCommits(opts: {
       if (!verbose) logDecileProgress("Replayed", idx, total);
       const meta = getCommitMeta(commit.hash);
 
-      if (isHaltPropagated(commit, haltedSources, shaMapping)) {
+      if (isHaltPropagated(commit, haltedSources, syncedShaMap)) {
         markPropagatedHalt(commit, meta, haltedSources, haltRecords);
         continue;
       }
 
       // Carries our own trailer → forwarded earlier and merged back; record only.
-      const isEcho = hasTrailer(meta.trailers, addKey);
+      const isEcho = hasTrailer(meta.trailers, replayedKey);
 
       if (verbose) {
         if (isEcho) {
@@ -1913,7 +1913,7 @@ function replayCommits(opts: {
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
-      const resolved = resolveHaltAwareParents(commit, shaMapping, absorbedMap, targetInit, haltedSources, haltRecords);
+      const resolved = resolveHaltAwareParents(commit, syncedShaMap, absorbedMap, targetInit, haltedSources, haltRecords);
       if (resolved.foreignAbsorbed) {
         haltAbsorbedElsewhere({ commit, meta, foreign: resolved.foreignAbsorbed, dc, haltedSources, haltRecords });
         continue;
@@ -1932,7 +1932,7 @@ function replayCommits(opts: {
         // Source root with no targetInit — buildReplayedTree handles null via read-tree --empty.
         parentTree = null;
       } else {
-        const composed = composeMergeBaseTree({ commit, mappedParents, shaMapping, dc, shadowIgnoreBySourceIdx });
+        const composed = composeMergeBaseTree({ commit, mappedParents, syncedShaMap, dc, shadowIgnoreBySourceIdx });
         if (isHalt(composed)) {
           // No compose path produced a defensible tree. Halt the branch (other
           // branches in this call keep flowing); the diagnostic surfaces via
@@ -1962,13 +1962,13 @@ function replayCommits(opts: {
         continue;
       }
 
-      const absorbed = collectAbsorbedHalted(commit, haltedSources, shaMapping, graph);
+      const absorbed = collectAbsorbedHalted(commit, haltedSources, syncedShaMap, graph);
 
       let msg = isEcho
-        ? appendTrailer(stripReplayedTrailers(meta.message), `${addKey}: ${commit.hash}`)
-        : appendTrailer(meta.message, `${addKey}: ${commit.hash}`);
+        ? appendTrailer(stripReplayedTrailers(meta.message), `${replayedKey}: ${commit.hash}`)
+        : appendTrailer(meta.message, `${replayedKey}: ${commit.hash}`);
       for (const sha of absorbed) {
-        msg = appendTrailer(msg, `${absKey}: ${sha}`);
+        msg = appendTrailer(msg, `${absorbedKey}: ${sha}`);
       }
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
@@ -1977,7 +1977,7 @@ function replayCommits(opts: {
         env: buildCommitEnv(meta), input: msg,
       });
 
-      shaMapping.set(commit.hash, newSHA);
+      syncedShaMap.set(commit.hash, newSHA);
       for (const sha of absorbed) {
         // Scoped, not direct: the squash stands in for the absorbed commit
         // only on lineages containing this commit (the absorber). Stranded
@@ -2007,17 +2007,17 @@ export function mirrorHistory(opts: {
 }): {
   mirrored: number;
   branchMapping: Map<string, string>;
-  shaMapping: Map<string, string>;
+  syncedShaMap: Map<string, string>;
   upToDate: boolean;
   haltedBranches: HaltedBranch[];
 } {
   const { pair, from, branches } = opts;
   const dc = buildDirectionConfig(pair, from);
 
-// One in-memory source graph (two batched git calls)
+  // One in-memory source graph (two batched git calls).
   const graph = collectSourceGraph(dc, branches);
   const sourceCommits = deriveSourceCommits(graph);
-  
+
   console.log("Scanning history for already-replayed commits...");
   // Synced: already replayed (source origin) + echo (target origin) with trailer
   const { direct: syncedShaMap, absorbed: absorbedMap } = loadReplayedMappings({ branches, dc });
@@ -2039,7 +2039,7 @@ export function mirrorHistory(opts: {
     return {
       mirrored: 0,
       branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
-      shaMapping: flattenMappings(syncedShaMap, absorbedMap),
+      syncedShaMap: flattenMappings(syncedShaMap, absorbedMap),
       upToDate: true,
       haltedBranches: [],
     };
@@ -2047,7 +2047,7 @@ export function mirrorHistory(opts: {
 
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
 
-  // Fallback root for orphan parents (see resolveTargetParents).
+  // Fallback root for orphan parents (see resolveHaltAwareParents).
   const anchorBranch = dc.target.anchorBranch ?? "main";
   let targetInit: string | null = null;
   if (refExists(`${dc.target.remote}/${anchorBranch}`)) {
@@ -2058,39 +2058,35 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltRecords } = replayCommits({ newCommits: newCommits, shaMapping: syncedShaMap, absorbedMap, targetInit, dc, graph });
+  const { haltedSources, haltRecords } = replayCommits({ newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph });
 
   // Surface ORIGINAL halts (diagnostic present). Stranded propagated commits
   // whose root halt was squash-absorbed on another lineage get a promoted
   // diagnostic — one per root halt, not one per stranded commit.
   const haltedBranches: HaltedBranch[] = [];
   const surfacedRoots = new Set<string>();
-  for (const [sha, record] of haltRecords) {
-    if (!record.diagnostic) continue;
-    if (record.rootHalt) surfacedRoots.add(record.rootHalt);
+  const surface = (sha: string, record: HaltRecord, diagnostic: string) =>
     haltedBranches.push({
       branch: inferSourceBranch(sha, dc.source.remote),
       commitSha: sha,
       commitShort: record.commitShort,
       mappedParents: record.anchorCommits,
-      diagnostic: record.diagnostic,
+      diagnostic,
     });
+  for (const [sha, record] of haltRecords) {
+    if (!record.diagnostic) continue;
+    if (record.rootHalt) surfacedRoots.add(record.rootHalt);
+    surface(sha, record, record.diagnostic);
   }
   for (const [sha, record] of haltRecords) {
     if (record.diagnostic || !record.rootHalt || surfacedRoots.has(record.rootHalt)) continue;
     const entries = absorbedMap.get(record.rootHalt);
     if (!entries || entries.length === 0) continue; // root still pending — it surfaces itself above
     surfacedRoots.add(record.rootHalt);
-    haltedBranches.push({
-      branch: inferSourceBranch(sha, dc.source.remote),
-      commitSha: sha,
-      commitShort: record.commitShort,
-      mappedParents: record.anchorCommits,
-      diagnostic: formatAbsorbedElsewhereDiagnostic({
-        commitSha: sha, commitShort: record.commitShort,
-        absorbedAncestor: record.rootHalt, entries, dc,
-      }),
-    });
+    surface(sha, record, formatAbsorbedElsewhereDiagnostic({
+      commitSha: sha, commitShort: record.commitShort,
+      absorbedAncestor: record.rootHalt, entries, dc,
+    }));
   }
 
   console.log();
@@ -2104,7 +2100,7 @@ export function mirrorHistory(opts: {
   return {
     mirrored: replayedCount,
     branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
-    shaMapping: flattenMappings(syncedShaMap, absorbedMap),
+    syncedShaMap: flattenMappings(syncedShaMap, absorbedMap),
     upToDate: false,
     haltedBranches,
   };
@@ -2117,14 +2113,14 @@ export function mirrorHistory(opts: {
  * commit. Annotated tags get a fresh tag object (same name, tagger, message;
  * new `object` line). Lightweight tags become `refs/tags/<name>` pointing
  * directly at the replay. Tags whose source commit was dropped (no entry in
- * shaMapping) are skipped — there's no target SHA to point at.
+ * syncedShaMap) are skipped — there's no target SHA to point at.
  */
 export function syncTags(opts: {
   source: RepoEndpoint;
   target: RepoEndpoint;
-  shaMapping: Map<string, string>;
+  syncedShaMap: Map<string, string>;
 }): { pushed: number; skipped: number; upToDate: number; failed: number } {
-  const { source, target, shaMapping } = opts;
+  const { source, target, syncedShaMap } = opts;
 
   // --force: plain --tags refuses to move an existing local tag, so a source
   // re-tag would otherwise never propagate (and with multiple pairs fetching
@@ -2172,7 +2168,7 @@ export function syncTags(opts: {
     const sourceCommit = peeledCommit || objectName;  // commit for both kinds; no spawn
     if (!sourceCommit) { skipped++; continue; }
 
-    const targetCommit = shaMapping.get(sourceCommit);
+    const targetCommit = syncedShaMap.get(sourceCommit);
     if (!targetCommit) {
       // Expected (tag on an unreplayed commit); don't log — can be thousands.
       skipped++;
