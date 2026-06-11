@@ -7,6 +7,9 @@
  *   B. migration — rename existing shadow refs on every remote, flip the
  *      config, and nothing breaks: no re-replay, dedup intact, incremental
  *      syncs continue on the new names
+ *   B2. migration with work in flight — unsynced commits on both sides at
+ *      the moment of the rename; the first sync after the flip must load
+ *      mappings from the renamed refs and replay exactly the pending delta
  *   C. validation — overlapping/nesting namespaces and bad prefix shapes
  *      are rejected before any module state changes
  */
@@ -135,6 +138,54 @@ function runMigration(): void {
   }
 }
 
+// ── B2. migration with work in flight: pending commits on both sides ────────
+function runMigrationInFlight(): void {
+  const env = createTestEnv("prefix-migration-inflight", "frontend");
+  try {
+    // Settle one round in both directions under the default scheme.
+    commitOnRemote(env, { "file.ts": "v1\n" }, "Add file v1");
+    assertEqual(runCiSync(env).status, 0, "[in-flight] initial ci-sync should succeed");
+    mergeShadow(env);
+    commitOnLocal(env, { "local.ts": "local v1\n" }, "Add local file");
+    assertEqual(runPush(env).status, 0, "[in-flight] initial push should succeed");
+
+    git("fetch origin", env.localRepo);
+    git("fetch team", env.localRepo);
+    const originCount = Number(git("rev-list --count origin/shadow/frontend/main", env.localRepo));
+    const teamCount = Number(git("rev-list --count team/shadow/frontend/main", env.localRepo));
+
+    // Work lands on BOTH sides, then the rename happens with it unsynced.
+    commitOnRemote(env, { "file.ts": "v2 pending\n" }, "Update file while migrating");
+    commitOnLocal(env, { "local.ts": "local v2 pending\n" }, "Update local while migrating");
+
+    git("branch -m shadow/frontend/main sf/main", env.originBare);
+    git("branch -m shadow/frontend/main sf/main", env.remoteBare);
+    git("fetch --prune origin", env.localRepo);
+    git("fetch --prune team", env.localRepo);
+    env.remotes[0].shadowPrefix = "sf";
+
+    // First sync after the flip must find the trailer mappings under the new
+    // names and replay ONLY the pending commit in each direction.
+    assertEqual(runCiSync(env).status, 0, "[in-flight] import should succeed");
+    assertEqual(readShadowFile(env, "file.ts"), "v2 pending\n", "[in-flight] pending remote commit lands on sf/main");
+    git("fetch origin", env.localRepo);
+    assertEqual(
+      Number(git("rev-list --count origin/sf/main", env.localRepo)), originCount + 1,
+      "[in-flight] import replayed exactly the pending commit — no re-replay",
+    );
+
+    assertEqual(runPush(env).status, 0, "[in-flight] export should succeed");
+    assertEqual(readExternalShadowFile(env, "local.ts"), "local v2 pending\n", "[in-flight] pending local commit lands on team sf/main");
+    git("fetch team", env.localRepo);
+    assertEqual(
+      Number(git("rev-list --count team/sf/main", env.localRepo)), teamCount + 1,
+      "[in-flight] export replayed exactly the pending commit — no re-replay",
+    );
+  } finally {
+    env.cleanup();
+  }
+}
+
 // ── C. validation: bad prefixes rejected before state changes ────────────────
 function runValidation(repoRoot: string): void {
   const pairAt = (name: string, shadowPrefix?: string) => ({
@@ -168,6 +219,7 @@ export default function run(): void {
   try {
     runCustomPrefix();
     runMigration();
+    runMigrationInFlight();
   } finally {
     setTestBranchAllowlist();
   }
