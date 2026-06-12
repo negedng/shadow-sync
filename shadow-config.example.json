@@ -10,6 +10,13 @@
     }
   ],
 
+  "identities": [
+    {
+      "repo-a": { "name": "X Mono",     "email": "x@corp.example.com" },
+      "repo-b": { "name": "X External", "email": "x@gmail.example.com" }
+    }
+  ],
+
   "trailers": {
     "replayed": "Shadow-replayed"
   },

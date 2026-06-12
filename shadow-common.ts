@@ -53,8 +53,20 @@ export interface SyncPair {
   mappings: DirMapping[];
 }
 
+/** A person's identity on one remote. Replay matches by email (case-insensitive). */
+export interface RepoIdentity {
+  name: string;
+  email: string;
+}
+
+/** One person across remotes: remote name → their identity on that remote.
+ *  Replaying from remote S to remote T rewrites author/committer matching the
+ *  S binding to the T binding; anyone without a matching entry passes through. */
+export type IdentityProfile = Record<string, RepoIdentity>;
+
 interface ShadowSyncConfig {
   pairs: SyncPair[];
+  identities: IdentityProfile[];
   trailers: { replayed: string; absorbed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
@@ -79,6 +91,7 @@ interface DirectionConfig {
    *  under this one's source/target dir. Indexed by mapping idx. */
   autoIgnoreBySourceIdx: RegExp[][];
   autoIgnoreByTargetIdx: RegExp[][];
+  identityByEmail: Map<string, RepoIdentity>;
 }
 
 // Patterns stripping `innerPath/...` from a tree rooted at `outerPath`, or
@@ -127,7 +140,19 @@ function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig 
   const autoByMapping = computeAutoIgnorePatterns(pair);
   const autoIgnoreBySourceIdx = autoByMapping.map(p => from === "a" ? p.a : p.b);
   const autoIgnoreByTargetIdx = autoByMapping.map(p => from === "a" ? p.b : p.a);
-  return { pair, source, target, mappings, mappingsByDepth, autoIgnoreBySourceIdx, autoIgnoreByTargetIdx };
+  const identityByEmail = buildIdentityMap(source.remote, target.remote);
+  return { pair, source, target, mappings, mappingsByDepth, autoIgnoreBySourceIdx, autoIgnoreByTargetIdx, identityByEmail };
+}
+
+/** Profiles binding both remotes contribute one source→target rewrite each. */
+function buildIdentityMap(sourceRemote: string, targetRemote: string): Map<string, RepoIdentity> {
+  const map = new Map<string, RepoIdentity>();
+  for (const profile of IDENTITIES) {
+    const src = profile[sourceRemote];
+    const tgt = profile[targetRemote];
+    if (src && tgt) map.set(src.email.toLowerCase(), tgt);
+  }
+  return map;
 }
 
 /**
@@ -193,6 +218,22 @@ function validatePairs(pairs: SyncPair[], globalPrefix: string): void {
   }
 }
 
+// Replays rewrite identities in both directions, so each remote's email must
+// belong to at most one profile — a duplicate makes the reverse lookup ambiguous.
+function validateIdentities(identities: IdentityProfile[]): void {
+  const emailsByRemote = new Map<string, Set<string>>();
+  for (const profile of identities) {
+    for (const [remote, id] of Object.entries(profile)) {
+      if (!id?.name || !id?.email) fail(`identities: binding for remote "${remote}" needs both name and email`);
+      const emails = emailsByRemote.get(remote) ?? new Set<string>();
+      const key = id.email.toLowerCase();
+      if (emails.has(key)) fail(`identities: duplicate email "${id.email}" for remote "${remote}"`);
+      emails.add(key);
+      emailsByRemote.set(remote, emails);
+    }
+  }
+}
+
 // All prefix matching and git pathspecs use forward slashes with no leading/
 // trailing slash; anything else silently matches nothing, so reject it here.
 function validateMappingDir(pairName: string, dir: string): void {
@@ -220,6 +261,7 @@ function loadConfig(): ShadowSyncConfig {
   if (!fs.existsSync(CONFIG_PATH)) {
     return {
       pairs: [],
+      identities: [],
       trailers: { replayed: "Shadow-replayed", absorbed: "Shadow-absorbed" },
       gitConfigOverrides: {},
       maxBuffer: 50 * 1024 * 1024,
@@ -239,13 +281,16 @@ function loadConfig(): ShadowSyncConfig {
 
   const pairs = (doc.pairs as SyncPair[]) ?? [];
   validatePairs(pairs, shadowBranchPrefix);
+  const identities = (doc.identities as IdentityProfile[]) ?? [];
+  validateIdentities(identities);
 
-  return { pairs, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
+  return { pairs, identities, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
 }
 
 const config = loadConfig();
 
 export const PAIRS: SyncPair[] = [...config.pairs];
+const IDENTITIES: IdentityProfile[] = [...config.identities];
 const REPLAYED_TRAILER = config.trailers.replayed;
 const ABSORBED_TRAILER = config.trailers.absorbed;
 let _shadowBranchPrefix = config.shadowBranchPrefix;
@@ -268,15 +313,20 @@ export function applyTestOverrides(opts: {
   repoRoot: string;
   pairs: SyncPair[];
   shadowBranchPrefix?: string;
+  identities?: IdentityProfile[];
 }): void {
   // Validate before mutating module state so a rejected override can't poison
   // a later in-process run.
   const prefix = opts.shadowBranchPrefix ?? _shadowBranchPrefix;
   validatePairs(opts.pairs, prefix);
+  const identities = opts.identities ?? config.identities;
+  validateIdentities(identities);
   _repoRoot = opts.repoRoot;
   _shadowBranchPrefix = prefix;
   PAIRS.length = 0;
   PAIRS.push(...opts.pairs);
+  IDENTITIES.length = 0;
+  IDENTITIES.push(...identities);
 }
 
 
@@ -721,13 +771,17 @@ function getCommitMeta(hash: string): CommitMeta {
   return meta;
 }
 
-function buildCommitEnv(meta: CommitMeta): Record<string, string> {
+function buildCommitEnv(meta: CommitMeta, identityByEmail: Map<string, RepoIdentity>): Record<string, string> {
+  const author = identityByEmail.get(meta.authorEmail.toLowerCase())
+    ?? { name: meta.authorName, email: meta.authorEmail };
+  const committer = identityByEmail.get(meta.committerEmail.toLowerCase())
+    ?? { name: meta.committerName, email: meta.committerEmail };
   return {
-    GIT_AUTHOR_NAME: meta.authorName,
-    GIT_AUTHOR_EMAIL: meta.authorEmail,
+    GIT_AUTHOR_NAME: author.name,
+    GIT_AUTHOR_EMAIL: author.email,
     GIT_AUTHOR_DATE: meta.authorDate,
-    GIT_COMMITTER_NAME: meta.committerName,
-    GIT_COMMITTER_EMAIL: meta.committerEmail,
+    GIT_COMMITTER_NAME: committer.name,
+    GIT_COMMITTER_EMAIL: committer.email,
     GIT_COMMITTER_DATE: meta.committerDate,
   };
 }
@@ -1974,7 +2028,7 @@ function replayCommits(opts: {
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
       // Message over stdin — a >32KB message as argv overflows CreateProcess on Windows.
       const newSHA = git(["commit-tree", tree, ...parentArgs], {
-        env: buildCommitEnv(meta), input: msg,
+        env: buildCommitEnv(meta, dc.identityByEmail), input: msg,
       });
 
       syncedShaMap.set(commit.hash, newSHA);

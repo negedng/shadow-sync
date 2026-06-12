@@ -18,6 +18,10 @@
  *   halt-recovery   — divergent merge halts the engine; operator-driven recovery via
  *                     Shadow-replayed-* trailer; squash absorbs Bm + Bn1 + Brec
  *
+ * Identity profiles run throughout: Bea (backend↔mono) and Mira (mono↔both
+ * leaves) replay under per-remote identities; Fred has no profile and passes
+ * through verbatim. Asserted on the Phase 1b and Phase 3 replays.
+ *
  * Companion files cover the same engine paths in narrower shapes:
  *   test-halt-recovery-variants.ts — 8 single-pair halt-recovery edge cases
  *   test-merges.ts F               — generic single-pair manual-merge-recovery
@@ -98,6 +102,10 @@ function assertParents(repo: Repo, sha: string, expected: string[], msg: string)
 
 function assertTip(repo: Repo, ref: string, expected: string, msg: string) {
   assertEqual(git(`rev-parse ${ref}`, repo.working), expected, msg);
+}
+
+function assertAuthor(repo: Repo, sha: string, expected: string, msg: string) {
+  assertEqual(git(`log -1 --format="%an <%ae>" ${sha}`, repo.working), expected, msg);
 }
 
 function refExists(repo: Repo, ref: string): boolean {
@@ -401,6 +409,18 @@ async function runScenario(): Promise<void> {
           ],
         },
       ],
+      // Bea and Mira carry per-remote identities; Fred is unmapped (pass-through).
+      identities: [
+        {
+          origin:  { name: "Bea Corp", email: "bea@corp.example.com" },
+          backend: { name: "Bea",      email: "bea@example.com" },
+        },
+        {
+          origin:   { name: "Mira",    email: "mira@example.com" },
+          backend:  { name: "Mira BE", email: "mira@be.example.com" },
+          frontend: { name: "Mira FE", email: "mira@fe.example.com" },
+        },
+      ],
       shadowBranchPrefix: "shadow",
     });
 
@@ -483,6 +503,13 @@ async function runScenario(): Promise<void> {
       "Bc1'_mono tree (outer=Mc0, be slice under backend/, common at root)");
     assertTreeContents(mono, Fc1_mono, monoTree(OUTER_MC0, EMPTY, FE_FC1_MONO, CM_V1),
       "Fc1'_mono tree (outer=Mc0, fe slice under frontend/, common at root)");
+
+    // Identity mapping on import: Bea's replay carries her mono profile;
+    // Fred has no profile and passes through verbatim.
+    assertAuthor(mono, Bc1_mono, "Bea Corp <bea@corp.example.com>",
+      "[Phase 1b] Bc1'_mono authored under Bea's mono identity");
+    assertAuthor(mono, Fc1_mono, "Fred <fred@example.com>",
+      "[Phase 1b] Fc1'_mono keeps Fred's identity (no profile)");
 
     // ── Phase 2: Bring both leaf shadows into mono's main (Mc1, Mc2) ────
     const Mc1 = mergeRef(mono, "origin/shadow/backend/main",  "Mc1");
@@ -592,6 +619,12 @@ async function runScenario(): Promise<void> {
     findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3bcfm, "Mc3bcfm'_fe");
     const Mc3fm_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3fm, "Mc3fm'_fe");
     const Mc3b_be  = findReplayOrFail(backend,  "origin/shadow/backend/main",  "origin", Mc3b,  "Mc3b'_be");
+
+    // Identity mapping on export: Mira's replays carry her per-leaf identities.
+    assertAuthor(backend, Mc3b_be, "Mira BE <mira@be.example.com>",
+      "[Phase 3] Mc3b'_be authored under Mira's backend identity");
+    assertAuthor(frontend, Mc3fm_fe, "Mira FE <mira@fe.example.com>",
+      "[Phase 3] Mc3fm'_fe authored under Mira's frontend identity");
 
     // ── Phase 4: Leaf integration (Bc3, Fc3) + --from b + tree-shape round-trip ──
     // Backend merges shadow/backend/main back into main; frontend mirrors.

@@ -56,7 +56,18 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 - `url` tells the tool how to reach the repo
 - An endpoint may set `"anchorBranch"` (default `"main"`) — the branch whose init commit anchors replayed orphan history on that side. Set it if the repo's mainline is `master`/`trunk`
 
-Optional top-level fields (see `shadow-config.example.json`): `trailers.replayed` (trailer key prefix), `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `shadowBranchPrefix`.
+Optional top-level fields (see `shadow-config.example.json`): `trailers.replayed` (trailer key prefix), `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `shadowBranchPrefix`, `identities`.
+
+A top-level `"identities"` list maps one person's git identity across remotes. Each entry binds a remote name to that person's `{ name, email }` on it; replaying a commit from remote S to remote T rewrites the author/committer whose email matches the S binding (case-insensitive) to the T binding. Dates, messages, and anyone without a matching entry pass through verbatim. Emails must be unique per remote across entries — the mapping runs in both directions, so a duplicate would make the reverse lookup ambiguous. Only commits replayed after the config lands are affected; existing shadow commits keep their recorded identity.
+
+```json
+"identities": [
+  {
+    "main-repo":     { "name": "X Mono",     "email": "x@corp.example.com" },
+    "backend-repo":  { "name": "X External", "email": "x@gmail.example.com" }
+  }
+]
+```
 
 A pair may set `"shadowPrefix"` to replace its whole `<prefix>/<name>` shadow namespace — e.g. `"shadowPrefix": "sb"` puts the pair's shadow refs at `sb/main` instead of `shadow/backend/main` (slashes are allowed: `"s/b"` works too). Prefixes must not collide or nest across pairs. To change it on a live deployment, first rename the existing shadow refs on **every** remote that holds them (the target side of each sync direction), run `git fetch --prune --all` in the orchestrator clone, then flip the config — done in that order, the next sync is a no-op and history continues incrementally. Flipping the config without renaming the refs makes the engine treat the deployment as un-synced and re-replay everything.
 

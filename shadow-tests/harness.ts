@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { runSync } from "../shadow-sync";
-import { applyTestOverrides, compileIgnorePattern, setBranchFiltersForTesting, SyncPair } from "../shadow-common";
+import { applyTestOverrides, compileIgnorePattern, IdentityProfile, setBranchFiltersForTesting, SyncPair } from "../shadow-common";
 
 export interface RemoteInfo {
   remoteName: string;
@@ -31,6 +31,8 @@ export interface TestEnv {
   mainBranch: string;
   /** All remotes registered in this env (including the primary one). */
   remotes: RemoteInfo[];
+  /** Identity profiles applied on every sync. Unset = no mapping. */
+  identities?: IdentityProfile[];
   cleanup: () => void;
 }
 
@@ -273,6 +275,7 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; 
     repoRoot: env.localRepo,
     pairs: buildPairs(env),
     shadowBranchPrefix: env.branchPrefix,
+    identities: env.identities,
   });
 
   const result = runSync({
