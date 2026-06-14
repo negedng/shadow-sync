@@ -28,7 +28,7 @@ export interface SyncOptions {
   from?: "a" | "b";
   branch?: string;
   dryRun?: boolean;
-  skipTags?: boolean;
+  tags?: boolean;
   stream?: boolean;
 }
 
@@ -180,10 +180,11 @@ function _runSyncCore(options: SyncOptions): number {
       }
 
       // Tags on the source side are recreated on the target at the replayed commit.
+      // Off by default; pass --tags to opt in.
       if (dryRun) {
         console.log(`\n[DRY RUN] Skipping tag sync.`);
-      } else if (options.skipTags) {
-        console.log(`\nSkipping tag sync (--skip-tags).`);
+      } else if (!options.tags) {
+        console.log(`\nSkipping tag sync (pass --tags to enable).`);
       } else {
         const tagRes = syncTags({ source, target, syncedShaMap: result.syncedShaMap });
         if (tagRes.failed > 0) {
@@ -315,7 +316,7 @@ const USAGE = `Usage: npx tsx shadow-sync.ts [options]
   -f, --from <a|b>     Which side's commits to replay (default: b)
   -b, --branch <name>  Sync only this branch (bypasses branch-filters.json)
   -n, --dry-run        Replay but push nothing
-      --skip-tags      Skip the tag sync phase
+      --tags           Also sync tags (off by default)
   -h, --help           Show this help`;
 
 if (require.main === module) {
@@ -328,7 +329,7 @@ if (require.main === module) {
         from:      { type: "string",  short: "f" },
         branch:    { type: "string",  short: "b" },
         "dry-run":   { type: "boolean", short: "n" },
-        "skip-tags": { type: "boolean" },
+        tags:        { type: "boolean" },
         help:        { type: "boolean", short: "h" },
       },
       strict: true,
@@ -348,7 +349,7 @@ if (require.main === module) {
     from: (values.from ?? "b") as "a" | "b",
     branch: values.branch as string | undefined,
     dryRun: (values["dry-run"] as boolean | undefined) ?? false,
-    skipTags: (values["skip-tags"] as boolean | undefined) ?? false,
+    tags: (values.tags as boolean | undefined) ?? false,
     stream: true,
   });
 

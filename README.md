@@ -223,7 +223,7 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 | `-f` / `--from` | Direction: `a` or `b` | `b` |
 | `-b` / `--branch` | Branch to sync (bypasses `branch-filters.json`) | All allowed branches |
 | `-n` / `--dry-run` | Replay but push nothing | off |
-| `--skip-tags` | Skip the tag sync phase | off |
+| `--tags` | Also run the tag sync phase | off |
 | `-h` / `--help` | Show usage | |
 
 ## Setup

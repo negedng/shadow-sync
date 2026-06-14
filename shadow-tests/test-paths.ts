@@ -82,7 +82,7 @@ function runPullPaths(env: ReturnType<typeof createTestEnv>): void {
     git('tag -a v1.0.0 -m "Version 1.0.0"', env.remoteWorking);
     git('tag v1.0.0-lw', env.remoteWorking);
     git("push origin main --tags", env.remoteWorking);
-    const r4 = runCiSync(env);
+    const r4 = runCiSync(env, { tags: true });
     assertEqual(r4.status, 0, "[paths 4: tag-sync] should succeed");
     assertEqual(readShadowFile(env, "release.ts"), "v1\n", "[paths 4] tagged content on shadow");
 

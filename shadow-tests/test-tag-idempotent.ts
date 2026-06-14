@@ -36,13 +36,13 @@ function tagSummary(stdout: string): { pushed: number; upToDate: number; skipped
 }
 
 // Run 1: the two synced tags push; v-side is skipped (commit not replayed).
-const s1 = tagSummary(runCiSync(env).stdout);
+const s1 = tagSummary(runCiSync(env, { tags: true }).stdout);
 console.log(`run 1: pushed=${s1.pushed} upToDate=${s1.upToDate} skipped=${s1.skipped}`);
 if (s1.pushed < 2) throw new AssertionError(`run 1 should push both synced tags, got pushed=${s1.pushed}`);
 if (s1.skipped < 1) throw new AssertionError(`run 1 should skip the unreplayed-commit tag, got skipped=${s1.skipped}`);
 
 // Run 2 (no source change): synced tags up-to-date, v-side still skipped, 0 pushed.
-const s2 = tagSummary(runCiSync(env).stdout);
+const s2 = tagSummary(runCiSync(env, { tags: true }).stdout);
 console.log(`run 2: pushed=${s2.pushed} upToDate=${s2.upToDate} skipped=${s2.skipped}`);
 assertEqual(s2.pushed, 0, "second consecutive sync must re-push 0 tags");
 if (s2.upToDate < 2) throw new AssertionError(`run 2 should report both synced tags up to date, got ${s2.upToDate}`);

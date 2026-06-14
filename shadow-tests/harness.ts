@@ -262,7 +262,7 @@ export function shadowBranchOf(env: TestEnv, remote?: RemoteInfo): string {
 }
 
 /** Apply test overrides and run sync in-process. */
-function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; dryRun?: boolean }): RunResult {
+function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; dryRun?: boolean; tags?: boolean }): RunResult {
   // Orchestrator mode reads source state from the remote-tracking ref. Tests
   // commit on localRepo without pushing, so mirror localRepo branches up to
   // originBare before each "from a" sync — otherwise origin/<branch> is stale
@@ -282,6 +282,7 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; 
     from: opts.from,
     pair: opts.pair,
     dryRun: opts.dryRun,
+    tags: opts.tags,
   });
 
   return {
@@ -292,8 +293,8 @@ function runSyncInProcess(env: TestEnv, opts: { from: "a" | "b"; pair?: string; 
 }
 
 /** Pull: replay external remote commits into shadow branches on origin. */
-export function runCiSync(env: TestEnv, opts: { dryRun?: boolean } = {}): RunResult {
-  return runSyncInProcess(env, { from: "b", dryRun: opts.dryRun });
+export function runCiSync(env: TestEnv, opts: { dryRun?: boolean; tags?: boolean } = {}): RunResult {
+  return runSyncInProcess(env, { from: "b", dryRun: opts.dryRun, tags: opts.tags });
 }
 
 /** Push: replay local commits to the external shadow branch.
