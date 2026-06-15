@@ -94,66 +94,6 @@ interface DirectionConfig {
   identityByEmail: Map<string, RepoIdentity>;
 }
 
-// One compiled .shadowignore line. `negated` is a `!` re-include; `dirOnly` (a
-// trailing `/`) matches directories only. Rules are ordered: later wins.
-export interface IgnoreRule { regex: RegExp; negated: boolean; dirOnly: boolean; }
-
-// gitignore-faithful match of a mapping-relative file path against ordered
-// rules. A file is ignored if any ancestor directory is ignored (you cannot
-// re-include under an excluded dir) or the file's own last match ignores it.
-export function pathIgnored(rules: IgnoreRule[], filePath: string): boolean {
-  if (rules.length === 0) return false;
-  const segs = filePath.split("/");
-  for (let k = 1; k < segs.length; k++) {
-    if (matchState(rules, segs.slice(0, k).join("/"), true)) return true;
-  }
-  return matchState(rules, filePath, false);
-}
-
-// Last-match-wins ignored state for one path; dir-only rules skip plain files.
-function matchState(rules: IgnoreRule[], path: string, isDir: boolean): boolean {
-  let ignored = false;
-  for (const r of rules) {
-    if (r.dirOnly && !isDir) continue;
-    if (r.regex.test(path)) ignored = !r.negated;
-  }
-  return ignored;
-}
-
-// A non-negated rule excluding `innerPath` (and, via the ancestor walk,
-// everything under it) from a tree rooted at `outerPath`, or null if inner is
-// not nested under outer.
-function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): IgnoreRule[] | null {
-  let rel: string | null = null;
-  if (outerPath === "") {
-    if (innerPath === "") return null;
-    rel = innerPath;
-  } else if (innerPath.startsWith(outerPath + "/")) {
-    rel = innerPath.slice(outerPath.length + 1);
-  } else {
-    return null;
-  }
-  return [{ regex: new RegExp(`^${escapeRegex(rel)}$`), negated: false, dirOnly: false }];
-}
-
-// A mapping's slice excludes content owned by sibling mappings nested under it
-// (e.g. primary at "" with a sibling at "src/common").
-function computeAutoIgnorePatterns(
-  pair: SyncPair,
-): { a: IgnoreRule[]; b: IgnoreRule[] }[] {
-  return pair.mappings.map(m => {
-    const a: IgnoreRule[] = [];
-    const b: IgnoreRule[] = [];
-    for (const sibling of pair.mappings) {
-      if (sibling === m) continue;
-      const aPats = nestedRelativeIgnorePatterns(m.a, sibling.a);
-      if (aPats) a.push(...aPats);
-      const bPats = nestedRelativeIgnorePatterns(m.b, sibling.b);
-      if (bPats) b.push(...bPats);
-    }
-    return { a, b };
-  });
-}
 
 function buildDirectionConfig(pair: SyncPair, from: "a" | "b"): DirectionConfig {
   const source = from === "a" ? pair.a : pair.b;
@@ -208,6 +148,14 @@ function anyRootSource(dc: DirectionConfig): boolean { return dc.mappings.some(m
 /** True iff every mapping's target is a confined subdir (none at repo root).
  * Drives cross-repo outer-state preservation in composeMergeBaseTree. */
 function allTargetsConfined(dc: DirectionConfig): boolean { return !dc.mappings.some(m => m.target === ""); }
+
+/** Validate that a name is safe for use in git commands and path construction. */
+export function validateName(value: string, label: string): void {
+  if (!value) fail(`${label} must not be empty.`);
+  if (value.includes("..")) fail(`${label} must not contain '..'.`);
+  if (value.startsWith("/") || value.startsWith("\\")) fail(`${label} must not be an absolute path.`);
+  if (value.startsWith("-")) fail(`${label} must not start with '-'.`);
+}
 
 function validatePair(pair: SyncPair): void {
   if (!pair.mappings || pair.mappings.length === 0) {
@@ -325,6 +273,11 @@ const ABSORBED_TRAILER = config.trailers.absorbed;
 let _shadowBranchPrefix = config.shadowBranchPrefix;
 const MAX_BUFFER = config.maxBuffer;
 
+
+export function fail(msg: string): never {
+  throw new ShadowSyncError(`✘ ${msg}`);
+}
+
 /** Orchestrator repo root — git commands use paths relative to it, not the cwd. */
 const _repoRootProbe = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
 if (_repoRootProbe.error || !_repoRootProbe.stdout) {
@@ -369,23 +322,13 @@ function logDecileProgress(label: string, i: number, total: number): void {
   }
 }
 
-
-export function fail(msg: string): never {
-  throw new ShadowSyncError(`✘ ${msg}`);
-}
-
-/** Validate that a name is safe for use in git commands and path construction. */
-export function validateName(value: string, label: string): void {
-  if (!value) fail(`${label} must not be empty.`);
-  if (value.includes("..")) fail(`${label} must not contain '..'.`);
-  if (value.startsWith("/") || value.startsWith("\\")) fail(`${label} must not be an absolute path.`);
-  if (value.startsWith("-")) fail(`${label} must not start with '-'.`);
-}
-
 // ── Git primitives ────────────────────────────────────────────────────────────
 
 type GitResult = { stdout: string; stderr: string; status: number; ok: boolean };
 type GitOpts = { cwd?: string; plain?: boolean; raw?: boolean; env?: Record<string, string>; input?: string };
+
+/** One A/M/D/T record from `diff-tree -r -z` (no -M/-C, so single-path records). */
+interface DiffEntry { newMode: string; newHash: string; status: string; filePath: string }
 
 export function git(args: string[], opts?: GitOpts & { safe?: false }): string;
 export function git(args: string[], opts: GitOpts & { safe: true }): GitResult;
@@ -479,8 +422,6 @@ export function ensureRemote(endpoint: RepoEndpoint): void {
   }
 }
 
-/** One A/M/D/T record from `diff-tree -r -z` (no -M/-C, so single-path records). */
-interface DiffEntry { newMode: string; newHash: string; status: string; filePath: string }
 
 // Parse `-z` records: ":<modes> <shas> <status>\0<path>\0". -z is load-bearing:
 // it emits paths verbatim, where the default core.quotepath C-quotes paths with
@@ -560,6 +501,14 @@ function emptyTreeSha(): string {
 
 // ── Trailer machinery ─────────────────────────────────────────────────────────
 
+/** Squash-absorbed replay counterpart: `target` stands in for the absorbed
+ *  source commit only on lineages that contain `absorber` (the squash's own
+ *  source commit). */
+interface AbsorbedEntry { target: string; absorber: string }
+type AbsorbedMap = Map<string, AbsorbedEntry[]>;
+
+interface ScopedMappings { direct: Map<string, string>; absorbed: AbsorbedMap }
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -623,13 +572,6 @@ function stripReplayedTrailers(message: string): string {
     .join("\n").trimEnd();
 }
 
-/** Squash-absorbed replay counterpart: `target` stands in for the absorbed
- *  source commit only on lineages that contain `absorber` (the squash's own
- *  source commit). */
-interface AbsorbedEntry { target: string; absorber: string }
-type AbsorbedMap = Map<string, AbsorbedEntry[]>;
-
-interface ScopedMappings { direct: Map<string, string>; absorbed: AbsorbedMap }
 
 /**
  * Build source→target mappings from replay trailers. Replayed values are
@@ -1045,6 +987,67 @@ function computeSettledCommits(
 }
 
 // ── Ignore patterns ──────────────────────────────────────────────
+
+// One compiled .shadowignore line. `negated` is a `!` re-include; `dirOnly` (a
+// trailing `/`) matches directories only. Rules are ordered: later wins.
+export interface IgnoreRule { regex: RegExp; negated: boolean; dirOnly: boolean; }
+
+// gitignore-faithful match of a mapping-relative file path against ordered
+// rules. A file is ignored if any ancestor directory is ignored (you cannot
+// re-include under an excluded dir) or the file's own last match ignores it.
+export function pathIgnored(rules: IgnoreRule[], filePath: string): boolean {
+  if (rules.length === 0) return false;
+  const segs = filePath.split("/");
+  for (let k = 1; k < segs.length; k++) {
+    if (matchState(rules, segs.slice(0, k).join("/"), true)) return true;
+  }
+  return matchState(rules, filePath, false);
+}
+
+// Last-match-wins ignored state for one path; dir-only rules skip plain files.
+function matchState(rules: IgnoreRule[], path: string, isDir: boolean): boolean {
+  let ignored = false;
+  for (const r of rules) {
+    if (r.dirOnly && !isDir) continue;
+    if (r.regex.test(path)) ignored = !r.negated;
+  }
+  return ignored;
+}
+
+// A non-negated rule excluding `innerPath` (and, via the ancestor walk,
+// everything under it) from a tree rooted at `outerPath`, or null if inner is
+// not nested under outer.
+function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): IgnoreRule[] | null {
+  let rel: string | null = null;
+  if (outerPath === "") {
+    if (innerPath === "") return null;
+    rel = innerPath;
+  } else if (innerPath.startsWith(outerPath + "/")) {
+    rel = innerPath.slice(outerPath.length + 1);
+  } else {
+    return null;
+  }
+  return [{ regex: new RegExp(`^${escapeRegex(rel)}$`), negated: false, dirOnly: false }];
+}
+
+// A mapping's slice excludes content owned by sibling mappings nested under it
+// (e.g. primary at "" with a sibling at "src/common").
+function computeAutoIgnorePatterns(
+  pair: SyncPair,
+): { a: IgnoreRule[]; b: IgnoreRule[] }[] {
+  return pair.mappings.map(m => {
+    const a: IgnoreRule[] = [];
+    const b: IgnoreRule[] = [];
+    for (const sibling of pair.mappings) {
+      if (sibling === m) continue;
+      const aPats = nestedRelativeIgnorePatterns(m.a, sibling.a);
+      if (aPats) a.push(...aPats);
+      const bPats = nestedRelativeIgnorePatterns(m.b, sibling.b);
+      if (bPats) b.push(...bPats);
+    }
+    return { a, b };
+  });
+}
 
 // Always strip .shadowignore files themselves from the synced tree — they're
 // source-side metadata for shadow-sync, never replayed onto the target.
