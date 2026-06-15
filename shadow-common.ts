@@ -89,14 +89,41 @@ interface DirectionConfig {
   mappingsByDepth: Array<DirMappingDirected & { idx: number }>;
   /** Per-mapping ignores stripping content owned by a sibling mapping nested
    *  under this one's source/target dir. Indexed by mapping idx. */
-  autoIgnoreBySourceIdx: RegExp[][];
-  autoIgnoreByTargetIdx: RegExp[][];
+  autoIgnoreBySourceIdx: IgnoreRule[][];
+  autoIgnoreByTargetIdx: IgnoreRule[][];
   identityByEmail: Map<string, RepoIdentity>;
 }
 
-// Patterns stripping `innerPath/...` from a tree rooted at `outerPath`, or
-// null if inner is not nested under outer.
-function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): RegExp[] | null {
+// One compiled .shadowignore line. `negated` is a `!` re-include; `dirOnly` (a
+// trailing `/`) matches directories only. Rules are ordered: later wins.
+export interface IgnoreRule { regex: RegExp; negated: boolean; dirOnly: boolean; }
+
+// gitignore-faithful match of a mapping-relative file path against ordered
+// rules. A file is ignored if any ancestor directory is ignored (you cannot
+// re-include under an excluded dir) or the file's own last match ignores it.
+export function pathIgnored(rules: IgnoreRule[], filePath: string): boolean {
+  if (rules.length === 0) return false;
+  const segs = filePath.split("/");
+  for (let k = 1; k < segs.length; k++) {
+    if (matchState(rules, segs.slice(0, k).join("/"), true)) return true;
+  }
+  return matchState(rules, filePath, false);
+}
+
+// Last-match-wins ignored state for one path; dir-only rules skip plain files.
+function matchState(rules: IgnoreRule[], path: string, isDir: boolean): boolean {
+  let ignored = false;
+  for (const r of rules) {
+    if (r.dirOnly && !isDir) continue;
+    if (r.regex.test(path)) ignored = !r.negated;
+  }
+  return ignored;
+}
+
+// A non-negated rule excluding `innerPath` (and, via the ancestor walk,
+// everything under it) from a tree rooted at `outerPath`, or null if inner is
+// not nested under outer.
+function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): IgnoreRule[] | null {
   let rel: string | null = null;
   if (outerPath === "") {
     if (innerPath === "") return null;
@@ -106,19 +133,17 @@ function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): Reg
   } else {
     return null;
   }
-  const escaped = escapeRegex(rel);
-  // Match the directory entry itself and anything under it.
-  return [new RegExp(`^${escaped}$`), new RegExp(`^${escaped}/.*$`)];
+  return [{ regex: new RegExp(`^${escapeRegex(rel)}$`), negated: false, dirOnly: false }];
 }
 
 // A mapping's slice excludes content owned by sibling mappings nested under it
 // (e.g. primary at "" with a sibling at "src/common").
 function computeAutoIgnorePatterns(
   pair: SyncPair,
-): { a: RegExp[]; b: RegExp[] }[] {
+): { a: IgnoreRule[]; b: IgnoreRule[] }[] {
   return pair.mappings.map(m => {
-    const a: RegExp[] = [];
-    const b: RegExp[] = [];
+    const a: IgnoreRule[] = [];
+    const b: IgnoreRule[] = [];
     for (const sibling of pair.mappings) {
       if (sibling === m) continue;
       const aPats = nestedRelativeIgnorePatterns(m.a, sibling.a);
@@ -165,15 +190,15 @@ function buildIdentityMap(sourceRemote: string, targetRemote: string): Map<strin
 function routeSourcePath(
   filePath: string,
   dc: DirectionConfig,
-  ignoreBySrcIdx: RegExp[][],
-  ignoreByTgtIdx: RegExp[][] = [],
+  ignoreBySrcIdx: IgnoreRule[][],
+  ignoreByTgtIdx: IgnoreRule[][] = [],
 ): string | null {
   const owner = dc.mappingsByDepth.find(m =>
     m.source === "" || filePath === m.source || filePath.startsWith(`${m.source}/`));
   if (!owner) return null;
   const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
-  if ((ignoreBySrcIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) return null;
-  if ((ignoreByTgtIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) return null;
+  if (pathIgnored(ignoreBySrcIdx[owner.idx] ?? [], srcRelative)) return null;
+  if (pathIgnored(ignoreByTgtIdx[owner.idx] ?? [], srcRelative)) return null;
   return owner.target ? `${owner.target}/${srcRelative}` : srcRelative;
 }
 
@@ -860,7 +885,7 @@ function sliceChangedVsParent(
   parent: string,
   commit: string,
   dc: DirectionConfig,
-  ignoreBySrc: RegExp[][],
+  ignoreBySrc: IgnoreRule[][],
 ): boolean {
   const diff = diffSyncedDirs(parent, commit, dc);
   if (!diff.ok) return true;  // fail closed: keep
@@ -906,7 +931,7 @@ function isLoadBearing(
   }
 
   const ignoreBySrc = dc.mappings.map((m, i) =>
-    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
+    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], p1));
   if (sliceChangedVsParent(p1, c.hash, dc, ignoreBySrc)) return true;
 
   if (c.parents.length === 1) return false;
@@ -1025,33 +1050,89 @@ function computeSettledCommits(
 // source-side metadata for shadow-sync, never replayed onto the target.
 const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
 
-// Read .shadowignore files from sourceDir up to the repo root, at the commit's
-// snapshot (patterns can evolve through history). `extraPatterns` (e.g. the
-// auto-derived nested-mapping ignores) are prepended.
+// Read .shadowignore files for a mapping: every ancestor from the repo root
+// down to the mapping root, plus every nested file at or below it (recursive),
+// at the commit's snapshot (patterns can evolve through history). User file
+// rules come first (lower precedence); the auto-derived nested-mapping ignores
+// (`extraPatterns`) and the .shadowignore self-strip are appended last as
+// non-negated rules, so a user `!` can never re-include them.
 function readShadowIgnorePatterns(
   commitHash: string,
   sourceDir: string,
-  extraPatterns: RegExp[] = [],
-): RegExp[] {
-  const patterns: RegExp[] = [SHADOWIGNORE_SELF_RE, ...extraPatterns];
+  extraPatterns: IgnoreRule[] = [],
+  parentHash?: string,
+): IgnoreRule[] {
+  return [
+    ...readShadowIgnoreFilePatterns(commitHash, sourceDir, parentHash),
+    ...extraPatterns,
+    { regex: SHADOWIGNORE_SELF_RE, negated: false, dirOnly: false },
+  ];
+}
 
-  const dirs: string[] = [];
+// Memo of file-derived patterns per (commit-or-tree, mapping-root). Git objects
+// are immutable, so a hit is always valid for the run — no invalidation needed.
+const shadowIgnoreFileCache = new Map<string, IgnoreRule[]>();
+
+// Exact paths of every .shadowignore from the repo root down to the mapping root.
+function ancestorIgnorePaths(sourceDir: string): string[] {
+  const out: string[] = [];
   if (sourceDir) {
     const parts = sourceDir.split("/");
-    for (let i = parts.length; i > 0; i--) dirs.push(parts.slice(0, i).join("/"));
+    for (let i = parts.length - 1; i > 0; i--) out.push(`${parts.slice(0, i).join("/")}/.shadowignore`);
   }
-  dirs.push("");
+  out.push(".shadowignore");
+  return out;
+}
 
-  // One probe for all candidate .shadowignore paths; usually none exist.
-  const ignorePaths = dirs.map(d => d ? `${d}/.shadowignore` : ".shadowignore");
-  const probe = git(["ls-tree", "-z", commitHash, ...ignorePaths], { safe: true, raw: true });
-  if (!probe.ok || !probe.stdout) return patterns;
+// Cheap (O(changes)) check: did any .shadowignore governing `sourceDir` change
+// between parent and commit? Scans the tree diff, not the whole subtree.
+function shadowIgnoreChangedVsParent(parentHash: string, commitHash: string, sourceDir: string): boolean {
+  const args = ["diff-tree", "-r", "-z", "--name-only", "--no-commit-id", parentHash, commitHash];
+  if (sourceDir) args.push("--", `${sourceDir}/`, ...ancestorIgnorePaths(sourceDir));
+  const res = git(args, { safe: true, raw: true });
+  if (!res.ok) return true;  // fail safe: assume changed → full discovery
+  for (const p of (res.stdout ?? "").split("\0")) if (p && SHADOWIGNORE_SELF_RE.test(p)) return true;
+  return false;
+}
 
-  for (const entry of probe.stdout.split("\0")) {
-    if (!entry) continue;
-    const tab = entry.indexOf("\t");
-    if (tab < 0) continue;
-    const ignorePath = entry.slice(tab + 1);
+// Discover + compile every .shadowignore governing `sourceDir` at this snapshot.
+function readShadowIgnoreFilePatterns(commitHash: string, sourceDir: string, parentHash?: string): IgnoreRule[] {
+  const cacheKey = `${commitHash}\0${sourceDir}`;
+  const cached = shadowIgnoreFileCache.get(cacheKey);
+  if (cached) return cached;
+
+  // Static-history fast path: if no governing .shadowignore changed vs the
+  // parent, inherit its patterns instead of walking the tree. The parent is
+  // resolved before the child in topo order, so this is normally a cache hit.
+  if (parentHash && !shadowIgnoreChangedVsParent(parentHash, commitHash, sourceDir)) {
+    const inherited = readShadowIgnoreFilePatterns(parentHash, sourceDir);
+    shadowIgnoreFileCache.set(cacheKey, inherited);
+    return inherited;
+  }
+
+  const found: string[] = [];
+
+  // Ancestors above the mapping root, up to the repo root: one exact-path probe.
+  const ancestorPaths = ancestorIgnorePaths(sourceDir);
+  const probe = git(["ls-tree", "-z", commitHash, ...ancestorPaths], { safe: true, raw: true });
+  if (probe.ok && probe.stdout) {
+    for (const entry of probe.stdout.split("\0")) {
+      const tab = entry.indexOf("\t");
+      if (tab >= 0) found.push(entry.slice(tab + 1));
+    }
+  }
+
+  // The mapping root and everything below it: one recursive scan, filtered to
+  // .shadowignore by basename.
+  const lsArgs = ["ls-tree", "-r", "-z", "--name-only", commitHash];
+  if (sourceDir) lsArgs.push("--", `${sourceDir}/`);
+  const sub = git(lsArgs, { safe: true, raw: true });
+  if (sub.ok && sub.stdout) {
+    for (const p of sub.stdout.split("\0")) if (p && SHADOWIGNORE_SELF_RE.test(p)) found.push(p);
+  }
+
+  const patterns: IgnoreRule[] = [];
+  for (const ignorePath of [...new Set(found)]) {
     const dir = ignorePath === ".shadowignore" ? "" : ignorePath.slice(0, -"/.shadowignore".length);
     const res = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
     if (!res.ok || !res.stdout) continue;
@@ -1060,65 +1141,105 @@ function readShadowIgnorePatterns(
       if (compiled) patterns.push(compiled);
     }
   }
+  shadowIgnoreFileCache.set(cacheKey, patterns);
   return patterns;
 }
 
 // Compile a single .shadowignore line per gitignore semantics, translated
 // from `ignoreDir`-relative paths into `sourceDir`-relative paths (the space
-// matched by routeSourcePath / filterTreeByIgnore).
+// matched by routeSourcePath / filterTreeByIgnore). `ignoreDir` may sit above
+// the mapping root (ancestor file), at it, or below it (nested file).
 //
-// Returns null if the pattern targets a sibling subtree outside sourceDir.
-// Negation (`!pattern`) is not supported and silently dropped.
-function compileShadowIgnoreLine(rawPattern: string, ignoreDir: string, sourceDir: string): RegExp | null {
-  if (rawPattern.startsWith("!")) return null;
-
+// `!` is a negated (re-include) rule; a trailing `/` is dir-only. The compiled
+// regex matches the path itself — descendant coverage comes from pathIgnored's
+// ancestor walk. Returns null if the pattern targets a sibling subtree outside
+// sourceDir.
+export function compileShadowIgnoreLine(rawPattern: string, ignoreDir: string, sourceDir: string): IgnoreRule | null {
   let pattern = rawPattern;
-  const isDirOnly = pattern.endsWith("/");
-  if (isDirOnly) pattern = pattern.slice(0, -1);
+  let negated = false;
+  if (pattern.startsWith("!")) { negated = true; pattern = pattern.slice(1); }
+  else if (pattern.startsWith("\\!") || pattern.startsWith("\\#")) pattern = pattern.slice(1);
+
+  let dirOnly = pattern.endsWith("/");
+  if (dirOnly) pattern = pattern.slice(0, -1);
 
   const anchoredToIgnoreDir = pattern.startsWith("/");
   if (anchoredToIgnoreDir) pattern = pattern.slice(1);
 
-  const hasInternalSlash = pattern.includes("/");
-  const isAnchored = anchoredToIgnoreDir || hasInternalSlash;
+  const isAnchored = anchoredToIgnoreDir || pattern.includes("/");
 
-  let translated: string;
-  if (!isAnchored) {
-    // No slash: gitignore matches basename at any depth → works in any space.
-    translated = pattern;
-  } else if (sourceDir === ignoreDir) {
-    translated = pattern;
-  } else {
-    // ignoreDir is a strict prefix of sourceDir (we walk up from sourceDir).
-    const relDir = ignoreDir ? sourceDir.slice(ignoreDir.length + 1) : sourceDir;
-    if (pattern === relDir) {
-      // Pattern points at sourceDir itself; dir-match means everything inside.
-      if (!isDirOnly) return null;
-      translated = "**";
-    } else if (pattern.startsWith(`${relDir}/`)) {
-      translated = pattern.slice(relDir.length + 1);
-    } else {
-      return null;
+  // Subtree (sourceDir-relative) a nested file's patterns are confined to.
+  let confineDir = "";
+  let translated = pattern;
+
+  if (ignoreDir === sourceDir) {
+    // Mapping-root file: already in the matched space.
+  } else if (ignoreDir === "" || sourceDir.startsWith(`${ignoreDir}/`)) {
+    // Ancestor file: rebase an anchored pattern down into the mapping.
+    if (isAnchored) {
+      const relDir = ignoreDir ? sourceDir.slice(ignoreDir.length + 1) : sourceDir;
+      if (pattern === relDir) {
+        // Pattern points at sourceDir itself; means the whole mapping.
+        if (!dirOnly) return null;
+        translated = "**";
+        dirOnly = false;
+      } else if (pattern.startsWith(`${relDir}/`)) {
+        translated = pattern.slice(relDir.length + 1);
+      } else {
+        return null;   // targets a sibling subtree outside the mapping
+      }
     }
+    // Bare name: matches basename at any depth → unchanged.
+  } else {
+    // Nested file below the mapping root: confine matches to its subtree.
+    confineDir = sourceDir ? ignoreDir.slice(sourceDir.length + 1) : ignoreDir;
   }
 
   const regex = globToRegexSource(translated);
-
-  const prefix = isAnchored ? "^" : "(^|.*/)";
-  const suffix = isDirOnly ? "/.*$" : "$";
-  return new RegExp(`${prefix}${regex}${suffix}`);
+  const confine = confineDir ? `${escapeRegex(confineDir)}/` : "";
+  const prefix = confineDir
+    ? (isAnchored ? `^${confine}` : `^${confine}(.*/)?`)
+    : (isAnchored ? "^" : "(^|.*/)");
+  return { regex: new RegExp(`${prefix}${regex}$`), negated, dirOnly };
 }
 
-// Translate a glob (supporting * and ** globs) into an unanchored regex source
-// fragment. Callers add their own anchoring/prefix/suffix.
+// Translate a glob into an unanchored regex source fragment, per gitignore:
+// `*` stays within a path segment, `**` crosses segments, `?` is one non-slash
+// char, `[...]` is a character class (leading `!` negates, leading `]` literal),
+// `\x` escapes. Callers add their own anchoring/prefix/suffix.
 function globToRegexSource(glob: string): string {
-  return glob
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\//g, "<<GLOBSTAR_SLASH>>")
-    .replace(/\*\*/g, "<<GLOBSTAR>>")
-    .replace(/\*/g, "[^/]*")
-    .replace(/<<GLOBSTAR_SLASH>>/g, "(.*/)?")
-    .replace(/<<GLOBSTAR>>/g, ".*");
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        i++;
+        if (glob[i + 1] === "/") { i++; out += "(.*/)?"; } else out += ".*";
+      } else {
+        out += "[^/]*";
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (c === "[") {
+      let j = i + 1;
+      let cls = "";
+      if (glob[j] === "!") { cls = "^"; j++; }
+      if (glob[j] === "]") { cls += "\\]"; j++; }
+      const close = glob.indexOf("]", j);
+      if (close < 0) {
+        out += "\\[";   // unterminated class → literal
+      } else {
+        out += `[${cls}${glob.slice(j, close)}]`;
+        i = close;
+      }
+    } else if (c === "\\") {
+      const next = glob[i + 1];
+      if (next !== undefined) { out += escapeRegex(next); i++; } else out += "\\\\";
+    } else {
+      out += escapeRegex(c);
+    }
+  }
+  return out;
 }
 
 /** Compile a glob pattern (supports * and ** globs) into an anchored regex. */
@@ -1177,7 +1298,7 @@ function buildReplayedTree(opts: {
   dc: DirectionConfig;
   parentTree: string | null;
   tmpIndex: string;
-  shadowIgnorePatternsBySourceIdx: RegExp[][];
+  shadowIgnorePatternsBySourceIdx: IgnoreRule[][];
 }): string | null {
   const { commitHash, sourceFirstParent, dc, parentTree, tmpIndex, shadowIgnorePatternsBySourceIdx } = opts;
   const idxEnv = { GIT_INDEX_FILE: tmpIndex };
@@ -1215,7 +1336,7 @@ function buildReplayedTree(opts: {
   // its rules evolve per target branch just like the source side does per
   // source commit. Unioned with the source patterns in routeSourcePath; blocks
   // incoming changes only (the diff overlay), never purging the base.
-  const shadowIgnorePatternsByTargetIdx: RegExp[][] = parentTree
+  const shadowIgnorePatternsByTargetIdx: IgnoreRule[][] = parentTree
     ? dc.mappings.map(m => readShadowIgnorePatterns(parentTree, m.target))
     : [];
 
@@ -1280,18 +1401,18 @@ function composeSubtrees(baseTree: string, slices: Array<{ subdir: string; conte
   });
 }
 
-/** Return a new tree SHA equal to `treeSha` minus every path matching any of
- *  `ignorePatterns` (paths are tested relative to the tree root). When no
- *  patterns match, returns `treeSha` unchanged so the splice is a no-op. */
-function filterTreeByIgnore(treeSha: string, ignorePatterns: RegExp[]): string {
-  if (ignorePatterns.length === 0) return treeSha;
+/** Return a new tree SHA equal to `treeSha` minus every path ignored by
+ *  `rules` (paths are tested relative to the tree root). When there are no
+ *  rules, returns `treeSha` unchanged so the splice is a no-op. */
+function filterTreeByIgnore(treeSha: string, rules: IgnoreRule[]): string {
+  if (rules.length === 0) return treeSha;
   return withTmpIndex("autoignore", idxEnv => {
     const readRes = git(["read-tree", treeSha], { env: idxEnv, safe: true });
     if (!readRes.ok) return treeSha;
     const ls = git(["ls-files", "-z"], { env: idxEnv, safe: true, raw: true });
     if (ls.ok && ls.stdout) {
       const toRemove = ls.stdout.split("\0").filter(Boolean)
-        .filter(p => ignorePatterns.some(re => re.test(p)));
+        .filter(p => pathIgnored(rules, p));
       // stdin-based delete (see applyIndexInfo) — avoids argv overflow on Windows.
       applyIndexInfo(idxEnv, toRemove, []);
     }
@@ -1307,7 +1428,7 @@ function spliceMappings(
   fromHash: string,
   side: "source" | "target",
   dc: DirectionConfig,
-  extraIgnoreByIdx?: RegExp[][],
+  extraIgnoreByIdx?: IgnoreRule[][],
 ): string | null {
   const autoPatterns = side === "source" ? dc.autoIgnoreBySourceIdx : dc.autoIgnoreByTargetIdx;
   const slices: Array<{ subdir: string; content: string }> = [];
@@ -1322,10 +1443,10 @@ function spliceMappings(
       slices.push({ subdir: m.target, content: emptyTreeSha() });
       continue;
     }
-    // extraIgnoreByIdx = per-commit .shadowignore (round-trip source splice only).
-    const patterns = extraIgnoreByIdx
-      ? [...(autoPatterns[i] ?? []), ...(extraIgnoreByIdx[i] ?? [])]
-      : (autoPatterns[i] ?? []);
+    // extraIgnoreByIdx (per-commit .shadowignore, round-trip source splice only)
+    // already folds in auto + self-strip via readShadowIgnorePatterns; without
+    // it, fall back to the auto-derived sibling ignores alone.
+    const patterns = extraIgnoreByIdx ? (extraIgnoreByIdx[i] ?? []) : (autoPatterns[i] ?? []);
     const filtered = filterTreeByIgnore(res.stdout, patterns);
     slices.push({ subdir: m.target, content: filtered });
   }
@@ -1374,7 +1495,7 @@ function resolveEcho(
   mappedParents: string[],
   syncedShaMap: Map<string, string>,
   dc: DirectionConfig,
-  shadowIgnoreBySourceIdx: RegExp[][],
+  shadowIgnoreBySourceIdx: IgnoreRule[][],
 ): ComposeResult | "not-an-echo" {
   const echoKey = targetTrailerKey(dc);
   const echoTargets: string[] = [];
@@ -1419,7 +1540,7 @@ function composeMergeBaseTree(opts: {
   mappedParents: string[];
   syncedShaMap: Map<string, string>;
   dc: DirectionConfig;
-  shadowIgnoreBySourceIdx: RegExp[][];
+  shadowIgnoreBySourceIdx: IgnoreRule[][];
 }): ComposeResult {
   const { commit, mappedParents, syncedShaMap, dc, shadowIgnoreBySourceIdx } = opts;
   const commitShort = commit.hash.slice(0, 8);
@@ -1991,7 +2112,7 @@ function replayCommits(opts: {
       // base tree so composeMergeBaseTree can filter the round-trip source
       // splice — the one place fresh, unfiltered source enters the base.
       const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
-        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? []));
+        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], commit.parents[0]));
 
       let parentTree: string | null;
       if (mappedParents.length === 0) {
