@@ -157,19 +157,23 @@ function buildIdentityMap(sourceRemote: string, targetRemote: string): Map<strin
 
 /**
  * Route a source file path through the pair's mappings: the longest-source-
- * prefix mapping owns it, and its ignore patterns apply source-relative.
+ * prefix mapping owns it. A path is dropped if EITHER the source-side or the
+ * target-side .shadowignore matches — within a mapping the inner path is the
+ * same on both sides, so both pattern sets test the same `srcRelative`.
  * Returns the mapped target path, or null (no owning mapping / ignored).
  */
 function routeSourcePath(
   filePath: string,
   dc: DirectionConfig,
   ignoreBySrcIdx: RegExp[][],
+  ignoreByTgtIdx: RegExp[][] = [],
 ): string | null {
   const owner = dc.mappingsByDepth.find(m =>
     m.source === "" || filePath === m.source || filePath.startsWith(`${m.source}/`));
   if (!owner) return null;
   const srcRelative = owner.source ? filePath.slice(owner.source.length + 1) : filePath;
   if ((ignoreBySrcIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) return null;
+  if ((ignoreByTgtIdx[owner.idx] ?? []).some(p => p.test(srcRelative))) return null;
   return owner.target ? `${owner.target}/${srcRelative}` : srcRelative;
 }
 
@@ -1206,11 +1210,19 @@ function buildReplayedTree(opts: {
 
   if (entries.length === 0) return parentTree ?? null;
 
+  // Target-side .shadowignore, read from the base tree we're building on, so
+  // its rules evolve per target branch just like the source side does per
+  // source commit. Unioned with the source patterns in routeSourcePath; blocks
+  // incoming changes only (the diff overlay), never purging the base.
+  const shadowIgnorePatternsByTargetIdx: RegExp[][] = parentTree
+    ? dc.mappings.map(m => readShadowIgnorePatterns(parentTree, m.target))
+    : [];
+
   // No -M/-C, so renames surface as D+A — we only handle A/M/D/T.
   const removals: string[] = [];
   const additions: string[] = [];   // "mode hash\tpath" lines for --index-info
   for (const e of entries) {
-    const targetPath = routeSourcePath(e.filePath, dc, shadowIgnorePatternsBySourceIdx);
+    const targetPath = routeSourcePath(e.filePath, dc, shadowIgnorePatternsBySourceIdx, shadowIgnorePatternsByTargetIdx);
     if (targetPath === null) continue;
 
     if (e.status === "D") {
