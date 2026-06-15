@@ -803,14 +803,15 @@ interface SourceGraph {
 function collectSourceGraph(dc: DirectionConfig, branches: string[]): SourceGraph {
   const refs = branches.map(b => `${dc.source.remote}/${b}`);
   // Call 1: the whole reachable graph in topo order with parent edges.
-  const g = git(["rev-list", "--topo-order", "--parents", ...refs], { safe: true });
-  if (!g.ok) fail(`rev-list --parents failed: ${g.stderr}`);
+  const g = git(["log", "--topo-order", "--format=%H %P", ...refs], { safe: true });
+  if (!g.ok) fail(`log --format=%H %P failed: ${g.stderr}`);
   const parents = new Map<string, string[]>();
   const index = new Map<string, number>();
   let i = 0;
   for (const line of g.stdout.split("\n")) {
     if (!line) continue;
-    const parts = line.split(" ");
+    // filter(Boolean): a root commit's empty %P leaves a trailing space.
+    const parts = line.split(" ").filter(Boolean);
     parents.set(parts[0], parts.slice(1));
     index.set(parts[0], i++);
   }
