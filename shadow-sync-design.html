@@ -818,7 +818,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <li>
       <strong>Shallow clone &mdash; halts.</strong> <code>rev-list</code> on a truncated history
       silently elides commits past the shallow boundary, and <code>findEchoAnchor</code>&rsquo;s
-      ancestor walk truncates the same way. The replay would produce a tree-correct but
+      first-parent walk truncates the same way. The replay would produce a tree-correct but
       ancestry-wrong shadow branch. The fix (<code>git fetch --unshallow</code>) is one command,
       so blocking is cheap and right.
     </li>

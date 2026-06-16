@@ -805,6 +805,21 @@ function graphParentsOf(graph: SourceGraph, hash: string): string[] {
   return res.stdout ? res.stdout.split(/\s+/).filter(Boolean) : [];
 }
 
+// Walk the first-parent line from `start` to the first commit for which `stop`
+// holds; return that commit's source hash, or undefined if the walk reaches a
+// root without a hit. Treesame merges that join two kept lines are kept by
+// isLoadBearing, so any mapped ancestor of a dropped commit is reachable on the
+// first-parent line — no all-ancestors walk needed.
+function firstParentUntil(
+  graph: SourceGraph,
+  start: string,
+  stop: (hash: string) => boolean,
+): string | undefined {
+  let h: string | undefined = start;
+  while (h && !stop(h)) h = graphParentsOf(graph, h)[0];
+  return h;
+}
+
 // The scan list: {sync-touched commits} ∪ {all merges} — equivalent to
 // `git log --full-history --parents -- <dirs>` (verified). Emitted oldest-first
 // so the scan sees ancestors before descendants.
@@ -969,8 +984,7 @@ function computeSettledCommits(
   // Frontier per branch: first-parent walk to the newest mapped commit (if any).
   const frontier: string[] = [];
   for (const tip of tips) {
-    let h: string | undefined = tip;
-    while (h && !syncedShaMap.has(h) && !absorbedMap.has(h)) h = graphParentsOf(graph, h)[0];
+    const h = firstParentUntil(graph, tip, x => syncedShaMap.has(x) || absorbedMap.has(x));
     if (h) frontier.push(h);
   }
 
@@ -1573,16 +1587,9 @@ function composeMergeBaseTree(opts: {
 
 
 /** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
-function findEchoAnchor(parentHash: string, syncedShaMap: Map<string, string>): string | null {
-  const result = git(["log", "--topo-order", "--format=%H", parentHash], { safe: true });
-  if (!result.ok) fail(`Ancestry walk failed for ${parentHash}: ${result.stderr}`);
-  for (const line of result.stdout.split("\n")) {
-    const hash = line.trim();
-    if (!hash) continue;
-    const mapped = syncedShaMap.get(hash);
-    if (mapped) return mapped;
-  }
-  return null;
+function findEchoAnchor(graph: SourceGraph, parentHash: string, syncedShaMap: Map<string, string>): string | null {
+  const h = firstParentUntil(graph, parentHash, x => syncedShaMap.has(x));
+  return h ? syncedShaMap.get(h)! : null;
 }
 
 // True iff `ancestor` is an ancestor of (or equals) `descendant` on the source
@@ -1609,6 +1616,7 @@ interface ResolvedParents {
  */
 function resolveHaltAwareParents(
   commit: TopoCommit,
+  graph: SourceGraph,
   syncedShaMap: Map<string, string>,
   absorbedMap: AbsorbedMap,
   targetInit: string | null,
@@ -1640,7 +1648,7 @@ function resolveHaltAwareParents(
       pushUnique(valid.target);
     } else {
       // not mapped, and either not halted or halted without anchors
-      pushUnique(findEchoAnchor(parentHash, syncedShaMap) ?? targetInit);
+      pushUnique(findEchoAnchor(graph, parentHash, syncedShaMap) ?? targetInit);
     }
   }
   return { parents };
@@ -1710,6 +1718,7 @@ function flattenMappings(direct: Map<string, string>, absorbed: AbsorbedMap): Ma
  *  absorber — a fork stranded behind a foreign squash keeps its last faithful
  *  tip instead of inheriting the squash's tree. */
 function mapBranchesToTargetTips(
+  graph: SourceGraph,
   remote: string,
   branches: string[],
   syncedShaMap: Map<string, string>,
@@ -1717,20 +1726,15 @@ function mapBranchesToTargetTips(
 ): Map<string, string> {
   const branchMapping = new Map<string, string>();
   for (const branch of branches) {
-    const log = git(["log", "--first-parent", "--format=%H", `${remote}/${branch}`], { safe: true });
-    if (!log.ok) {
-      fail(`Failed to list commits for ${remote}/${branch}: ${log.stderr}`);
-    }
-    const hashes = log.stdout.split("\n").map(l => l.trim()).filter(Boolean);
-    const tip = hashes[0];
-    for (const hash of hashes) {
-      const replayed = syncedShaMap.get(hash)
-        ?? absorbedMap.get(hash)?.find(e => isSourceAncestor(e.absorber, tip))?.target;
-      if (replayed) {
-        branchMapping.set(branch, replayed);
-        break;
-      }
-    }
+    const tipRes = git(["rev-parse", `${remote}/${branch}`], { safe: true });
+    if (!tipRes.ok || !tipRes.stdout) fail(`Failed to resolve ${remote}/${branch}: ${tipRes.stderr}`);
+    const tip = tipRes.stdout.trim();
+    // Squash-absorbed counterparts stand in only on lineages containing their absorber.
+    const resolve = (hash: string): string | undefined =>
+      syncedShaMap.get(hash) ?? absorbedMap.get(hash)?.find(e => isSourceAncestor(e.absorber, tip))?.target;
+    const h = firstParentUntil(graph, tip, x => resolve(x) !== undefined);
+    const replayed = h ? resolve(h) : undefined;
+    if (replayed) branchMapping.set(branch, replayed);
   }
   return branchMapping;
 }
@@ -1909,35 +1913,62 @@ function isHalt(r: ComposeResult): r is ComposeHalt {
   return "halt" in r;
 }
 
-// True iff every source-side parent is halted AND unmapped — a commit with at
-// least one mapped parent escapes propagation and proceeds to normal replay.
-function isHaltPropagated(
-  commit: TopoCommit,
+// The nearest halt a parent sits behind: walk its first-parent line to the first
+// mapped-or-halted commit; return that commit only if it's a halt (unmapped),
+// else null. A dropped commit is unmapped-but-not-halted, so it doesn't end the
+// walk — the halt of an ancestor masked behind it is still seen.
+function haltBehindParent(
+  graph: SourceGraph,
+  parent: string,
   haltedSources: Set<string>,
   syncedShaMap: Map<string, string>,
+  absorbedMap: AbsorbedMap,
+): string | null {
+  const stop = firstParentUntil(graph, parent,
+    x => syncedShaMap.has(x) || absorbedMap.has(x) || haltedSources.has(x));
+  return stop !== undefined && haltedSources.has(stop) && !syncedShaMap.has(stop) && !absorbedMap.has(stop)
+    ? stop : null;
+}
+
+// True iff every source-side parent sits behind a halt on its first-parent line
+// — a commit with at least one parent reaching a mapping first escapes
+// propagation and proceeds to normal replay. Dropped commits don't break the
+// chain, so a halt masked behind one still propagates to its kept descendants.
+function isHaltPropagated(
+  commit: TopoCommit,
+  graph: SourceGraph,
+  haltedSources: Set<string>,
+  syncedShaMap: Map<string, string>,
+  absorbedMap: AbsorbedMap,
 ): boolean {
   if (commit.parents.length === 0) return false;
-  return commit.parents.every(p => haltedSources.has(p) && !syncedShaMap.has(p));
+  return commit.parents.every(p => haltBehindParent(graph, p, haltedSources, syncedShaMap, absorbedMap) !== null);
 }
 
 /**
  * Record the commit as halted and inherit its halted ancestors' halt reason.
+ * Each parent's nearest masked halt (through any dropped commits) supplies the
+ * inherited anchors and root, so the linkage survives a dropped intermediary.
  */
 function markPropagatedHalt(
   commit: TopoCommit,
   meta: CommitMeta,
+  graph: SourceGraph,
   haltedSources: Set<string>,
   haltRecords: Map<string, HaltRecord>,
+  syncedShaMap: Map<string, string>,
+  absorbedMap: AbsorbedMap,
 ): void {
   haltedSources.add(commit.hash);
   const inheritedAnchorCommits: string[] = [];
   const seenAnchorCommits = new Set<string>();
   let rootHalt: string | undefined;
   for (const p of commit.parents) {
-    const record = haltRecords.get(p);
-    if (!record) continue;
-    rootHalt = rootHalt ?? record.rootHalt ?? p;
-    for (const ac of record.anchorCommits) {
+    const halt = haltBehindParent(graph, p, haltedSources, syncedShaMap, absorbedMap);
+    const record = halt ? haltRecords.get(halt) : undefined;
+    if (!halt) continue;
+    rootHalt = rootHalt ?? record?.rootHalt ?? halt;
+    for (const ac of record?.anchorCommits ?? []) {
       if (!seenAnchorCommits.has(ac)) { inheritedAnchorCommits.push(ac); seenAnchorCommits.add(ac); }
     }
   }
@@ -2082,8 +2113,8 @@ function replayCommits(opts: {
       if (!verbose) logDecileProgress("Replayed", idx, total);
       const meta = getCommitMeta(commit.hash);
 
-      if (isHaltPropagated(commit, haltedSources, syncedShaMap)) {
-        markPropagatedHalt(commit, meta, haltedSources, haltRecords);
+      if (isHaltPropagated(commit, graph, haltedSources, syncedShaMap, absorbedMap)) {
+        markPropagatedHalt(commit, meta, graph, haltedSources, haltRecords, syncedShaMap, absorbedMap);
         continue;
       }
 
@@ -2104,7 +2135,7 @@ function replayCommits(opts: {
       }
 
       // Resolve parent from trailers or Halt anchors for squash fix
-      const resolved = resolveHaltAwareParents(commit, syncedShaMap, absorbedMap, targetInit, haltedSources, haltRecords);
+      const resolved = resolveHaltAwareParents(commit, graph, syncedShaMap, absorbedMap, targetInit, haltedSources, haltRecords);
       if (resolved.foreignAbsorbed) {
         haltAbsorbedElsewhere({ commit, meta, foreign: resolved.foreignAbsorbed, dc, haltedSources, haltRecords });
         continue;
@@ -2229,7 +2260,7 @@ export function mirrorHistory(opts: {
   if (newCommits.length === 0) {
     return {
       mirrored: 0,
-      branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
+      branchMapping: mapBranchesToTargetTips(graph, dc.source.remote, branches, syncedShaMap, absorbedMap),
       syncedShaMap: flattenMappings(syncedShaMap, absorbedMap),
       upToDate: true,
       haltedBranches: [],
@@ -2290,7 +2321,7 @@ export function mirrorHistory(opts: {
 
   return {
     mirrored: replayedCount,
-    branchMapping: mapBranchesToTargetTips(dc.source.remote, branches, syncedShaMap, absorbedMap),
+    branchMapping: mapBranchesToTargetTips(graph, dc.source.remote, branches, syncedShaMap, absorbedMap),
     syncedShaMap: flattenMappings(syncedShaMap, absorbedMap),
     upToDate: false,
     haltedBranches,

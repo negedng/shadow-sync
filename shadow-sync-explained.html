@@ -1453,7 +1453,7 @@ Out: P''s tree (1-parent shortcut, same as cross-repo)</code></pre>
 </div>
 
 <div class="card fn-card">
-<h4><code>collectAbsorbedHalted(commit, haltedSources, syncedShaMap): string[]</code></h4>
+<h4><code>collectAbsorbedHalted(commit, haltedSources, syncedShaMap, graph): string[]</code></h4>
 <p>Round-trip absorption walk. BFS from <code>commit</code>&rsquo;s source-side parents through halted unmapped ancestors, stopping at mapped commits. The returned SHAs become additional <code>Shadow-replayed-&lt;pair&gt;-&lt;source-remote&gt;</code> trailers on <code>commit</code>&rsquo;s replay, so <code>loadReplayedMappings</code> treats them as already-replayed on the next run and skips them. This is how a single squashed shadow commit absorbs <code>Bm</code> and any descendants halted with it after the operator&rsquo;s round-trip merge arrives.</p>
 <pre><code>In:  commit = R_be (BE-side merge of [Bm, Mm'_on_be] after the round-trip)
      haltedSources = { Bm, Bm+1, Bm+2 }   (Bm halted; Bm+1/Bm+2 propagated)
@@ -1498,7 +1498,7 @@ Out: same shape, but the shadow ref placeholder is "&lt;source-branch&gt;"
 </div>
 
 <div class="card fn-card">
-<h4><code>resolveHaltAwareParents(commit, syncedShaMap, absorbedMap, targetInit, haltedSources, haltRecords): string[]</code></h4>
+<h4><code>resolveHaltAwareParents(commit, graph, syncedShaMap, absorbedMap, targetInit, haltedSources, haltRecords): string[]</code></h4>
 <p>Like <code>resolveTargetParents</code>, but when a source parent is in <code>haltedSources</code>, splice in the FULL set of anchor commits the halt-causer had (<code>haltRecords.get(parent).anchorCommits</code>) rather than letting <code>findEchoAnchor</code> pick one non-deterministically. This keeps the previously-pushed shadow tip (which <code>mapBranchesToTargetTips</code> chose by the same newest-first walk) in the resulting parent set, so the round-trip absorption&rsquo;s FF push remains valid.</p>
 <pre><code>In:  commit = R_be (parents = [Bm, Mm'_on_be])
      haltedSources = { Bm }
@@ -1516,9 +1516,9 @@ Out: identical to resolveTargetParents (single mapping per source parent)</code>
 <h3 class="fn-group">Parent resolution</h3>
 
 <div class="card fn-card">
-<h4><code>findEchoAnchor(parentHash, syncedShaMap): string | null</code></h4>
-<p>For an unmapped parent: walk its ancestors newest-first, return the first one in the SHA mapping.</p>
-<pre><code>In:  parentHash = Bc3 (not in mapping); ancestors: Bc2 (not mapped), Bc1 (mapped → Bc1')
+<h4><code>findEchoAnchor(graph, parentHash, syncedShaMap): string | null</code></h4>
+<p>For an unmapped parent: walk its <strong>first-parent line</strong> (over the loaded source graph), return the first commit in the SHA mapping. First-parent suffices — a treesame merge that joins two kept lines is itself kept by <code>isLoadBearing</code>, so any mapped ancestor of a dropped commit is reachable on the first-parent line (no all-ancestors walk). A parent whose first-parent line reaches a <em>halt</em> before any mapping never reaches this function: <code>isHaltPropagated</code> halts its descendant first.</p>
+<pre><code>In:  parentHash = Bc3 (not in mapping); first-parent line: Bc2 (not mapped), Bc1 (mapped → Bc1')
 Out: "Bc1'"
 
 In:  parentHash's full ancestry has zero mapped commits
@@ -1606,8 +1606,8 @@ Out: { direct: Map {}, absorbed: Map {} }  (skips the git log call entirely)</co
 </div>
 
 <div class="card fn-card">
-<h4><code>mapBranchesToTargetTips(remote, branches, syncedShaMap, absorbedMap): Map&lt;branch, targetSHA&gt;</code></h4>
-<p>Per branch, walk newest-first (<code>log --first-parent</code>) and return the first commit found in <code>syncedShaMap</code> or <code>absorbedMap</code>. The branch HEAD may be outer-only (didn&rsquo;t touch <code>source.dir/</code>), so we still advance to the most recent mapped ancestor; an absorbed halt-causer resolves to its squashed shadow commit.</p>
+<h4><code>mapBranchesToTargetTips(graph, remote, branches, syncedShaMap, absorbedMap): Map&lt;branch, targetSHA&gt;</code></h4>
+<p>Per branch, walk the first-parent line over the loaded source graph (<code>firstParentUntil</code>) and return the first commit found in <code>syncedShaMap</code> or <code>absorbedMap</code>. The branch HEAD may be outer-only (didn&rsquo;t touch <code>source.dir/</code>), so we still advance to the most recent mapped ancestor; an absorbed halt-causer resolves to its squashed shadow commit.</p>
 <pre><code>In:  branches = ["project"]; project's tip = Bt3 (outer-only, e.g. a CI tweak);
      one commit back is Bf1 (touches backend/) mapped to Bf1'
 Out: Map { "project" → "Bf1'" }
@@ -1624,7 +1624,7 @@ Out: Map { "project" → "Bt3'", "main" → "Bc4'" }</code></pre>
 <div class="card fn-card">
 <h4><code>replayCommits({ newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph }): { haltedSources, haltRecords }</code></h4>
 <p>The replay loop. For each commit, for each mapping in <code>dc.mappings</code>: <code>resolveHaltAwareParents</code> → <code>composeMergeBaseTree</code> → <code>buildReplayedTree</code> → <code>commit-tree</code> with the original env → record source→new in <code>syncedShaMap</code>. Per-commit <code>.shadowignore</code> reads at <code>{mapping.source}/.shadowignore</code> are appended to that mapping&rsquo;s entry in <code>dc.autoIgnoreBySourceIdx</code> (the intra-pair nested-mapping pre-computed list) before tree building. Parent edges come from the loaded <code>graph</code>.</p>
-<p>When <code>composeMergeBaseTree</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatHaltDiagnostic</code> into <code>haltRecords</code>, and the loop continues with the next commit. Descendants whose source parents are <em>all</em> halted+unmapped inherit the halt (and the halt-causer's <code>anchorCommits</code>) so the FF-push invariant holds. A descendant with at least one non-halted parent (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeMergeBaseTree</code>'s echo-splice branch recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltRecords }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
+<p>When <code>composeMergeBaseTree</code> returns null (outer-state divergence between mapped parents), the engine <strong>halts that branch instead of throwing</strong>: <code>commit.hash</code> goes into <code>haltedSources</code>, the diagnostic from <code>formatHaltDiagnostic</code> into <code>haltRecords</code>, and the loop continues with the next commit. Descendants where <em>every</em> source parent sits behind a halt on its first-parent line inherit the halt (and the halt-causer's <code>anchorCommits</code>) so the FF-push invariant holds. The check (<code>haltBehindParent</code>) walks each parent's first-parent line through dropped commits, so a halt masked behind a dropped commit still propagates. A descendant where at least one parent's first-parent line reaches a mapping before any halt (e.g. <code>R_be</code> after the operator's round-trip merge brings <code>Mm'_on_source</code> back) falls through to normal replay; <code>composeMergeBaseTree</code>'s echo-splice branch recognizes the round-trip and <code>collectAbsorbedHalted</code> appends extra <code>Shadow-replayed-&lt;pair&gt;-&lt;remote&gt;: &lt;sha&gt;</code> trailers so the halt-causer and any halted descendants are absorbed into one squashed shadow commit. Returns <code>{ haltedSources, haltRecords }</code>; <code>mirrorHistory</code> projects original (non-empty-diagnostic) entries into <code>HaltedBranch[]</code>.</p>
 <pre><code>In:  newCommits = [Bc3, Bt2 (merge of Bc4 + Br2)]; syncedShaMap = {} initially
      targetInit = monorepo's init;
      dc.mappings = [{ source: "", target: "backend" }]   (single mapping)
@@ -1815,9 +1815,9 @@ Out: { exitCode: 1,
           <li><strong><code>replayCommits({ newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph })</code></strong>
             &mdash; per-commit loop; returns <code>{ haltedSources, haltRecords }</code>. <em>Walkthroughs A/B/C
             below pick up here; walkthrough D covers the halt branch.</em></li>
-          <li><strong><code>mapBranchesToTargetTips(source.remote, branches, syncedShaMap, absorbedMap)</code></strong>
-            &rarr; <code>Map&lt;branch, targetSHA&gt;</code> &mdash; walk each branch newest-first to
-            find the first mapped ancestor.</li>
+          <li><strong><code>mapBranchesToTargetTips(graph, source.remote, branches, syncedShaMap, absorbedMap)</code></strong>
+            &rarr; <code>Map&lt;branch, targetSHA&gt;</code> &mdash; walk each branch's first-parent line
+            over the loaded graph to find the first mapped ancestor.</li>
           <li>per branch: compare target&rsquo;s existing shadow ref to the new tip
             <ul>
               <li><code>git push target.remote &lt;new&gt;:refs/heads/shadow/...</code> &mdash;
@@ -2169,7 +2169,9 @@ Out: { exitCode: 1,
     <code>refs/heads/shadow/{pair}/{branch}</code>.</li>
   <li><strong><code>haltedSources.add(M.hash)</code></strong> &mdash; mark the source merge as
     halted. M is NOT added to <code>syncedShaMap</code>, so later descendants either inherit the
-    halt (via the all-parents-halted check) or absorb it via the round-trip path (D2).</li>
+    halt (via the propagation check &mdash; every parent's first-parent line reaches the halt before
+    any mapping, seeing through dropped commits with <code>haltBehindParent</code>) or absorb it via
+    the round-trip path (D2).</li>
   <li><strong><code>haltRecords.set(M.hash, &hellip;)</code></strong> &mdash; store
     <code>anchorCommits</code> (used by <code>resolveHaltAwareParents</code> when an escaping
     descendant arrives) and the diagnostic (surfaced to the CLI).</li>
@@ -2199,7 +2201,7 @@ Out: { exitCode: 1,
         trailer, records <code>syncedShaMap[Mm'_on_source] = Mm</code>, and <code>dropNonLoadBearingCommits</code>
         skips it as already-synced. <code>R_be</code> stays in the work list (no trailer of its own yet).</li>
       <li>the replay loop reaches <code>R_be</code>. Its parents are <code>[Bm, Mm'_on_source]</code>.
-        Not all halted+unmapped (Mm'_on_source is mapped) &rarr; proceed.</li>
+        Not all parents sit behind a halt (Mm'_on_source is mapped) &rarr; proceed.</li>
       <li><strong><code>resolveHaltAwareParents(R_be, &hellip;)</code></strong> expands
         <code>Bm</code> to its halt <code>mappedParents</code> (e.g. <code>[A', B']</code>) and
         appends <code>Mm</code> from the second parent &rarr;
@@ -2623,10 +2625,9 @@ secrets/</code></pre>
   <tr><th>Invocation</th><th>What it does</th><th>Why here</th></tr>
   <tr><td><code>log --topo-order --format=%H %P &lt;branches&gt;</code> <span class="tag tag-orange">safe</span></td><td>Whole reachable graph, each line <code>&lt;commit&gt; &lt;parent&hellip;&gt;</code>, newest-first.</td><td><code>collectSourceGraph</code> (call 1): builds the in-memory parent map + topo index the keep/drop scan walks once, instead of a <code>log</code> per commit. <code>%P</code> with no pathspec reports the true (unsimplified) parents, so TREESAME merge parents survive without a separate re-fetch.</td></tr>
   <tr><td><code>log --full-history --format=%H &lt;branches&gt; -- &lt;dirs&gt;/</code> <span class="tag tag-orange">safe</span></td><td>Commits whose own diff touched a synced dir.</td><td><code>collectSourceGraph</code> (call 2): the &ldquo;sync-touched&rdquo; set used by the keep/drop discriminator. Omitted entirely when any mapping is rooted at <code>""</code> (then every commit counts as in scope).</td></tr>
-  <tr><td><code>log -1 --format=%P &lt;hash&gt;</code> <span class="tag tag-orange">safe</span></td><td>One commit's parents.</td><td><code>graphParentsOf</code> fallback for a hash outside the loaded graph; also the orphan-drop and absorbed-halt walks, chasing parent edges one hop at a time.</td></tr>
-  <tr><td><code>log --first-parent --format=%H &lt;remote&gt;/&lt;branch&gt;</code> <span class="tag tag-orange">safe</span></td><td>Mainline history, newest-first.</td><td><code>mapBranchesToTargetTips</code>: walk a branch's first-parent line until the most recent already-mapped ancestor.</td></tr>
+  <tr><td><code>log -1 --format=%P &lt;hash&gt;</code> <span class="tag tag-orange">safe</span></td><td>One commit's parents.</td><td><code>graphParentsOf</code> fallback for a hash outside the loaded graph. Backs every first-parent walk over the graph — <code>firstParentUntil</code> (the settled-frontier, <code>mapBranchesToTargetTips</code>, <code>findEchoAnchor</code>, and the <code>haltBehindParent</code> propagation check) — plus the orphan-drop and absorbed-halt walks, chasing parent edges one hop at a time.</td></tr>
+  <tr><td><code>rev-parse &lt;remote&gt;/&lt;branch&gt;</code> <span class="tag tag-orange">safe</span></td><td>A branch's tip SHA.</td><td><code>mapBranchesToTargetTips</code>: resolve the tip, then walk its first-parent line over the loaded graph (<code>firstParentUntil</code>) to the most recent already-mapped ancestor.</td></tr>
   <tr><td><code>log --format=%H &lt;pi&gt; ^&lt;p1&gt;</code> <span class="tag tag-orange">safe</span></td><td>Commits reachable from Pi but not P1.</td><td><code>hasKeptExclusiveAncestor</code>: decide whether a merge is load-bearing by checking if a non-first parent contributes any kept commit.</td></tr>
-  <tr><td><code>log --topo-order --format=%H &lt;hash&gt;</code> <span class="tag tag-orange">safe</span></td><td>Full ancestry, newest-first.</td><td><code>findEchoAnchor</code>: walk an out-of-scope parent until a mapped ancestor turns up to anchor the replay.</td></tr>
   <tr><td><code>log --max-parents=0 --format=%H &lt;remote&gt;/main</code> <span class="tag tag-orange">safe</span></td><td>Root commit(s) of a branch.</td><td>Find the target's init commit, used as the fallback parent for orphaned source roots.</td></tr>
   <tr><td><code>log -1 --format=&lt;NUL-joined fields&gt; &lt;hash&gt;</code></td><td>All metadata for one commit in a single read.</td><td><code>getCommitMeta</code>: author/committer identity, dates, subject, body, and unfolded trailers. Fields are NUL-separated with <code>%B</code> last so message newlines can't shift columns.</td></tr>
 </table>

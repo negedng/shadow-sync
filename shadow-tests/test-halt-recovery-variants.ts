@@ -14,6 +14,10 @@
  *   halt-persistence                — halt diagnostic persists across reruns until recovered
  *   approach-a-still-works          — manually built shadow commit with replay trailer (Approach A) resumes
  *   multi-commit-halt-absorption    — Bm+1 (post-halt commit) inherits halt + gets absorbed in the squash
+ *   halt-not-resolved-by-dropped-child — a dropped commit masks the halt; the
+ *                                     kept child below it must propagate the halt
+ *                                     (first-parent walk sees through the drop),
+ *                                     not replay around it (ref pinned, Bm not absorbed)
  *   multi-echo-octopus-halts        — 3-parent octopus whose 2nd/3rd parents carry echo trailers halts
  *   multi-echo-octopus-recovery     — recovery from the octopus halt
  *   halted-partial-tip-first-parent — mapBranchesToTargetTips picks project-a's tip via first-parent walk
@@ -347,6 +351,51 @@ async function runAll(): Promise<void> {
       git("fetch origin --prune", env.localRepo);
       const sqHash2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
       assertEqual(sqHash2, sqHash, "shadow tip stable across multi-trailer idempotent re-run");
+    } finally {
+      env.cleanup();
+    }
+  }
+
+  // A dropped commit D (child of the halted Bm) followed by a kept commit C.
+  // D is unmapped-but-not-halted, so a naive "are my direct parents halted"
+  // check would let C replay — anchoring around Bm to ONE side and silently
+  // adopting it as a resolution. Halt propagation walks each parent's
+  // first-parent line through dropped commits (haltBehindParent), so C sees the
+  // masked halt and propagates it: C is skipped, the shadow ref stays pinned at
+  // the last faithful tip, Bm is never absorbed, and C's content never lands.
+  function runHaltNotResolvedByDroppedChild(): void {
+    const { env, info } = setupAndFailReplay("halt-not-resolved-dropped-child");
+    try {
+      git("fetch origin --prune", env.localRepo);
+      const tipBefore = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+
+      git("checkout core-dev", env.remoteWorking);
+      git('commit --allow-empty -m "D (dropped empty commit)"', env.remoteWorking);
+      writeFile(env.remoteWorking, "after.ts", "after-halt content\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "C (kept child of dropped D)"', env.remoteWorking);
+      git("push origin core-dev", env.remoteWorking);
+
+      const r = runCiSync(env);
+      assert(r.status !== 0, "sync must fail while the halt is unresolved");
+      assert(/cannot auto-resolve replay parent tree/.test(r.stdout + r.stderr),
+        `halt diagnostic for Bm must persist; got:\n${r.stdout}\n${r.stderr}`);
+      // C propagates the halt and is skipped cleanly — it must NOT replay and
+      // then get rejected by the fast-forward guard (the old, accidental path).
+      assert(!/diverged with different tree/.test(r.stdout + r.stderr),
+        `C must propagate the halt, not replay-then-FF-block; got:\n${r.stdout}\n${r.stderr}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const tipAfter = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      assertEqual(tipAfter, tipBefore, "shadow ref must not advance past the halt");
+
+      const msg = gitOut(`log -1 --format=%B ${tipAfter}`, env.localRepo);
+      assert(!msg.includes(info.bm), `Bm must NOT be absorbed/replayed onto the faithful tip\n${msg}`);
+
+      // C's content must not have leaked onto the shadow ref.
+      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/core-dev", env.localRepo);
+      assert(!tree.includes("backend/after.ts"),
+        `C's content must not land while the halt is unresolved; tree:\n${tree}`);
     } finally {
       env.cleanup();
     }
@@ -767,6 +816,7 @@ async function runAll(): Promise<void> {
     ["halt-persistence", runHaltPersistence],
     ["approach-a-still-works", runApproachAStillWorks],
     ["multi-commit-halt-absorption", runMultiCommitHaltAbsorption],
+    ["halt-not-resolved-by-dropped-child", runHaltNotResolvedByDroppedChild],
     ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
     ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
     ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
