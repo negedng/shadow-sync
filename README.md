@@ -57,7 +57,9 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 - `url` tells the tool how to reach the repo
 - An endpoint may set `"anchorBranch"` (default `"main"`) — the branch whose init commit anchors replayed orphan history on that side. Set it if the repo's mainline is `master`/`trunk`
 
-Optional top-level fields (see `shadow-config.example.json`): `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `identities`.
+Optional top-level fields (see `shadow-config.example.json`): `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `identities`, `sides`.
+
+A top-level `"sides"` object gives the two endpoints friendly names for the `--from` flag — e.g. `"sides": { "a": "mono", "b": "ext" }` lets `--from mono` / `--from ext` stand in for `--from a` / `--from b` (the literal `a`/`b` keep working). The two names must be distinct and not be the literal `"a"`/`"b"`. The codebase still refers to the sides as `a`/`b` internally.
 
 A top-level `"identities"` list maps one person's git identity across remotes. Each entry binds a remote name to that person's `{ name, email }` on it; replaying a commit from remote S to remote T rewrites the author/committer whose email matches the S binding (case-insensitive) to the T binding. Dates, messages, and anyone without a matching entry pass through verbatim. Emails must be unique per remote across entries — the mapping runs in both directions, so a duplicate would make the reverse lookup ambiguous. Only commits replayed after the config lands are affected; existing shadow commits keep their recorded identity.
 

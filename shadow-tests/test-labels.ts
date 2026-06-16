@@ -14,7 +14,7 @@ import {
   readShadowFile, readExternalShadowFile,
   setTestBranchAllowlist,
 } from "./harness";
-import { applyTestOverrides, listRemoteBranches } from "../shadow-common";
+import { applyTestOverrides, listRemoteBranches, resolveFromSide } from "../shadow-common";
 import { assertEqual } from "./assert";
 import { execSync } from "child_process";
 
@@ -88,12 +88,50 @@ function runValidation(repoRoot: string): void {
   expectReject([pairAt("be", "a-be", "b..be")], "dot-dot in label");
 }
 
+// ── C. side aliases: --from resolves names to a/b ────────────────────────────
+function runSideAliases(repoRoot: string): void {
+  const pair = {
+    name: "be",
+    a: { remote: "origin", url: "unused", label: "a-be" },
+    b: { remote: "ext", url: "unused", label: "b-be" },
+    mappings: [{ a: "be", b: "" }],
+  };
+
+  applyTestOverrides({ repoRoot, pairs: [pair], sides: { a: "mono", b: "ext" } });
+  assertEqual(resolveFromSide("mono"), "a", "[aliases] 'mono' resolves to a");
+  assertEqual(resolveFromSide("ext"), "b", "[aliases] 'ext' resolves to b");
+  assertEqual(resolveFromSide("a"), "a", "[aliases] literal 'a' still works");
+  assertEqual(resolveFromSide("b"), "b", "[aliases] literal 'b' still works");
+  assertEqual(resolveFromSide(undefined), "b", "[aliases] default is b");
+
+  let threw = false;
+  try { resolveFromSide("nope"); } catch { threw = true; }
+  assertEqual(threw, true, "[aliases] unknown --from value is rejected");
+
+  // Without aliases configured, only a/b are accepted.
+  applyTestOverrides({ repoRoot, pairs: [pair], sides: null });
+  let threw2 = false;
+  try { resolveFromSide("mono"); } catch { threw2 = true; }
+  assertEqual(threw2, true, "[aliases] alias rejected once sides cleared");
+
+  // Invalid side configs are rejected.
+  const expectBadSides = (sides: any, label: string) => {
+    let t = false;
+    try { applyTestOverrides({ repoRoot, pairs: [pair], sides }); } catch { t = true; }
+    assertEqual(t, true, `[aliases] ${label} must be rejected`);
+  };
+  expectBadSides({ a: "x", b: "x" }, "duplicate side aliases");
+  expectBadSides({ a: "a", b: "ext" }, "alias shadowing literal 'a'");
+  expectBadSides({ a: "mono", b: "" }, "empty side alias");
+}
+
 export default function run(): void {
   setTestBranchAllowlist({ origin: ["main"], team: ["main"], backend: ["main"] });
   try {
     runNamespaces();
     // Pairs are validated before repoRoot is touched, so any path works here.
     runValidation(process.cwd());
+    runSideAliases(process.cwd());
   } finally {
     setTestBranchAllowlist();
   }

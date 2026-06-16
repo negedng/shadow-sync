@@ -67,11 +67,16 @@ export interface RepoIdentity {
  *  S binding to the T binding; anyone without a matching entry passes through. */
 export type IdentityProfile = Record<string, RepoIdentity>;
 
+/** Friendly aliases for the two sides, e.g. { a: "mono", b: "ext" } lets
+ *  `--from mono` / `--from ext` stand in for `--from a` / `--from b`. */
+export interface Sides { a: string; b: string }
+
 interface ShadowSyncConfig {
   pairs: SyncPair[];
   identities: IdentityProfile[];
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
+  sides: Sides | null;
 }
 
 interface DirMappingDirected {
@@ -203,6 +208,17 @@ function validatePairs(pairs: SyncPair[]): void {
   }
 }
 
+// Side aliases stand in for the literal "a"/"b" on the --from flag. They must
+// be a distinct, non-empty pair and must not shadow the literal side letters.
+function validateSides(sides: Sides | null): void {
+  if (sides == null) return;
+  for (const k of ["a", "b"] as const) {
+    if (!sides[k] || typeof sides[k] !== "string") fail(`config "sides.${k}" must be a non-empty string`);
+    if (sides[k] === "a" || sides[k] === "b") fail(`config "sides.${k}" must not be "a" or "b"`);
+  }
+  if (sides.a === sides.b) fail(`config "sides" a and b must differ ("${sides.a}")`);
+}
+
 // Replays rewrite identities in both directions, so each remote's email must
 // belong to at most one profile — a duplicate makes the reverse lookup ambiguous.
 function validateIdentities(identities: IdentityProfile[]): void {
@@ -249,6 +265,7 @@ function loadConfig(): ShadowSyncConfig {
       identities: [],
       gitConfigOverrides: {},
       maxBuffer: 50 * 1024 * 1024,
+      sides: null,
     };
   }
 
@@ -261,8 +278,10 @@ function loadConfig(): ShadowSyncConfig {
   validatePairs(pairs);
   const identities = (doc.identities as IdentityProfile[]) ?? [];
   validateIdentities(identities);
+  const sides = (doc.sides as Sides | undefined) ?? null;
+  validateSides(sides);
 
-  return { pairs, identities, gitConfigOverrides, maxBuffer };
+  return { pairs, identities, gitConfigOverrides, maxBuffer, sides };
 }
 
 const config = loadConfig();
@@ -270,6 +289,20 @@ const config = loadConfig();
 export const PAIRS: SyncPair[] = [...config.pairs];
 const IDENTITIES: IdentityProfile[] = [...config.identities];
 const MAX_BUFFER = config.maxBuffer;
+let _sides: Sides | null = config.sides;
+
+/** Resolve a `--from` value to a side. Accepts the literal "a"/"b" or, when
+ *  configured, either side alias. Defaults to "b" (pull). Fails on anything else. */
+export function resolveFromSide(value: string | undefined): "a" | "b" {
+  if (value == null) return "b";
+  if (value === "a" || value === "b") return value;
+  if (_sides) {
+    if (value === _sides.a) return "a";
+    if (value === _sides.b) return "b";
+  }
+  const aliases = _sides ? ` | "${_sides.a}" | "${_sides.b}"` : "";
+  fail(`--from must be "a" | "b"${aliases}, got "${value}".`);
+}
 
 
 export function fail(msg: string): never {
@@ -295,17 +328,20 @@ export function applyTestOverrides(opts: {
   /** Accepted for back-compat with existing tests; labels now name shadow refs. */
   shadowBranchPrefix?: string;
   identities?: IdentityProfile[];
+  sides?: Sides | null;
 }): void {
   // Validate before mutating module state so a rejected override can't poison
   // a later in-process run.
   validatePairs(opts.pairs);
   const identities = opts.identities ?? config.identities;
   validateIdentities(identities);
+  if (opts.sides !== undefined) validateSides(opts.sides);
   _repoRoot = opts.repoRoot;
   PAIRS.length = 0;
   PAIRS.push(...opts.pairs);
   IDENTITIES.length = 0;
   IDENTITIES.push(...identities);
+  if (opts.sides !== undefined) _sides = opts.sides;
 }
 
 

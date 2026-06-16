@@ -5,10 +5,13 @@
  * Direction is specified with --from: which side's commits to replay.
  *   --from b: replay b's commits into shadow branches on a's remote
  *   --from a: replay a's commits into shadow branches on b's remote
+ * --from also accepts the config's side aliases (e.g. `"sides": {"a":"mono",
+ * "b":"ext"}` lets `--from mono` / `--from ext` stand in for a / b).
  *
  * Usage:
  *   npx tsx shadow-sync.ts --pair backend --from b          # pull from b → a
  *   npx tsx shadow-sync.ts --pair backend --from a          # push from a → b
+ *   npx tsx shadow-sync.ts --pair backend --from ext        # pull (b alias)
  *   npx tsx shadow-sync.ts --pair backend --from a -b main  # push specific branch
  *   npx tsx shadow-sync.ts --pair backend --from b -n       # dry run, push nothing
  */
@@ -18,14 +21,15 @@ import {
   git, refExists, listRemoteBranches, filterBranchesForRemote,
   shadowBranchName, ensureRemote,
   mirrorHistory, syncTags, runPreflightChecks, printPreflightResults,
-  validateName, fail,
+  validateName, fail, resolveFromSide,
 } from "./shadow-common";
 
 // ── Exported sync function (used by tests in-process) ────────────────────────
 
 export interface SyncOptions {
   pair?: string;
-  from?: "a" | "b";
+  /** "a" | "b", or a configured side alias (resolved via resolveFromSide). */
+  from?: string;
   branch?: string;
   dryRun?: boolean;
   tags?: boolean;
@@ -79,10 +83,7 @@ function _runSyncCore(options: SyncOptions): number {
     fail(`Pair '${pairName}' not found in config.`);
   }
 
-  const fromSide = (options.from ?? "b") as "a" | "b";
-  if (fromSide !== "a" && fromSide !== "b") {
-    fail(`--from must be "a" or "b", got "${options.from}".`);
-  }
+  const fromSide = resolveFromSide(options.from);
 
   const dryRun = options.dryRun ?? false;
   if (dryRun) console.log("[DRY RUN] No branches or tags will be pushed.");
@@ -313,7 +314,8 @@ function pushShadowBranches(opts: {
 const USAGE = `Usage: npx tsx shadow-sync.ts [options]
   -p, --pair <name>    Sync only this pair (default: all configured pairs)
   -r, --remote <name>  Alias for --pair
-  -f, --from <a|b>     Which side's commits to replay (default: b)
+  -f, --from <side>    Which side's commits to replay: a|b or a config side
+                       alias (e.g. mono|ext). Default: b
   -b, --branch <name>  Sync only this branch (bypasses branch-filters.json)
   -n, --dry-run        Replay but push nothing
       --tags           Also sync tags (off by default)
@@ -346,7 +348,7 @@ if (require.main === module) {
 
   const result = runSync({
     pair: (values.pair ?? values.remote) as string | undefined,
-    from: (values.from ?? "b") as "a" | "b",
+    from: values.from as string | undefined,
     branch: values.branch as string | undefined,
     dryRun: (values["dry-run"] as boolean | undefined) ?? false,
     tags: (values.tags as boolean | undefined) ?? false,

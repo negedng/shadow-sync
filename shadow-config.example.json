@@ -25,6 +25,8 @@
     }
   ],
 
+  "sides": { "a": "mono", "b": "ext" },
+
   "gitConfigOverrides": {
     "core.autocrlf": "false",
     "core.safecrlf": "false",
