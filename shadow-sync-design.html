@@ -277,14 +277,14 @@
 <p>Points where we had a real alternative and picked one. Each card names the requirement(s) it derives from and the alternative it ruled out. Mechanisms that fall out of a choice without a meaningful alternative of their own live in <a href="#consequences">&sect;3</a>, not here.</p>
 
 <div class="card" id="c1">
-  <h3><span class="ref ref-c">C1</span> Each direction lands changes via a <code>shadow/</code> branch on the target side</h3>
+  <h3><span class="ref ref-c">C1</span> Each direction lands changes via a label-named shadow branch on the target side</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r2">R2</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r6">R6</a></p>
   <p class="from"><strong>Rejected alternatives:</strong> force-push replayed commits onto the target&rsquo;s <code>main</code>; auto-merge via a bot; or commit to one direction (single shadow branch on a single side, treating the other side as source-of-truth).</p>
   <p>
     Sync is bidirectional &mdash; both sides accumulate new commits between syncs, and
     <a class="ref ref-r" href="#r2">R2</a> says neither side can be silently overwritten. The model
     that follows: each direction gets its own <em>shadow branch</em> on the target side, named
-    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code>. The replay engine produces the branch; the team
+    <code>&lt;sourceLabel&gt;/&lt;branch&gt;</code> after the label of the endpoint replayed from. The replay engine produces the branch; the team
     that owns the target&rsquo;s <code>main</code> lands it via <code>git merge</code> when they&rsquo;re
     ready.
   </p>
@@ -300,37 +300,37 @@
     sets the bar: when the consumer merges, the only conflicts they should see are the ones their
     own contributors caused inside <code>dir/</code>. Everything else &mdash; missing files, modified
     files, modify/delete pairs &mdash; is a phantom conflict the engine produced. Thus, when a commit is echo'd with the outer layout, we mirror the outer files and diff the synced files (see <a class="ref ref-m" href="#m1">M1</a>). This way a plain
-    <code>git merge origin/shadow/&hellip;</code> just works.
+    <code>git merge origin/&lt;sourceLabel&gt;/&hellip;</code> just works.
   </p>
 </div>
 
 <div class="card" id="c3">
-  <h3><span class="ref ref-c">C3</span> Deduplicate replayed commits via git trailers, scoped by pair name and source remote</h3>
+  <h3><span class="ref ref-c">C3</span> Deduplicate replayed commits via git trailers, keyed by the two endpoint labels</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r1">R1</a> &middot; <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r7">R7</a></p>
   <p class="from"><strong>Rejected alternative:</strong> <code>git notes</code> (separate ref, easy to drop on a fresh clone); a sidecar mapping file outside git; or content-based dedup on tree SHAs (silently drops legitimate no-op commits); or trailer scoped only by source remote, with pair name left implicit (breaks <a class="ref ref-r" href="#r7">R7</a> &mdash; see below).</p>
   <p>
     Syncs have to converge to the same result
     under <a class="ref ref-r" href="#r4">R4</a>. Each replayed commit carries
-    <code>Shadow-replayed-&lt;pair&gt;-&lt;sourceRemote&gt;: &lt;sha&gt;</code>; before replay, we scan the
-    target&rsquo;s shadow branches for that pair and build a <code>source SHA &rarr; target SHA</code>
+    <code>&lt;sourceLabel&gt;-to-&lt;targetLabel&gt;: &lt;sha&gt;</code>; before replay, we scan the
+    target&rsquo;s shadow branches for that direction and build a <code>source SHA &rarr; target SHA</code>
     map. Anything already present is skipped.<br>
     On round-trip echoes (a source commit that already carries a trailer originating from the target), find and use the original commit.
   </p>
   <p>
-    Scoping the trailer by pair name <em>and</em> source remote keeps <a class="ref ref-r" href="#r1">R1</a>
-    and <a class="ref ref-r" href="#r7">R7</a> honest. Without the pair name, two pairs that share a source
+    Keying the trailer by the two endpoint labels keeps <a class="ref ref-r" href="#r1">R1</a>
+    and <a class="ref ref-r" href="#r7">R7</a> honest. With a single shared key, two pairs that share a source
     remote (e.g. parent <code>backend</code> and dedicated <code>common-backend</code> from
     <a class="ref ref-c" href="#c7">C7</a>, both with the same leaf URL) would emit identical trailer
     keys. The trailer scan walks the shadow ref&rsquo;s full git history, which includes the sibling
     pair&rsquo;s replays once a monorepo merge pulls them into shared lineage &mdash; those wrong-shape
     commits would land in <code>shaMapping</code> and the engine would try to push a parent-pair-shape
     commit onto a common-pair shadow ref, failing the FF check (<a class="ref ref-c" href="#c6">C6</a>).
-    Pair name in the trailer key isolates each pair&rsquo;s mapping cleanly.
+    Globally-unique endpoint labels in the trailer key isolate each pair&rsquo;s mapping cleanly.
   </p>
   <p class="from">
     <em>Implementation note:</em> the &ldquo;two pairs sharing a source remote&rdquo; shape
     has since collapsed into the multi-mapping pair shape
-    (<code>SyncPair.mappings: { a, b }[]</code>). Pair-name trailer scoping still applies, but the
+    (<code>SyncPair.mappings: { a, b }[]</code>). Label-based trailer keying still applies, but the
     shared-remote collision it defends against now arises within a single pair&rsquo;s mappings
     rather than between two sibling pairs; the trailer key is unchanged and the dedup invariant
     holds the same way.
@@ -464,9 +464,9 @@
 
 <div class="card compact" id="c11">
   <h3><span class="ref ref-c">C11</span> TS-1st + same-pair trailer discriminator (drop noop sibling merges, keep content propagation)</h3>
-  <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> loose any-pair rule (keep iff TS-some AND any non-first parent carries any <code>Shadow-replayed-*</code> trailer &mdash; produces a noop synthetic per cross-pair merge that&rsquo;s only load-bearing for non-standard workflows); strict TS-some + same-pair rule (drops cross-pair content-propagation merges through shared paths like <code>mono.common/</code>, breaking the common &harr; common bridge between two leaf pairs that both carry a common mapping); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case A and Case B); parent-position rules like "drop iff TS-1st" without the trailer carve-out (breaks Case B).</p>
+  <p class="from">Derives from <a class="ref ref-m" href="#m1">M1</a> &middot; <a class="ref ref-m" href="#m9">M9</a>. <strong>Rejected:</strong> loose any-pair rule (keep iff TS-some AND any non-first parent carries any <code>&lt;src&gt;-to-&lt;tgt&gt;</code> replay trailer &mdash; produces a noop synthetic per cross-pair merge that&rsquo;s only load-bearing for non-standard workflows); strict TS-some + same-pair rule (drops cross-pair content-propagation merges through shared paths like <code>mono.common/</code>, breaking the common &harr; common bridge between two leaf pairs that both carry a common mapping); pure <code>--full-history</code> with no post-filter (keeps every TS merge, including purely-local clutter); pure default rev-list (drops too aggressively &mdash; halts on Case A and Case B); parent-position rules like "drop iff TS-1st" without the trailer carve-out (breaks Case B).</p>
   <p>
-    <code>filterLoadBearingCommits</code>&rsquo;s <code>isLoadBearing</code> drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer (either direction). The TS-1st check (not TS-to-some) is what separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and keeps regardless of trailer &mdash; including the cross-pair shadow merge that propagates content through a shared path (e.g. <code>mono.common/</code> shared between two leaf pairs that both carry a common mapping). The same-pair trailer carve-out keeps Cases A (non-TS-1st same-pair) and B (TS-1st same-pair) and drops Case C noop (TS-1st with only a cross-pair trailer).
+    <code>filterLoadBearingCommits</code>&rsquo;s <code>isLoadBearing</code> drops a commit iff its <em>effective</em> source tree (the source-side tree under <code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own replay trailer (either direction &mdash; <code>&lt;srcLabel&gt;-to-&lt;tgtLabel&gt;</code> or <code>&lt;tgtLabel&gt;-to-&lt;srcLabel&gt;</code>). The TS-1st check (not TS-to-some) is what separates noop merges from content-propagation merges: a TS-2nd-only merge brings new in-scope content from the 2nd parent and keeps regardless of trailer &mdash; including the cross-pair shadow merge that propagates content through a shared path (e.g. <code>mono.common/</code> shared between two leaf pairs that both carry a common mapping). The same-pair trailer carve-out keeps Cases A (non-TS-1st same-pair) and B (TS-1st same-pair) and drops Case C noop (TS-1st with only a cross-pair trailer).
   </p>
   <p>
     Dropping Case C noop means <code>composeMergeBaseTree</code> on subsequent <code>--from b</code> runs takes outer state from the most recent <em>this-pair</em> bridge on the shadow chain &mdash; potentially pre-dating the sibling-pair merge. The replay lands on the target with stale outer. In the standard workflow (mono engineer merges shadow ref into core-dev once per release), git&rsquo;s 3-way merge resolves cleanly because the base agrees with the stale side; core-dev keeps the up-to-date sibling-pair content. Non-standard workflows (project branches merging the shadow ref directly, back-to-back round-trips without mono sync, reading the shadow ref&rsquo;s tree as a snapshot) can surface the stale outer as conflicts. The chosen rule prioritises a tighter shadow chain over defending against unusual workflows; if a project starts hitting Case C drift, switching to the loose any-pair rule is a one-line revert in <code>isLoadBearing</code>. Effective TREESAME (using <code>effectiveSourceTree</code>: <code>read-tree</code> &rarr; <code>rm --cached</code> ignored paths &rarr; <code>write-tree</code>) is what extends the same rule from merges to non-merges, dropping ignore-only edits (Cases F/G) at the source walk so they never emit trailer-only target commits &mdash; idempotent across syncs because the drop is a deterministic function of source-side state. See <a href="local_tests/keep_drop_test/full_history_explained.html">local_tests/keep_drop_test/full_history_explained.html</a> for the discriminator analysis, including the Case B counterexample where parent-position-only rules break, the Type 5/5b split for Case C noop vs. content propagation, and the Type 6 narrative for Cases A and B.
@@ -477,7 +477,7 @@
   <h3><span class="ref ref-c">C12</span> Merge-replay conflicts halt the branch; operator resolves on monorepo&rsquo;s working branch</h3>
   <p class="from">Derives from <a class="ref ref-r" href="#r4">R4</a> &middot; <a class="ref ref-r" href="#r5">R5</a>. <strong>Rejected:</strong> force-resolve via <code>-X ours</code>/<code>-X theirs</code> merge strategy; skip the conflicting commit; pre-resolve via engine-authored tree composition; throw and abort the whole sync.</p>
   <p>
-    When <code>composeMergeBaseTree</code> returns <code>null</code> (mapped parents disagree on outer state outside the path filter, beyond what <code>git merge-tree</code> can FF), the engine halts <em>that branch only</em> (other branches in the same pair keep flowing) and emits a diagnostic naming the source commit and pointing the operator at the resolution recipe. The operator resolves on monorepo&rsquo;s working branch (call it <code>Mm</code>) by re-merging the relevant shadow ref into <code>main</code> with their chosen resolution. The next <code>--from a</code> propagates <code>Mm</code> onto the target&rsquo;s shadow ref; the target operator merges that shadow ref into their working branch (<code>R_be</code>); the next <code>--from b</code> sees <code>R_be</code>, identifies it via the round-trip branch of <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice, and absorbs the halted source commits (the original failing merge plus any descendants halted with it) into one squashed synthetic via multiple <code>Shadow-replayed</code> trailers.
+    When <code>composeMergeBaseTree</code> returns <code>null</code> (mapped parents disagree on outer state outside the path filter, beyond what <code>git merge-tree</code> can FF), the engine halts <em>that branch only</em> (other branches in the same pair keep flowing) and emits a diagnostic naming the source commit and pointing the operator at the resolution recipe. The operator resolves on monorepo&rsquo;s working branch (call it <code>Mm</code>) by re-merging the relevant shadow ref into <code>main</code> with their chosen resolution. The next <code>--from a</code> propagates <code>Mm</code> onto the target&rsquo;s shadow ref; the target operator merges that shadow ref into their working branch (<code>R_be</code>); the next <code>--from b</code> sees <code>R_be</code>, identifies it via the round-trip branch of <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice, and absorbs the halted source commits (the original failing merge plus any descendants halted with it) into one squashed synthetic whose single <code>&lt;src&gt;-to-&lt;tgt&gt;</code> replay trailer lists the direct counterpart first and the absorbed SHAs after it.
   </p>
   <p>
     Auto-resolving the conflict (always-ours, always-theirs, or any engine-authored heuristic) would violate <a class="ref ref-r" href="#r5">R5</a>: the operator&rsquo;s actual intent for the conflicting paths is unrecoverable from the available trees, so the engine&rsquo;s "resolution" would be a phantom one made without human input. Halting puts the decision in the operator&rsquo;s hands while the rest of the sync continues, and the round-trip absorb path ensures the resolution is recorded once and propagated symmetrically to both sides.
@@ -498,7 +498,7 @@
   <p>
     A <em>cross-repo merge</em> is a source commit whose parents straddle both repos: one
     ordinary shadow-chain parent, plus one <em>echo&rsquo;d</em> parent that originated as a
-    target-side commit (carries a <code>Shadow-replayed-{targetRemote}</code> trailer pointing
+    target-side commit (carries a <code>&lt;targetLabel&gt;-to-&lt;sourceLabel&gt;</code> trailer pointing
     back to its target-side hash). Replaying it onto target&rsquo;s shadow needs a tree composed
     from two sources, because no single source-side tree captures both halves correctly:
   </p>
@@ -539,7 +539,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
   <p>
     <strong>Where this fires most often: consumer shadow&rarr;main merges.</strong> When a
-    consumer on the source side runs <code>git merge shadow/&lt;pair&gt;/main</code>, the resulting
+    consumer on the source side runs <code>git merge &lt;sourceLabel&gt;/main</code>, the resulting
     merge commit has parents <code>[main_prev, shadow_prev]</code> &mdash; <code>shadow_prev</code>
     is a chain of replays from the other side and carries our trailer, so it&rsquo;s an echo from
     the target&rsquo;s perspective. That makes the consumer-merge a textbook cross-repo merge for
@@ -547,7 +547,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   </p>
   <p>
     <strong>Multi-echo octopus.</strong> A source octopus that directly merges multiple shadow
-    refs (e.g. <code>git merge --no-ff shadow/&lt;pair&gt;/core-dev shadow/&lt;pair&gt;/project</code>)
+    refs (e.g. <code>git merge --no-ff &lt;sourceLabel&gt;/core-dev &lt;sourceLabel&gt;/project</code>)
     has ≥2 echo&rsquo;d parents. M1 collects all of them and requires their outer slices to agree
     before splicing &mdash; agreement falls through to the single-echo splice (any echo&rsquo;s outer
     is then authoritative); divergence returns <code>null</code>, falling through to
@@ -583,7 +583,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     (<code>sourceDir/</code> with <code>autoIgnorePatterns</code> and this commit&rsquo;s
     <code>.shadowignore</code> stripped) is TREESAME to the <strong>first</strong> parent&rsquo;s
     effective tree AND, for merges, no non-first parent carries this pair&rsquo;s own
-    <code>Shadow-replayed-&lt;pair&gt;-*</code> trailer. Same predicate at every commit shape:
+    replay trailer (<code>&lt;srcLabel&gt;-to-&lt;tgtLabel&gt;</code> / <code>&lt;tgtLabel&gt;-to-&lt;srcLabel&gt;</code>). Same predicate at every commit shape:
     <code>git merge --no-ff stale-feature</code> with no shadow trailer drops (Case D); a non-merge
     whose only changes are <code>.shadowignore</code>- or <code>autoIgnore</code>-filtered also
     drops (Case F) without emitting a trailer-only target commit. The TS-1st check (not TS-to-any)
@@ -846,9 +846,9 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   <p>
     <a class="ref ref-r" href="#r6">R6</a> says each source branch gets its own shadow branch on
     the target. Mechanically: the engine enumerates source-side branches via <code>git branch -r</code>
-    (filtering out <code>shadow/*</code> refs so we don&rsquo;t recursively sync our own output),
+    (filtering out any ref whose first path segment is an endpoint label so we don&rsquo;t recursively sync our own output),
     then runs the replay loop once per branch. Each push lands at
-    <code>shadow/&lt;pair&gt;/&lt;branch&gt;</code> on the target, so syncing <em>main</em> and
+    <code>&lt;sourceLabel&gt;/&lt;branch&gt;</code> on the target, so syncing <em>main</em> and
     <em>feature/x</em> produces two distinct refs without sharing tip state. When the source has
     a path filter (monorepo&rarr;external direction) and the branch&rsquo;s HEAD doesn&rsquo;t
     touch <code>dir/</code>, the shadow tip points at the most-recent commit on that branch that
@@ -863,7 +863,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   </p>
   <p>
     Stale shadow detection: when syncing every branch (no <code>--branch</code> flag), the engine
-    compares the set of remote-tracking <code>shadow/&lt;pair&gt;/*</code> refs against the source
+    compares the set of remote-tracking <code>&lt;sourceLabel&gt;/*</code> refs against the source
     branches it just synced. Anything left over &mdash; a shadow ref whose source branch was deleted
     &mdash; gets logged with the explicit <code>git push --delete</code> command. The engine
     doesn&rsquo;t auto-delete: deletion of a branch on the target is destructive and crosses out of
@@ -877,7 +877,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
   <p>
     <a class="ref ref-m" href="#m1">M1</a>&rsquo;s splice fires only when an <em>immediate</em>
     source-side parent of the merge being replayed carries the
-    <code>Shadow-replayed-{targetRemote}</code> trailer. In multi-pair monorepo flows the
+    <code>&lt;targetLabel&gt;-to-&lt;sourceLabel&gt;</code> trailer. In multi-pair monorepo flows the
     cross-repo merge often sits one local merge deeper: the source side does
     <code>release-merge = merge(branchA, cross-repo-merge)</code> &mdash; <code>cross-repo-merge</code>
     has the trailer, but <code>release-merge</code>&rsquo;s own immediate parents
@@ -912,20 +912,20 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     <strong>Companion: drop cross-pair shadow commits from candidates.</strong> Once
     <a class="ref ref-m" href="#m1">M1</a> + M9 splice each pair&rsquo;s outer through their own
     shadow chain, sibling-pair shadow commits become reachable from this pair&rsquo;s working
-    branches via merge edges. They carry a <code>Shadow-replayed-{otherPairRemote}</code>
+    branches via merge edges. They carry the other pair&rsquo;s <code>&lt;src&gt;-to-&lt;tgt&gt;</code>
     trailer &mdash; not <em>our</em> pair&rsquo;s skip-key &mdash; but their tree happens to
     touch this pair&rsquo;s synced subdirectory (it was spliced in). If they entered the replay
     candidate list, they&rsquo;d be replayed onto our shadow with foreign ancestry that
     doesn&rsquo;t fast-forward the existing tip, halting at <a class="ref ref-c" href="#c6">C6</a>.
     <code>filterNotReplayedCommits()</code> drops any commit carrying any
-    <code>Shadow-replayed-*</code> trailer that isn&rsquo;t our skip-key, without recording a
+    <code>&lt;src&gt;-to-&lt;tgt&gt;</code> replay trailer that isn&rsquo;t our skip-key, without recording a
     mapping. Their content is already accounted for via the originally-authored commit&rsquo;s
     own echo (<a class="ref ref-c" href="#c3">C3</a>).
   </p>
   <p class="from">
     <em>Implementation note:</em>
     <code>filterNotReplayedCommits</code> no longer drops every commit with a sibling-pair
-    <code>Shadow-replayed-*</code> trailer. When two pairs share a source directory (typically a
+    <code>&lt;src&gt;-to-&lt;tgt&gt;</code> trailer. When two pairs share a source directory (typically a
     common-folder mapping that both leaves carry), the originally-authored commit on the source
     side ends up with the <em>other</em> pair&rsquo;s trailer once it round-trips through that
     pair first. Dropping it would lose the original author&rsquo;s commit on this pair&rsquo;s
@@ -1000,7 +1000,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     source repo can take minutes to tens of minutes. The expected workflow is to run the first
     sync locally, push the resulting shadow branches, and let CI pick up only the deltas
     afterward. Steady-state sync runs are unaffected &mdash; the
-    <code>Shadow-replayed-&lt;remote&gt;</code> trailer makes already-replayed commits a no-op
+    <code>&lt;src&gt;-to-&lt;tgt&gt;</code> replay trailer makes already-replayed commits a no-op
     skip.
   </p>
 </div>
@@ -1032,7 +1032,7 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
 
 2. Push A&rarr;B replays           B/shadow:    a&prime;
                               a&prime; carries trailer:
-                                  Shadow-replayed-A: sha(a)
+                                  mb-to-bb: sha(a)
 
 3. B merges shadow,           B/main:    init_B &mdash;&mdash; m &mdash;&mdash; b
    then commits `b`                                  &#x2571;
@@ -1080,8 +1080,8 @@ commit-tree finalTree -p shadow_parent -p echo&rsquo;d_target_commit
     Two ways the trap shows up in practice:
   </p>
   <ul>
-    <li><strong>Direct:</strong> <code>git merge --squash origin/shadow/&lt;pair&gt;/main</code> on <code>main</code>, possibly alongside other native commits. Tested in <code>test-squash-merges</code> Phase C.</li>
-    <li><strong>Indirect:</strong> consumer pulls shadow into a feature branch (<code>git merge origin/shadow/...</code> on <code>feature</code>), then ships with <code>git merge --squash feature</code> into a <code>main</code> that was not already up-to-date with the same shadow tip. The shadow edge is buried inside <code>feature</code> and gets stripped by the squash. Tested in Phase D.</li>
+    <li><strong>Direct:</strong> <code>git merge --squash origin/&lt;sourceLabel&gt;/main</code> on <code>main</code>, possibly alongside other native commits. Tested in <code>test-squash-merges</code> Phase C.</li>
+    <li><strong>Indirect:</strong> consumer pulls shadow into a feature branch (<code>git merge origin/&lt;sourceLabel&gt;/...</code> on <code>feature</code>), then ships with <code>git merge --squash feature</code> into a <code>main</code> that was not already up-to-date with the same shadow tip. The shadow edge is buried inside <code>feature</code> and gets stripped by the squash. Tested in Phase D.</li>
   </ul>
   <p>
     <code>--full-history</code> does not rescue either case: the issue isn&rsquo;t rev-list history simplification, it&rsquo;s a missing parent edge. A real fix would have to teach replay to recognize a squash by tree-and-content match against the shadow chain &mdash; out of scope for now.

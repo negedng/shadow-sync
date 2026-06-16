@@ -7,12 +7,15 @@ import * as os from "os";
 // ── Glossary ──────────────────────────────────────────────────────────────────
 // pair          Two repo endpoints (a/b) + dir mappings; direction chosen via --from.
 // dc            DirectionConfig — a pair resolved into source→target for one run.
+// label         Each endpoint's shadow name (e.g. "mb"); names its shadow refs
+//               and replay-trailer keys. Must be unique across all pairs.
 // replay        Re-creating a source commit on the target with remapped paths.
-// trailer       `Shadow-replayed-<pair>-<remote>: <sha>` commit footer. The
-//               persistent source→target mapping: no state file, history IS the state.
-// shadow ref    <prefix>/<pair>/<branch> on the target remote — the replayed
-//               line the target merges from. A pair's `shadowPrefix` replaces
-//               the whole namespace: <shadowPrefix>/<branch> (e.g. sb/main).
+// trailer       `<sourceLabel>-to-<targetLabel>: <sha> [absorbed…]` commit footer.
+//               The persistent source→target mapping: no state file, history IS
+//               the state. First value is the direct counterpart; any further
+//               values are squash-absorbed halted ancestors.
+// shadow ref    <sourceLabel>/<branch> on the target remote — the replayed line
+//               the target merges from.
 // echo          A source commit that is itself a replay from the target side;
 //               recorded, never re-replayed (prevents ping-pong duplication).
 // load-bearing  A commit whose mapped+filtered diff changes synced content (or a
@@ -31,6 +34,10 @@ export interface RepoEndpoint {
   remote: string;
   url: string;
   anchorBranch?: string;
+  /** This endpoint's shadow label, e.g. "mb". Commits replayed FROM here land
+   *  on a shadow ref `<label>/<branch>` on the target, and carry the replay
+   *  trailer `<sourceLabel>-to-<targetLabel>`. Must be unique across all pairs. */
+  label: string;
 }
 
 /** One folder pair: a.dir on side a ↔ b.dir on side b. "" = repo root. */
@@ -40,12 +47,8 @@ export interface DirMapping {
 }
 
 export interface SyncPair {
-  /** Baked into trailer keys — renaming breaks dedup. */
+  /** Identifies the pair in CLI/config; not used in ref or trailer names. */
   name: string;
-  /** Shadow refs live at `<shadowPrefix>/<branch>` instead of the default
-   *  `<global prefix>/<name>/<branch>`. Changing it on a live deployment
-   *  requires renaming the existing shadow refs on every remote first. */
-  shadowPrefix?: string;
   /** Symmetric: direction is chosen at runtime via --from. */
   a: RepoEndpoint;
   b: RepoEndpoint;
@@ -67,10 +70,8 @@ export type IdentityProfile = Record<string, RepoIdentity>;
 interface ShadowSyncConfig {
   pairs: SyncPair[];
   identities: IdentityProfile[];
-  trailers: { replayed: string; absorbed: string };
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
-  shadowBranchPrefix: string;
 }
 
 interface DirMappingDirected {
@@ -157,13 +158,20 @@ export function validateName(value: string, label: string): void {
   if (value.startsWith("-")) fail(`${label} must not start with '-'.`);
 }
 
+// A label is a single ref-path segment and a trailer-key token, so restrict it
+// to chars safe in both: letters, digits, hyphen; no leading hyphen.
+function validateLabel(pairName: string, label: string): void {
+  if (!label || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(label)) {
+    fail(`pair "${pairName}" endpoint label "${label}" must be non-empty and match [A-Za-z0-9][A-Za-z0-9-]*`);
+  }
+}
+
 function validatePair(pair: SyncPair): void {
   if (!pair.mappings || pair.mappings.length === 0) {
     fail(`pair "${pair.name}" must declare at least one mapping`);
   }
-  const sp = pair.shadowPrefix;
-  if (sp != null && (sp === "" || sp.includes("\\") || sp.startsWith("/") || sp.endsWith("/") || sp.split("/").includes(".."))) {
-    fail(`pair "${pair.name}" shadowPrefix "${sp}" must be a non-empty forward-slash path with no leading/trailing slash or '..'`);
+  for (const ep of [pair.a, pair.b]) {
+    validateLabel(pair.name, ep.label);
   }
   // Only exact-duplicate source/target dirs within a side are ambiguous —
   // nested dirs (e.g. "" + "src/common") route deterministically via
@@ -180,17 +188,17 @@ function validatePair(pair: SyncPair): void {
   }
 }
 
-// Shadow namespaces must not collide or nest across pairs — listRemoteBranches
-// excludes refs by prefix, so overlap would hide one pair's branches from another.
-function validatePairs(pairs: SyncPair[], globalPrefix: string): void {
+// Endpoint labels name shadow refs (`<label>/<branch>`) and replay trailer keys
+// (`<srcLabel>-to-<tgtLabel>`), so they must be globally unique — a collision
+// would route two directions to the same ref and conflate their dedup state.
+function validatePairs(pairs: SyncPair[]): void {
   for (const pair of pairs) validatePair(pair);
-  const namespaces = pairs.map(p => p.shadowPrefix ?? `${globalPrefix}/${p.name}`);
-  for (let i = 0; i < namespaces.length; i++) {
-    for (let j = i + 1; j < namespaces.length; j++) {
-      const [a, b] = [namespaces[i], namespaces[j]];
-      if (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)) {
-        fail(`pairs "${pairs[i].name}" and "${pairs[j].name}" have overlapping shadow namespaces ("${a}" vs "${b}")`);
-      }
+  const seen = new Map<string, string>();
+  for (const pair of pairs) {
+    for (const ep of [pair.a, pair.b]) {
+      const owner = seen.get(ep.label);
+      if (owner) fail(`endpoint label "${ep.label}" is used by both "${owner}" and "${pair.name}" — labels must be unique across all pairs`);
+      seen.set(ep.label, pair.name);
     }
   }
 }
@@ -239,38 +247,28 @@ function loadConfig(): ShadowSyncConfig {
     return {
       pairs: [],
       identities: [],
-      trailers: { replayed: "Shadow-replayed", absorbed: "Shadow-absorbed" },
       gitConfigOverrides: {},
       maxBuffer: 50 * 1024 * 1024,
-      shadowBranchPrefix: "shadow",
     };
   }
 
   const doc = parseJsonFile<Record<string, unknown>>(CONFIG_PATH);
 
-  const trailers = {
-    replayed: ((doc.trailers as Record<string, string>)?.replayed) ?? "Shadow-replayed",
-    absorbed: ((doc.trailers as Record<string, string>)?.absorbed) ?? "Shadow-absorbed",
-  };
   const gitConfigOverrides = (doc.gitConfigOverrides as Record<string, string>) ?? {};
   const maxBuffer = (doc.maxBuffer as number) ?? 50 * 1024 * 1024;
-  const shadowBranchPrefix = (doc.shadowBranchPrefix as string) ?? "shadow";
 
   const pairs = (doc.pairs as SyncPair[]) ?? [];
-  validatePairs(pairs, shadowBranchPrefix);
+  validatePairs(pairs);
   const identities = (doc.identities as IdentityProfile[]) ?? [];
   validateIdentities(identities);
 
-  return { pairs, identities, trailers, gitConfigOverrides, maxBuffer, shadowBranchPrefix };
+  return { pairs, identities, gitConfigOverrides, maxBuffer };
 }
 
 const config = loadConfig();
 
 export const PAIRS: SyncPair[] = [...config.pairs];
 const IDENTITIES: IdentityProfile[] = [...config.identities];
-const REPLAYED_TRAILER = config.trailers.replayed;
-const ABSORBED_TRAILER = config.trailers.absorbed;
-let _shadowBranchPrefix = config.shadowBranchPrefix;
 const MAX_BUFFER = config.maxBuffer;
 
 
@@ -294,17 +292,16 @@ const GIT_CONFIG_OVERRIDES = Object.entries(config.gitConfigOverrides).flatMap(
 export function applyTestOverrides(opts: {
   repoRoot: string;
   pairs: SyncPair[];
+  /** Accepted for back-compat with existing tests; labels now name shadow refs. */
   shadowBranchPrefix?: string;
   identities?: IdentityProfile[];
 }): void {
   // Validate before mutating module state so a rejected override can't poison
   // a later in-process run.
-  const prefix = opts.shadowBranchPrefix ?? _shadowBranchPrefix;
-  validatePairs(opts.pairs, prefix);
+  validatePairs(opts.pairs);
   const identities = opts.identities ?? config.identities;
   validateIdentities(identities);
   _repoRoot = opts.repoRoot;
-  _shadowBranchPrefix = prefix;
   PAIRS.length = 0;
   PAIRS.push(...opts.pairs);
   IDENTITIES.length = 0;
@@ -397,19 +394,24 @@ function batchObjectsExist(shas: string[]): Set<string> {
 }
 
 
+/** Every endpoint label across all pairs — the prefixes that mark shadow refs. */
+function allLabels(): string[] {
+  return PAIRS.flatMap(p => [p.a.label, p.b.label]);
+}
+
 export function listRemoteBranches(remote: string): string[] {
+  const labels = allLabels();
   return git(["branch", "-r"])
     .split("\n")
     .map(l => l.trim())
     .filter(l => l.startsWith(`${remote}/`) && !l.includes("->"))
     .map(l => l.replace(`${remote}/`, ""))
-    .filter(b => !b.startsWith(`${_shadowBranchPrefix}/`) &&
-      !PAIRS.some(p => p.shadowPrefix && b.startsWith(`${p.shadowPrefix}/`)));
+    .filter(b => !labels.some(label => b === label || b.startsWith(`${label}/`)));
 }
 
-export function shadowBranchName(pairName: string, branch: string): string {
-  const custom = PAIRS.find(p => p.name === pairName)?.shadowPrefix;
-  return custom != null ? `${custom}/${branch}` : `${_shadowBranchPrefix}/${pairName}/${branch}`;
+/** Shadow ref name for content replayed FROM the endpoint with `sourceLabel`. */
+export function shadowBranchName(sourceLabel: string, branch: string): string {
+  return `${sourceLabel}/${branch}`;
 }
 
 /** Ensure a git remote is configured at the endpoint's URL — add or update as needed. */
@@ -513,42 +515,26 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function sanitizeTrailerToken(s: string): string {
-  return s.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-}
-
-// Pair name included so two pairs sharing a source remote get distinct
-// trailers — otherwise cross-pair merges pollute syncedShaMap with the sibling
-// pair's (wrong-shape) replays.
-function replayedTrailerKey(pairName: string, remote: string): string {
-  return `${REPLAYED_TRAILER}-${sanitizeTrailerToken(`${pairName}-${remote}`)}`;
+// One trailer per direction, keyed by the two endpoint labels: its value lists
+// the source commits this replay stands in for — the first is the direct
+// counterpart, the rest are squash-absorbed halted ancestors.
+function replayTrailerKey(sourceLabel: string, targetLabel: string): string {
+  return `${sourceLabel}-to-${targetLabel}`;
 }
 
 // The trailer this direction WRITES onto target commits.
 function sourceTrailerKey(dc: DirectionConfig): string {
-  return replayedTrailerKey(dc.pair.name, dc.source.remote);
+  return replayTrailerKey(dc.source.label, dc.target.label);
 }
 
 // The opposite direction's trailer — on a source commit it marks an echo.
 function targetTrailerKey(dc: DirectionConfig): string {
-  return replayedTrailerKey(dc.pair.name, dc.target.remote);
+  return replayTrailerKey(dc.target.label, dc.source.label);
 }
 
-/** Build a regex to match replay trailers: Shadow-replayed-{pair}-{remote}: {hash} */
-function replayedTrailerRegex(pairName: string, remote: string): RegExp {
-  return new RegExp(`^${escapeRegex(replayedTrailerKey(pairName, remote))}:\\s*([0-9a-f]{7,40})`);
-}
-
+/** Match a replay trailer line, capturing its first value: {src}-to-{tgt}: {hash} */
 function targetTrailerRegex(dc: DirectionConfig): RegExp {
-  return replayedTrailerRegex(dc.pair.name, dc.target.remote);
-}
-
-// The squash-absorption trailer this direction WRITES. An absorbed value names
-// a halted source commit folded into this commit's squash; it is a faithful
-// counterpart only for lineages containing the commit named by the same
-// commit's own replayed trailer (the absorber).
-function absorbedTrailerKey(dc: DirectionConfig): string {
-  return `${ABSORBED_TRAILER}-${sanitizeTrailerToken(`${dc.pair.name}-${dc.source.remote}`)}`;
+  return new RegExp(`^${escapeRegex(targetTrailerKey(dc))}:\\s*([0-9a-f]{7,40})`);
 }
 
 
@@ -566,25 +552,26 @@ function hasTrailer(trailers: string, key: string): boolean {
   return new RegExp(`^${escapeRegex(key)}:`, "m").test(trailers);
 }
 
-function stripReplayedTrailers(message: string): string {
+// Drop this pair's replay trailers (both directions) before re-recording an
+// echo, so the new trailer doesn't pile up beside a stale one.
+function stripReplayedTrailers(message: string, dc: DirectionConfig): string {
+  const keys = [sourceTrailerKey(dc), targetTrailerKey(dc)];
   return message.split("\n")
-    .filter(l => !l.startsWith(REPLAYED_TRAILER) && !l.startsWith(ABSORBED_TRAILER))
+    .filter(l => !keys.some(k => l.startsWith(`${k}:`)))
     .join("\n").trimEnd();
 }
 
 
 /**
- * Build source→target mappings from replay trailers. Replayed values are
- * direct (globally valid) counterparts; absorbed values are squash-resolved
- * and scoped to the lineage of the same commit's own (first) replayed value.
- * Legacy squashes carry absorbed SHAs under the replayed key (own first) —
- * those load as direct, preserving pre-scoping behavior.
+ * Build source→target mappings from replay trailers. Each trailer's value is a
+ * SHA list: the first is the direct (globally valid) counterpart; the rest are
+ * squash-absorbed and scoped to the lineage of that first value (the absorber).
  */
-function extractTrailerMappings(logArgs: string[], replayedKey: string, absorbedKey: string): ScopedMappings {
+function extractTrailerMappings(logArgs: string[], replayedKey: string): ScopedMappings {
   const direct = new Map<string, string>();
   const absorbed: AbsorbedMap = new Map();
   const result = git(
-    [...logArgs, `--format=%H%x01%(trailers:key=${replayedKey},valueonly,separator=%x20)%x01%(trailers:key=${absorbedKey},valueonly,separator=%x20)`],
+    [...logArgs, `--format=%H%x01%(trailers:key=${replayedKey},valueonly,separator=%x20)`],
     { safe: true },
   );
   // Fail loud: treating a failed log as "nothing replayed yet" would re-replay
@@ -593,16 +580,14 @@ function extractTrailerMappings(logArgs: string[], replayedKey: string, absorbed
   if (!result.stdout) return { direct, absorbed };
   const isSha = (s: string) => /^[0-9a-f]{7,40}$/.test(s);
   for (const line of result.stdout.split("\n")) {
-    const [targetHash, replayedRaw, absorbedRaw] = line.split("\x01");
+    const [targetHash, replayedRaw] = line.split("\x01");
     if (!targetHash || !replayedRaw) continue;
-    const replayedVals = replayedRaw.split(/\s+/).filter(isSha);
-    if (replayedVals.length === 0) continue;
-    for (const src of replayedVals) {
-      // Log is newest-first; first occurrence (newest replay) wins.
-      if (!direct.has(src)) direct.set(src, targetHash);
-    }
-    const absorber = replayedVals[0];
-    for (const src of (absorbedRaw ?? "").split(/\s+/).filter(isSha)) {
+    const vals = replayedRaw.split(/\s+/).filter(isSha);
+    if (vals.length === 0) continue;
+    const absorber = vals[0];
+    // Log is newest-first; first occurrence (newest replay) wins.
+    if (!direct.has(absorber)) direct.set(absorber, targetHash);
+    for (const src of vals.slice(1)) {
       const list = absorbed.get(src) ?? [];
       list.push({ target: targetHash, absorber });
       absorbed.set(src, list);
@@ -1679,16 +1664,15 @@ function collectAbsorbedHalted(
 }
 
 /**
- * Source→target SHA mappings from this pair's shadow branches' trailers:
- * Shadow-replayed-<pair>-<sourceRemote> (direct) + Shadow-absorbed-… (scoped).
- * Origin: other side, replayed here.
+ * Source→target SHA mappings from this direction's shadow branches' trailers
+ * (`<sourceLabel>-to-<targetLabel>`): first value direct, rest scoped-absorbed.
  */
 function loadReplayedMappings(opts: {
   branches: string[];
   dc: DirectionConfig;
 }): ScopedMappings {
   const { branches, dc } = opts;
-  const candidateRefs = branches.map(b => `${dc.target.remote}/${shadowBranchName(dc.pair.name, b)}`);
+  const candidateRefs = branches.map(b => `${dc.target.remote}/${shadowBranchName(dc.source.label, b)}`);
   const shadowRefs = filterExistingRefs(candidateRefs);
 
   if (shadowRefs.length === 0) {
@@ -1698,7 +1682,6 @@ function loadReplayedMappings(opts: {
   return extractTrailerMappings(
     ["log", ...shadowRefs, `--grep=^${replayedKey}`],
     replayedKey,
-    absorbedTrailerKey(dc),
   );
 }
 
@@ -1770,9 +1753,9 @@ function formatHaltDiagnostic(opts: {
   cause: ComposeHaltCause;
 }): string {
   const { commit, meta, mappedParents, dc, cause } = opts;
-  const { target, pair } = dc;
+  const { target } = dc;
   const branchLabel = inferSourceBranch(commit.hash, dc.source.remote) ?? "<source-branch>";
-  const shadowName = shadowBranchName(pair.name, branchLabel);
+  const shadowName = shadowBranchName(dc.source.label, branchLabel);
   const shadowRef = `refs/heads/${shadowName}`;
   const trailer = `${sourceTrailerKey(dc)}: ${commit.hash}`;
   const ppLines = mappedParents.map(p => `    ${p}`).join("\n");
@@ -2023,7 +2006,7 @@ function formatAbsorbedElsewhereDiagnostic(opts: {
   const branchLabel = inferSourceBranch(commitSha, dc.source.remote) ?? "<source-branch>";
   const e = entries[0];
   const resolvedBranch = inferSourceBranch(e.absorber, dc.source.remote) ?? "<resolved-branch>";
-  const resolvedShadowRef = shadowBranchName(dc.pair.name, resolvedBranch);
+  const resolvedShadowRef = shadowBranchName(dc.source.label, resolvedBranch);
   const trailer = `${sourceTrailerKey(dc)}: ${commitSha}`;
   return [
     `${commitShort}: ancestor was squash-resolved on another branch — branch halted.`,
@@ -2098,7 +2081,6 @@ function replayCommits(opts: {
 }): ReplayHalts {
   const { newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph } = opts;
   const replayedKey = sourceTrailerKey(dc);
-  const absorbedKey = absorbedTrailerKey(dc);
 
   const haltedSources = new Set<string>();
   const haltRecords = new Map<string, HaltRecord>();
@@ -2186,12 +2168,10 @@ function replayCommits(opts: {
 
       const absorbed = collectAbsorbedHalted(commit, haltedSources, syncedShaMap, graph);
 
-      let msg = isEcho
-        ? appendTrailer(stripReplayedTrailers(meta.message), `${replayedKey}: ${commit.hash}`)
-        : appendTrailer(meta.message, `${replayedKey}: ${commit.hash}`);
-      for (const sha of absorbed) {
-        msg = appendTrailer(msg, `${absorbedKey}: ${sha}`);
-      }
+      // One trailer; value lists the direct counterpart first, absorbed next.
+      const trailerValue = [commit.hash, ...absorbed].join(" ");
+      const base = isEcho ? stripReplayedTrailers(meta.message, dc) : meta.message;
+      const msg = appendTrailer(base, `${replayedKey}: ${trailerValue}`);
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
       // Message over stdin — a >32KB message as argv overflows CreateProcess on Windows.

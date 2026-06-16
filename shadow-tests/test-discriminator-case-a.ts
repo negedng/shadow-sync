@@ -73,8 +73,8 @@ async function main() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "backend",  b: "" }] },
-        { name: "frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "frontend", b: "" }] },
+        { name: "backend",  a: { remote: "origin", url: mono.bare, label: "a-backend"  }, b: { remote: "backend",  url: backend.bare,  label: "b-backend"  }, mappings: [{ a: "backend",  b: "" }] },
+        { name: "frontend", a: { remote: "origin", url: mono.bare, label: "a-frontend" }, b: { remote: "frontend", url: frontend.bare, label: "b-frontend" }, mappings: [{ a: "frontend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -105,13 +105,13 @@ async function main() {
     // Backend side: Bea merges shadow/backend/main into backend/main
     git("fetch origin", backend.working);
     git("checkout main", backend.working);
-    git(`merge --no-ff origin/shadow/backend/main -m "Bea: merge shadow r1"`, backend.working);
+    git(`merge --no-ff origin/a-backend/main -m "Bea: merge shadow r1"`, backend.working);
     git("push origin main", backend.working);
 
     // Mono side: Mira merges (the MISTAKE / unintended step)
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git(`merge --no-ff origin/shadow/backend/main -m "Mira: merge shadow r1 (mistake on mono)"`, mono.working);
+    git(`merge --no-ff origin/b-backend/main -m "Mira: merge shadow r1 (mistake on mono)"`, mono.working);
     git("push origin main", mono.working);
 
     banner("Round 3: --from a");
@@ -134,7 +134,7 @@ async function main() {
       git("fetch origin", mono.working);
       git("checkout main", mono.working);
       try {
-        git(`merge --no-ff origin/shadow/backend/main -m "Mira mergeShadow r${i}"`, mono.working);
+        git(`merge --no-ff origin/b-backend/main -m "Mira mergeShadow r${i}"`, mono.working);
         git("push origin main", mono.working);
       } catch (e: any) {
         console.log(`  round ${i} mergeShadow: ${e.message.split("\\n")[0]}`);

@@ -41,15 +41,20 @@ function runRoundTrip(): void {
       "[round-trip] file should be on B shadow");
 
     const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
-    git(`merge origin/${shadowBranch} --no-ff -m "Merge shadow into B main"`, env.remoteWorking);
+    // A's commit was pushed to the external (team/origin-of-B) shadow under the
+    // a-side label; merge THAT into B's main. (B's remote "origin" is the
+    // external bare repo, where push writes a-<subdir>/main.)
+    const pushShadow = `a-${subdir}/main`;
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge origin/${pushShadow} --no-ff -m "Merge shadow into B main"`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
     const r3 = runCiSync(env);
     assertEqual(r3.status, 0, "[round-trip] pull B->A should succeed");
 
-    const shadowLog = git(`fetch origin ${shadowBranch} && git log origin/${shadowBranch} --oneline -10`, env.localRepo);
+    // The pull-side shadow on the internal origin carries B->A content.
+    const pullShadow = `b-${subdir}/main`;
+    const shadowLog = git(`fetch origin ${pullShadow} && git log origin/${pullShadow} --oneline -10`, env.localRepo);
     const fromACount = (shadowLog.match(/Add from-a\.ts/g) || []).length;
     assertEqual(fromACount <= 1, true,
       "[round-trip] from-a.ts commit should not be duplicated on shadow branch");
@@ -89,10 +94,11 @@ function runRoundtripFileHistory(): void {
     git('commit -m "c: B modifies file.ts on its own"', env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
-    // Step 4: B fetches shadow, attempts merge (conflicts), resolves manually
-    git(`fetch origin shadow/${env.subdir}/main`, env.remoteWorking);
+    // Step 4: B fetches the shadow A pushed (push-side a-label on B's origin),
+    // attempts merge (conflicts), resolves manually.
+    git(`fetch origin a-${env.subdir}/main`, env.remoteWorking);
     try {
-      git(`merge --no-ff origin/shadow/${env.subdir}/main -m "m: merge shadow with conflict"`,
+      git(`merge --no-ff origin/a-${env.subdir}/main -m "m: merge shadow with conflict"`,
           env.remoteWorking);
       throw new Error("[file-hist step 4] merge should have conflicted but did not");
     } catch {

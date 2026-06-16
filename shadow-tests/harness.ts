@@ -12,8 +12,6 @@ export interface RemoteInfo {
   remoteWorking: string;
   /** Subdir on the B-side (external) where files live. "" = root (default). */
   remoteSubdir: string;
-  /** Per-pair shadow namespace override (e.g. "sb"). Unset = default scheme. */
-  shadowPrefix?: string;
 }
 
 export interface TestEnv {
@@ -240,25 +238,39 @@ export interface RunResult {
   stderr: string;
 }
 
+/** Endpoint labels for a remote's pair — a = origin (mono) side, b = external. */
+export function labelsOf(remote: RemoteInfo): { a: string; b: string } {
+  return { a: `a-${remote.subdir}`, b: `b-${remote.subdir}` };
+}
+
 /** Build the SyncPair array for a test env's remotes. */
 export function buildPairs(env: TestEnv): SyncPair[] {
   // Only set anchorBranch when the mainline isn't "main" — leaving it unset on
   // the default keeps the `?? "main"` fallback path covered by every other test.
   const anchor = env.mainBranch !== "main" ? { anchorBranch: env.mainBranch } : {};
-  return env.remotes.map(r => ({
-    name: r.subdir,
-    ...(r.shadowPrefix != null ? { shadowPrefix: r.shadowPrefix } : {}),
-    a: { remote: "origin", url: env.originBare, ...anchor },
-    b: { remote: r.remoteName, url: r.remoteBare, ...anchor },
-    mappings: [{ a: r.subdir, b: r.remoteSubdir }],
-  }));
+  return env.remotes.map(r => {
+    const lbl = labelsOf(r);
+    return {
+      name: r.subdir,
+      a: { remote: "origin", url: env.originBare, label: lbl.a, ...anchor },
+      b: { remote: r.remoteName, url: r.remoteBare, label: lbl.b, ...anchor },
+      mappings: [{ a: r.subdir, b: r.remoteSubdir }],
+    };
+  });
 }
 
-/** Shadow branch name for a remote's pair: per-pair prefix, else `<branchPrefix>/<subdir>`. */
-export function shadowBranchOf(env: TestEnv, remote?: RemoteInfo): string {
+/** Shadow ref name for content replayed FROM side `from` — defaults to the
+ *  pull direction (from b → ref on origin). Pass "a" for the push direction. */
+export function shadowBranchOf(env: TestEnv, remote?: RemoteInfo, from: "a" | "b" = "b"): string {
   const r = remote ?? env.remotes[0];
-  const ns = r.shadowPrefix ?? `${env.branchPrefix}/${r.subdir}`;
-  return `${ns}/${env.mainBranch}`;
+  const lbl = labelsOf(r);
+  return `${from === "a" ? lbl.a : lbl.b}/${env.mainBranch}`;
+}
+
+/** The replay trailer key written when syncing FROM side `from`. */
+export function trailerKeyOf(env: TestEnv, from: "a" | "b", remote?: RemoteInfo): string {
+  const lbl = labelsOf(remote ?? env.remotes[0]);
+  return from === "a" ? `${lbl.a}-to-${lbl.b}` : `${lbl.b}-to-${lbl.a}`;
 }
 
 /** Apply test overrides and run sync in-process. */
@@ -369,7 +381,7 @@ export function getShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): str
 export function readExternalShadowFile(env: TestEnv, rel: string, remote?: RemoteInfo): string | null {
   const remoteName = remote?.remoteName ?? env.remoteName;
   const prefix = (remote?.remoteSubdir ?? env.remotes[0].remoteSubdir) || "";
-  const shadowBranch = shadowBranchOf(env, remote);
+  const shadowBranch = shadowBranchOf(env, remote, "a");
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return null; }
   try {
     const content = execSync(`git show ${remoteName}/${shadowBranch}:${prefix ? `${prefix}/${rel}` : rel}`, {
@@ -384,7 +396,7 @@ export function readExternalShadowFile(env: TestEnv, rel: string, remote?: Remot
 /** Get full commit messages from the external remote's shadow branch. */
 export function getExternalShadowLogFull(env: TestEnv, n = 20, remote?: RemoteInfo): string {
   const remoteName = remote?.remoteName ?? env.remoteName;
-  const shadowBranch = shadowBranchOf(env, remote);
+  const shadowBranch = shadowBranchOf(env, remote, "a");
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return ""; }
   try {
     return git(`log ${remoteName}/${shadowBranch} --format="%B" -${n}`, env.localRepo);
@@ -406,7 +418,7 @@ export function getShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): string[] 
 /** Get the --name-only diff of the latest shadow commit on the external remote. */
 export function getExternalShadowDiffFiles(env: TestEnv, remote?: RemoteInfo): string[] {
   const remoteName = remote?.remoteName ?? env.remoteName;
-  const shadowBranch = shadowBranchOf(env, remote);
+  const shadowBranch = shadowBranchOf(env, remote, "a");
   try { git(`fetch ${remoteName} ${shadowBranch}`, env.localRepo); } catch { return []; }
   try {
     return git(`diff-tree --no-commit-id -r --name-only ${remoteName}/${shadowBranch}`, env.localRepo)

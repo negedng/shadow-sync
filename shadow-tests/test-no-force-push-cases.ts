@@ -3,7 +3,7 @@ import * as path from "path";
 import { execSync } from "child_process";
 import {
   createTestEnv, commitOnRemote, commitOnLocal, runCiSync, mergeShadow, runPush,
-  setTestBranchAllowlist,
+  setTestBranchAllowlist, shadowBranchOf,
 } from "./harness";
 import { assertEqual, assertNotIncludes } from "./assert";
 
@@ -64,12 +64,13 @@ function phaseA_differentConflictResolutions(): void {
     syncs.push(runCiSync(env));
     syncs.push(runPush(env));
 
-    // Bea merges shadow with conflict, resolves to HER choice (--strategy-option ours)
-    const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
+    // Bea (external) merges her push-side shadow ref; Mira (mono) merges the
+    // pull-side ref on origin. Distinct labels now, same content.
+    const beaShadow = shadowBranchOf(env, undefined, "a");
+    const miraShadow = shadowBranchOf(env);
+    git(`fetch origin ${beaShadow}`, env.remoteWorking);
     try {
-      git(`merge --no-ff -X ours origin/${shadowBranch} -m "Bea: merge shadow (ours wins)"`, env.remoteWorking);
+      git(`merge --no-ff -X ours origin/${beaShadow} -m "Bea: merge shadow (ours wins)"`, env.remoteWorking);
     } catch {
       // -X ours should auto-resolve, but if it didn't:
       fs.writeFileSync(path.join(env.remoteWorking, "config.txt"), "version=1\nshared=bea_choice\n");
@@ -79,9 +80,9 @@ function phaseA_differentConflictResolutions(): void {
     git("push origin main", env.remoteWorking);
 
     // Mira merges shadow with conflict, resolves to HER choice
-    git(`fetch origin ${shadowBranch}`, env.localRepo);
+    git(`fetch origin ${miraShadow}`, env.localRepo);
     try {
-      git(`merge --no-ff -X ours origin/${shadowBranch} -m "Mira: merge shadow (ours wins)"`, env.localRepo);
+      git(`merge --no-ff -X ours origin/${miraShadow} -m "Mira: merge shadow (ours wins)"`, env.localRepo);
     } catch {
       fs.writeFileSync(path.join(env.localRepo, env.subdir, "config.txt"), "version=1\nshared=mira_choice\n");
       git(`add ${env.subdir}/config.txt`, env.localRepo);
@@ -126,8 +127,7 @@ function phaseB_asymmetricTiming(): void {
     commitOnRemote(env, { "bea-extra.txt": "Bea extra\n" }, "Bea: extra before merge");
 
     // Now Bea merges shadow — real 3-way merge (her main has bea1+bea-extra, shadow has full chain)
-    const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+    const shadowBranch = shadowBranchOf(env, undefined, "a");
     git(`fetch origin ${shadowBranch}`, env.remoteWorking);
     git(`merge --no-ff origin/${shadowBranch} -m "Bea: merge shadow"`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
@@ -195,8 +195,7 @@ function phaseE_repeatedNoFFMerges(): void {
       syncs.push(runCiSync(env));
       // --no-ff merge of an unchanged shadow — git should say "Already up to date"
       // even with --no-ff when shadow == main
-      const subdir = env.subdir;
-      const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+      const shadowBranch = shadowBranchOf(env);
       git(`fetch origin ${shadowBranch}`, env.localRepo);
       try {
         git(`merge --no-ff origin/${shadowBranch} -m "Mira: redundant merge ${i}"`, env.localRepo);
@@ -223,8 +222,7 @@ function phaseF_multipleConcurrentRounds(): void {
       syncs.push(runPush(env));
 
       // BOTH merge concurrently (the b53efbd shape, but in a loop)
-      const subdir = env.subdir;
-      const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+      const shadowBranch = shadowBranchOf(env, undefined, "a");
       git(`fetch origin ${shadowBranch}`, env.remoteWorking);
       git(`merge --no-ff origin/${shadowBranch} -m "Bea: merge shadow r${round}"`, env.remoteWorking);
       git("push origin main", env.remoteWorking);
@@ -271,8 +269,7 @@ function phaseH_FFMergeThenLinear(): void {
     syncs.push(runCiSync(env));
 
     // Mira does a plain (FF-able) merge of shadow — no --no-ff. Her main FFs to shadow tip.
-    const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+    const shadowBranch = shadowBranchOf(env);
     git(`fetch origin ${shadowBranch}`, env.localRepo);
     git(`merge origin/${shadowBranch}`, env.localRepo);
 

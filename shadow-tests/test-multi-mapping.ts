@@ -92,8 +92,8 @@ async function main() {
       pairs: [
         {
           name: "leaf",
-          a: { remote: "origin", url: mono.bare },
-          b: { remote: "leaf",   url: leaf.bare },
+          a: { remote: "origin", url: mono.bare, label: "a-leaf" },
+          b: { remote: "leaf",   url: leaf.bare, label: "b-leaf" },
           mappings: [
             { a: "appA",   b: "src/app" },
             { a: "shared", b: "src/shared" },
@@ -116,8 +116,8 @@ async function main() {
     }
 
     git("fetch origin", leaf.working);
-    const appOnShadow    = readPath(leaf.bare, "refs/heads/shadow/leaf/main", "src/app/index.ts");
-    const sharedOnShadow = readPath(leaf.bare, "refs/heads/shadow/leaf/main", "src/shared/util.ts");
+    const appOnShadow    = readPath(leaf.bare, "refs/heads/a-leaf/main", "src/app/index.ts");
+    const sharedOnShadow = readPath(leaf.bare, "refs/heads/a-leaf/main", "src/shared/util.ts");
     if (appOnShadow !== "app v1\n") throw new Error(`src/app/index.ts mismatch on shadow: ${JSON.stringify(appOnShadow)}`);
     if (sharedOnShadow !== "util v1\n") throw new Error(`src/shared/util.ts mismatch on shadow: ${JSON.stringify(sharedOnShadow)}`);
     console.log(`  ✓ both mappings produced one synthetic with composite tree on shadow/leaf/main`);
@@ -126,7 +126,7 @@ async function main() {
     banner("2. Leaf merges shadow ref — both slices land at canonical leaf paths");
     git("fetch origin", leaf.working);
     git("checkout main", leaf.working);
-    git(`merge --no-ff origin/shadow/leaf/main -m "merge from shadow"`, leaf.working);
+    git(`merge --no-ff origin/a-leaf/main -m "merge from shadow"`, leaf.working);
     git("push origin main", leaf.working);
 
     if (readPath(leaf.bare, "main", "src/app/index.ts") !== "app v1\n") throw new Error("leaf main missing src/app/index.ts");
@@ -145,8 +145,8 @@ async function main() {
     }
 
     git("fetch origin", mono.working);
-    const sharedOnMonoShadow = readPath(mono.bare, "refs/heads/shadow/leaf/main", "shared/util.ts");
-    const appOnMonoShadow    = readPath(mono.bare, "refs/heads/shadow/leaf/main", "appA/index.ts");
+    const sharedOnMonoShadow = readPath(mono.bare, "refs/heads/b-leaf/main", "shared/util.ts");
+    const appOnMonoShadow    = readPath(mono.bare, "refs/heads/b-leaf/main", "appA/index.ts");
     if (sharedOnMonoShadow !== "util v2 leaf-edit\n") {
       throw new Error(`leaf edit did NOT reach mono via mapping 1; shared/util.ts on shadow = ${JSON.stringify(sharedOnMonoShadow)}`);
     }
@@ -160,7 +160,7 @@ async function main() {
     // Operator pulls leaf change into mono main so the next --from a starts clean.
     git("checkout main", mono.working);
     git("fetch origin", mono.working);
-    git(`merge --no-ff origin/shadow/leaf/main -m "pull leaf edit"`, mono.working);
+    git(`merge --no-ff origin/b-leaf/main -m "pull leaf edit"`, mono.working);
 
     // Set up multi-level ignores on mono:
     //   mono/.shadowignore       → *.tmp (basename-anywhere)
@@ -199,11 +199,11 @@ async function main() {
       ".shadowignore",
     ];
     for (const [p, want] of shouldExist) {
-      const got = readPath(leaf.bare, "refs/heads/shadow/leaf/main", p);
+      const got = readPath(leaf.bare, "refs/heads/a-leaf/main", p);
       if (got !== want) throw new Error(`expected ${p} = ${JSON.stringify(want)} on shadow; got ${JSON.stringify(got)}`);
     }
     for (const p of shouldNotExist) {
-      const got = readPath(leaf.bare, "refs/heads/shadow/leaf/main", p);
+      const got = readPath(leaf.bare, "refs/heads/a-leaf/main", p);
       if (got !== null) throw new Error(`expected ${p} to be ABSENT on shadow; got ${JSON.stringify(got)}`);
     }
     console.log(`  ✓ root *.tmp cascades into both mappings; appA/dist/ blocked; .shadowignore files stripped`);
@@ -226,8 +226,8 @@ async function main() {
       repoRoot: mono2.working,
       pairs: [{
         name: "leaf",
-        a: { remote: "origin", url: mono2.bare },
-        b: { remote: "leaf",   url: leaf2.bare },
+        a: { remote: "origin", url: mono2.bare, label: "a-leaf" },
+        b: { remote: "leaf",   url: leaf2.bare, label: "b-leaf" },
         mappings: [
           { a: "appA",   b: "src/app" },
           { a: "shared", b: "src/shared" },   // src/shared never created in this scenario
@@ -257,7 +257,7 @@ async function main() {
       throw new Error("late-mapping-dir: --from b halted on a merge before the mapped dir existed");
     }
     git("fetch origin", mono2.working);
-    const mergedApp = readPath(mono2.bare, "refs/heads/shadow/leaf/main", "appA/index.ts");
+    const mergedApp = readPath(mono2.bare, "refs/heads/b-leaf/main", "appA/index.ts");
     if (mergedApp !== "vResolved\n") {
       throw new Error(`late-mapping-dir: expected resolved merge on shadow appA/index.ts, got ${JSON.stringify(mergedApp)}`);
     }

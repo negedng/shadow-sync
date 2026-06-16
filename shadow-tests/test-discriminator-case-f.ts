@@ -69,7 +69,7 @@ function banner(s: string) { console.log("\n" + "─".repeat(70) + "\n  " + s + 
 
 function checkTrailerAbsent(repoLogSource: { bare: string }, ref: string, sha: string, label: string) {
   const log = git(`log --format=%B ${ref}`, repoLogSource.bare);
-  const re = new RegExp(`^Shadow-replayed-[^:]+:\\s*${sha}\\b`, "m");
+  const re = new RegExp(`^b-leaf-to-a-leaf:\\s*${sha}\\b`, "m");
   if (re.test(log)) {
     console.log(`  ✘ FAIL [${label}] — trailer for ${sha.slice(0, 12)} found on ${ref}`);
     process.exit(1);
@@ -104,7 +104,7 @@ async function runShadowIgnoreDrop(tmpDir: string) {
   applyTestOverrides({
     repoRoot: mono.working,
     pairs: [
-      { name: "leaf", a: { remote: "origin", url: mono.bare }, b: { remote: "leaf", url: leaf.bare }, mappings: [{ a: "leaf", b: "" }] },
+      { name: "leaf", a: { remote: "origin", url: mono.bare, label: "a-leaf" }, b: { remote: "leaf", url: leaf.bare, label: "b-leaf" }, mappings: [{ a: "leaf", b: "" }] },
     ],
     shadowBranchPrefix: "shadow",
   });
@@ -127,7 +127,7 @@ async function runShadowIgnoreDrop(tmpDir: string) {
 
   git("fetch origin", mono.working);
   // The pair filter drops Lc1 entirely.
-  checkTrailerAbsent({ bare: mono.bare }, "refs/heads/shadow/leaf/main", lc1, "leaf-pair");
+  checkTrailerAbsent({ bare: mono.bare }, "refs/heads/b-leaf/main", lc1, "leaf-pair");
   r = await runSync({ from: "b" });
   if (r.exitCode !== 0) { console.error(r.stdout); console.error(r.stderr); throw new Error("idempotent --from b halted"); }
   assertIdempotent(r, lc1, "idempotent");

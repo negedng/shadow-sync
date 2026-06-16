@@ -25,9 +25,10 @@ function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 
-/** "author <email>|committer <email>|subject" per commit on a shadow ref, newest first. */
-function identityLog(env: TestEnv, remoteName: string): string[] {
-  const branch = shadowBranchOf(env);
+/** "author <email>|committer <email>|subject" per commit on a shadow ref, newest first.
+ *  `from` picks the ref direction: "b" = pull ref on origin, "a" = push ref on team. */
+function identityLog(env: TestEnv, remoteName: string, from: "a" | "b" = "b"): string[] {
+  const branch = shadowBranchOf(env, undefined, from);
   git(`fetch ${remoteName} ${branch}`, env.localRepo);
   return git(`log ${remoteName}/${branch} --format="%an <%ae>|%cn <%ce>|%s"`, env.localRepo)
     .split("\n").filter(Boolean);
@@ -89,20 +90,20 @@ export default function run(): void {
     git('commit --amend --no-edit --author="Yana Mono <yana@mono.test>"', env.localRepo);
     const r4 = runPush(env);
     assertEqual(r4.status, 0, `[identity 4] push: ${r4.stderr.slice(0, 300)}`);
-    assertEqual(lineFor(identityLog(env, "team"), "Yana change"),
+    assertEqual(lineFor(identityLog(env, "team", "a"), "Yana change"),
       "Xav Ext <xav@ext.test>|Local Dev <local@test.com>|Yana change",
       "[identity 4] export maps mono identity back to external; unmapped committer verbatim");
 
     // phase 5: round-trip — external merges its shadow into main, resync.
     // Invariant: neither repo's shadow ever shows the other side's identity.
     git("fetch origin", env.remoteWorking);
-    git(`merge origin/${shadowBranchOf(env)} --no-ff -m "Integrate shadow"`, env.remoteWorking);
+    git(`merge origin/${shadowBranchOf(env, undefined, "a")} --no-ff -m "Integrate shadow"`, env.remoteWorking);
     git(`push origin ${env.mainBranch}`, env.remoteWorking);
     const r5 = runCiSync(env);
     assertEqual(r5.status, 0, `[identity 5] resync: ${r5.stderr.slice(0, 300)}`);
     assertNotIncludes(identityLog(env, "origin").join("\n"), "xav@ext.test",
       "[identity 5] external identity never appears on mono's shadow");
-    assertNotIncludes(identityLog(env, "team").join("\n"), "yana@mono.test",
+    assertNotIncludes(identityLog(env, "team", "a").join("\n"), "yana@mono.test",
       "[identity 5] mono identity never appears on the external shadow");
     const r5b = runCiSync(env);
     assertEqual(r5b.status, 0, "[identity 5] re-run succeeds");

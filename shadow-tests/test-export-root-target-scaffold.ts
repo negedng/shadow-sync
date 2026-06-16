@@ -69,7 +69,7 @@ function scaffoldOnExport(tmp: string, label: string, targetDir: string): string
 
   applyTestOverrides({
     repoRoot: mono.working,
-    pairs: [{ name: "be", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "be", b: targetDir }] }],
+    pairs: [{ name: "be", a: { remote: "origin", url: mono.bare, label: "a-be" }, b: { remote: "backend", url: backend.bare, label: "b-be" }, mappings: [{ a: "be", b: targetDir }] }],
     shadowBranchPrefix: "shadow",
   });
   setBranchFiltersForTesting(new Map<string, RegExp[]>([
@@ -99,14 +99,14 @@ function scaffoldOnExport(tmp: string, label: string, targetDir: string): string
   // import (--from b): backend → mono be/.
   assertEqual(runSync({ from: "b" }).exitCode, 0, `[${label}] import --from b failed`);
   git("fetch origin", mono.working);
-  if (fileAtRef(mono, "origin/shadow/be/main", "be/real.txt") === null)
+  if (fileAtRef(mono, "origin/b-be/main", "be/real.txt") === null)
     throw new AssertionError(`[${label}] import lost real.txt`);
-  if (fileAtRef(mono, "origin/shadow/be/main", "be/scaffold.txt") !== null)
+  if (fileAtRef(mono, "origin/b-be/main", "be/scaffold.txt") !== null)
     throw new AssertionError(`[${label}] import-side bug: scaffold survived import`);
 
   // integrate shadow into mono main (first parent = unmapped seed).
   git("checkout main", mono.working);
-  git('merge --no-ff origin/shadow/be/main -m "integrate backend"', mono.working);
+  git('merge --no-ff origin/b-be/main -m "integrate backend"', mono.working);
   git("push origin main", mono.working);
   if (fileAtRef(mono, "main", "be/scaffold.txt") !== null)
     throw new AssertionError(`[${label}] mono main wrongly has scaffold after integrate`);
@@ -114,9 +114,9 @@ function scaffoldOnExport(tmp: string, label: string, targetDir: string): string
   // export (--from a): mono → backend shadow.
   assertEqual(runSync({ from: "a" }).exitCode, 0, `[${label}] export --from a failed`);
   git("fetch backend", mono.working);
-  if (fileAtRef(mono, "backend/shadow/be/main", real) === null)
+  if (fileAtRef(mono, "backend/a-be/main", real) === null)
     throw new AssertionError(`[${label}] export lost real.txt`);
-  return fileAtRef(mono, "backend/shadow/be/main", scaffold);
+  return fileAtRef(mono, "backend/a-be/main", scaffold);
 }
 
 function run(): void {

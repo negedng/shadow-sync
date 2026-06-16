@@ -37,7 +37,7 @@ function runForceRewrite(): void {
     assertEqual(readShadowFile(env, "a.ts"), "A\n", "[force-rewrite 1] A synced");
     assertEqual(readShadowFile(env, "b.ts"), "B\n", "[force-rewrite 1] B synced");
 
-    const mainShadowRef = `shadow/${env.subdir}/main`;
+    const mainShadowRef = `b-${env.subdir}/main`;
     const shadowHeadBefore = git(`rev-parse origin/${mainShadowRef}`, env.localRepo);
 
     const aSha = git("rev-parse HEAD~1", env.remoteWorking);
@@ -79,7 +79,7 @@ function runForceRewrite(): void {
     assertEqual(r2.status, 0, "[force-rewrite 2] initial feature sync should succeed");
 
     git("fetch origin", env.localRepo);
-    const featShadowRef = `shadow/${env.subdir}/feature`;
+    const featShadowRef = `b-${env.subdir}/feature`;
     const featShadow = `origin/${featShadowRef}`;
     const featShadowBefore = git(`rev-parse ${featShadow}`, env.localRepo);
     assertEqual(git(`show ${featShadow}:${env.subdir}/x.ts`, env.localRepo), "X", "[force-rewrite 2] X on feature shadow");
@@ -121,7 +121,7 @@ function runPushDiverged(): void {
     commitOnLocal(env, { "second.ts": "second\n" }, "Add second.ts");
 
     const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+    const shadowBranch = `a-${subdir}/main`;
     git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
     const currentTip = git(`rev-parse ${env.remoteName}/${shadowBranch}`, env.localRepo);
     const treeHash = git(`rev-parse "${currentTip}^{tree}"`, env.localRepo);
@@ -152,7 +152,7 @@ function runPushDiverged(): void {
 function runConcurrentMerges(): void {
   const env = createTestEnv("push-diverged-concurrent-merges");
   const subdir = env.subdir;
-  const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+  const pushShadowBranch = `a-${subdir}/main`;
 
   try {
     // Round 1: concurrent commits
@@ -165,8 +165,8 @@ function runConcurrentMerges(): void {
     assertEqual(r.status, 0, "[concurrent r1] --from a should succeed");
 
     // Round 2: BOTH sides merge shadow into main concurrently
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
-    git(`merge --no-ff origin/${shadowBranch} -m "Bea: merge shadow r1"`, env.remoteWorking);
+    git(`fetch origin ${pushShadowBranch}`, env.remoteWorking);
+    git(`merge --no-ff origin/${pushShadowBranch} -m "Bea: merge shadow r1"`, env.remoteWorking);
     git(`push origin main`, env.remoteWorking);
 
     mergeShadow(env);
@@ -200,10 +200,10 @@ function runConcurrentMerges(): void {
     r = runPush(env);
     assertEqual(r.status, 0, "[concurrent converge] --from a should succeed");
 
-    git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
+    git(`fetch ${env.remoteName} ${pushShadowBranch}`, env.localRepo);
     const localSubTree = git(`ls-tree main -- ${subdir}`, env.localRepo)
       .split("\n")[0].split(/\s+/)[2];
-    const shadowRootTree = git(`log -1 --format=%T ${env.remoteName}/${shadowBranch}`, env.localRepo);
+    const shadowRootTree = git(`log -1 --format=%T ${env.remoteName}/${pushShadowBranch}`, env.localRepo);
     assertEqual(localSubTree, shadowRootTree,
       "[concurrent converge] local subdir tree must match remote shadow tree");
 

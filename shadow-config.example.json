@@ -2,24 +2,28 @@
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "repo-a", "url": "https://github.com/negedng/repo-a.git" },
-      "b": { "remote": "repo-b", "url": "https://github.com/negedng/repo-b.git" },
+      "a": { "remote": "mono",    "url": "https://github.com/negedng/mono.git",    "label": "mb" },
+      "b": { "remote": "backend", "url": "https://github.com/negedng/backend.git", "label": "bb" },
       "mappings": [
         { "a": "backend", "b": "" }
+      ]
+    },
+    {
+      "name": "frontend",
+      "a": { "remote": "mono",     "url": "https://github.com/negedng/mono.git",     "label": "mf" },
+      "b": { "remote": "frontend", "url": "https://github.com/negedng/frontend.git", "label": "ff" },
+      "mappings": [
+        { "a": "frontend", "b": "" }
       ]
     }
   ],
 
   "identities": [
     {
-      "repo-a": { "name": "X Mono",     "email": "x@corp.example.com" },
-      "repo-b": { "name": "X External", "email": "x@gmail.example.com" }
+      "mono":    { "name": "X Mono",     "email": "x@corp.example.com" },
+      "backend": { "name": "X External", "email": "x@gmail.example.com" }
     }
   ],
-
-  "trailers": {
-    "replayed": "Shadow-replayed"
-  },
 
   "gitConfigOverrides": {
     "core.autocrlf": "false",
@@ -28,6 +32,5 @@
     "core.quotepath": "false"
   },
 
-  "maxBuffer": 52428800,
-  "shadowBranchPrefix": "shadow"
+  "maxBuffer": 52428800
 }

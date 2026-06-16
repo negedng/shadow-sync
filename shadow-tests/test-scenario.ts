@@ -133,10 +133,17 @@ function listRefs(repo: Repo, prefix: string): string[] {
   }
 }
 
-/** Find a shadow replay by its trailer. Returns the replay SHA or null. */
-function findReplay(repo: Repo, branchRef: string, sourceRemoteName: string, sourceSha: string): string | null {
-  const pairName = branchRef.split("/")[2];
-  const trailer = `Shadow-replayed-${pairName}-${sourceRemoteName}: ${sourceSha}`;
+/** Find a shadow replay by its trailer. Returns the replay SHA or null.
+ *  Refs are `<srcLabel>/<branch>` (e.g. origin/b-backend/main); the source
+ *  label is segment [1]. The replay trailer is `<srcLabel>-to-<tgtLabel>`,
+ *  where the target shares the pair name under the opposite a/b prefix.
+ *  The matched value may carry extra squash-absorbed SHAs after the first
+ *  (direct) value, so we match the source SHA anywhere on the trailer line. */
+function findReplay(repo: Repo, branchRef: string, _sourceRemoteName: string, sourceSha: string): string | null {
+  const srcLabel = branchRef.split("/")[1];           // e.g. "b-backend" or "a-backend"
+  const pairName = srcLabel.replace(/^[ab]-/, "");
+  const tgtLabel = (srcLabel.startsWith("a-") ? "b-" : "a-") + pairName;
+  const trailerKey = `${srcLabel}-to-${tgtLabel}`;
   let log: string;
   try {
     log = execSync(`git log ${branchRef} --format=%H%n%B%n---END---`, {
@@ -151,7 +158,10 @@ function findReplay(repo: Repo, branchRef: string, sourceRemoteName: string, sou
     const newlineIdx = trimmed.indexOf("\n");
     const sha = trimmed.slice(0, newlineIdx).trim();
     const body = trimmed.slice(newlineIdx + 1);
-    if (body.includes(trailer)) return sha;
+    // Trailer line: "<key>: <directSha> [absorbedSha...]" — match the source
+    // SHA as a whole word among the values for this key.
+    const re = new RegExp(`^${trailerKey}:(?:.*\\s)?${sourceSha}(?:\\s|$)`, "m");
+    if (re.test(body)) return sha;
   }
   return null;
 }
@@ -392,8 +402,8 @@ async function runScenario(): Promise<void> {
       pairs: [
         {
           name: "backend",
-          a: { remote: "origin",  url: mono.bare    },
-          b: { remote: "backend", url: backend.bare },
+          a: { remote: "origin",  url: mono.bare,    label: "a-backend" },
+          b: { remote: "backend", url: backend.bare, label: "b-backend" },
           mappings: [
             { a: "backend", b: "" },
             { a: "common",  b: "src/common" },
@@ -401,8 +411,8 @@ async function runScenario(): Promise<void> {
         },
         {
           name: "frontend",
-          a: { remote: "origin",   url: mono.bare     },
-          b: { remote: "frontend", url: frontend.bare },
+          a: { remote: "origin",   url: mono.bare,     label: "a-frontend" },
+          b: { remote: "frontend", url: frontend.bare, label: "b-frontend" },
           mappings: [
             { a: "frontend", b: "" },
             { a: "common",   b: "src/app/common" },
@@ -450,14 +460,14 @@ async function runScenario(): Promise<void> {
     }
     git("fetch origin", mono.working);
 
-    assertRefExists(mono, "origin/shadow/backend/main",      "[Phase 1a] shadow/backend/main");
-    assertRefExists(mono, "origin/shadow/backend/core-1.0",  "[Phase 1a] shadow/backend/core-1.0");
-    assertRefExists(mono, "origin/shadow/frontend/main",     "[Phase 1a] shadow/frontend/main");
-    assertRefExists(mono, "origin/shadow/frontend/core-1.0", "[Phase 1a] shadow/frontend/core-1.0");
+    assertRefExists(mono, "origin/b-backend/main",      "[Phase 1a] b-backend/main");
+    assertRefExists(mono, "origin/b-backend/core-1.0",  "[Phase 1a] b-backend/core-1.0");
+    assertRefExists(mono, "origin/b-frontend/main",     "[Phase 1a] b-frontend/main");
+    assertRefExists(mono, "origin/b-frontend/core-1.0", "[Phase 1a] b-frontend/core-1.0");
 
     // project filtered everywhere → no shadow refs at all on either pair.
-    assertRefAbsent(mono, "origin/shadow/backend/project",  "[Phase 1a] backend/project filtered");
-    assertRefAbsent(mono, "origin/shadow/frontend/project", "[Phase 1a] frontend/project filtered");
+    assertRefAbsent(mono, "origin/b-backend/project",  "[Phase 1a] backend/project filtered");
+    assertRefAbsent(mono, "origin/b-frontend/project", "[Phase 1a] frontend/project filtered");
 
     // ── Phase 1b: Open project + project-b on all three sides, re-sync ──
     allow("origin",   "project");
@@ -471,24 +481,24 @@ async function runScenario(): Promise<void> {
     }
     git("fetch origin", mono.working);
 
-    assertRefExists(mono, "origin/shadow/backend/project",    "[Phase 1b] shadow/backend/project now present");
-    assertRefExists(mono, "origin/shadow/frontend/project",   "[Phase 1b] shadow/frontend/project now present");
-    assertRefExists(mono, "origin/shadow/backend/project-b",  "[Phase 1b] shadow/backend/project-b now present");
-    assertRefExists(mono, "origin/shadow/frontend/project-b", "[Phase 1b] shadow/frontend/project-b now present");
+    assertRefExists(mono, "origin/b-backend/project",    "[Phase 1b] b-backend/project now present");
+    assertRefExists(mono, "origin/b-frontend/project",   "[Phase 1b] b-frontend/project now present");
+    assertRefExists(mono, "origin/b-backend/project-b",  "[Phase 1b] b-backend/project-b now present");
+    assertRefExists(mono, "origin/b-frontend/project-b", "[Phase 1b] b-frontend/project-b now present");
 
     // Existence-only check: every leaf commit has a replay on the matching shadow ref.
-    const Bc0_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc0, "Bc0'_mono");
-    const Bc1_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc1, "Bc1'_mono");
-    const Bc2_mono = findReplayOrFail(mono, "origin/shadow/backend/main",     "backend",  Bc2, "Bc2'_mono");
-    findReplayOrFail(mono, "origin/shadow/backend/core-1.0", "backend",  Br1, "Br1'_mono");
-    findReplayOrFail(mono, "origin/shadow/backend/project",   "backend",  Bt1,  "Bt1'_mono");
-    findReplayOrFail(mono, "origin/shadow/backend/project-b", "backend",  Btb1, "Btb1'_mono");
-    const Fc0_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc0, "Fc0'_mono");
-    const Fc1_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc1, "Fc1'_mono");
-    const Fc2_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc2, "Fc2'_mono");
-    findReplayOrFail(mono, "origin/shadow/frontend/core-1.0", "frontend", Fr1, "Fr1'_mono");
-    findReplayOrFail(mono, "origin/shadow/frontend/project",   "frontend", Ft1,  "Ft1'_mono");
-    findReplayOrFail(mono, "origin/shadow/frontend/project-b", "frontend", Ftb1, "Ftb1'_mono");
+    const Bc0_mono = findReplayOrFail(mono, "origin/b-backend/main", "backend", Bc0, "Bc0'_mono");
+    const Bc1_mono = findReplayOrFail(mono, "origin/b-backend/main", "backend", Bc1, "Bc1'_mono");
+    const Bc2_mono = findReplayOrFail(mono, "origin/b-backend/main",     "backend",  Bc2, "Bc2'_mono");
+    findReplayOrFail(mono, "origin/b-backend/core-1.0", "backend",  Br1, "Br1'_mono");
+    findReplayOrFail(mono, "origin/b-backend/project",   "backend",  Bt1,  "Bt1'_mono");
+    findReplayOrFail(mono, "origin/b-backend/project-b", "backend",  Btb1, "Btb1'_mono");
+    const Fc0_mono = findReplayOrFail(mono, "origin/b-frontend/main", "frontend", Fc0, "Fc0'_mono");
+    const Fc1_mono = findReplayOrFail(mono, "origin/b-frontend/main", "frontend", Fc1, "Fc1'_mono");
+    const Fc2_mono = findReplayOrFail(mono, "origin/b-frontend/main", "frontend", Fc2, "Fc2'_mono");
+    findReplayOrFail(mono, "origin/b-frontend/core-1.0", "frontend", Fr1, "Fr1'_mono");
+    findReplayOrFail(mono, "origin/b-frontend/project",   "frontend", Ft1,  "Ft1'_mono");
+    findReplayOrFail(mono, "origin/b-frontend/project-b", "frontend", Ftb1, "Ftb1'_mono");
 
     // Bootstrap-grafting: each pair's first replay should be parented onto Mc0
     // so the chain is connected to mono's history (not a dangling root).
@@ -512,12 +522,12 @@ async function runScenario(): Promise<void> {
       "[Phase 1b] Fc1'_mono keeps Fred's identity (no profile)");
 
     // ── Phase 2: Bring both leaf shadows into mono's main (Mc1, Mc2) ────
-    const Mc1 = mergeRef(mono, "origin/shadow/backend/main",  "Mc1");
-    const Mc2 = mergeRef(mono, "origin/shadow/frontend/main", "Mc2");
+    const Mc1 = mergeRef(mono, "origin/b-backend/main",  "Mc1");
+    const Mc2 = mergeRef(mono, "origin/b-frontend/main", "Mc2");
     git("push origin main", mono.working);
 
-    assertParents(mono, Mc1, [Mc0, Bc2_mono], "Mc1 = merge(Mc0, shadow/backend/main tip)");
-    assertParents(mono, Mc2, [Mc1, Fc2_mono], "Mc2 = merge(Mc1, shadow/frontend/main tip)");
+    assertParents(mono, Mc1, [Mc0, Bc2_mono], "Mc1 = merge(Mc0, b-backend/main tip)");
+    assertParents(mono, Mc2, [Mc1, Fc2_mono], "Mc2 = merge(Mc1, b-frontend/main tip)");
 
     // Mc2 = mono's unified main tip: both pair trees + common + Mc0 outer.
     assertTreeContents(mono, Mc2, monoTree(OUTER_MC0, BE_BC2_MONO, FE_FC2_MONO, CM_V1),
@@ -557,68 +567,68 @@ async function runScenario(): Promise<void> {
     git("fetch origin", frontend.working);
 
     // ── Exactly 1 new shadow ref on each leaf, with the expected name ────
-    const beShadowRefs = listRefs(backend,  "refs/remotes/origin/shadow");
-    const feShadowRefs = listRefs(frontend, "refs/remotes/origin/shadow");
+    const beShadowRefs = listRefs(backend,  "refs/remotes/origin/a-backend");
+    const feShadowRefs = listRefs(frontend, "refs/remotes/origin/a-frontend");
     assertEqual(beShadowRefs.length, 1, `[Phase 3] backend has exactly 1 shadow ref (got: ${beShadowRefs.join(",")})`);
-    assertEqual(beShadowRefs[0], "refs/remotes/origin/shadow/backend/main", "[Phase 3] backend shadow ref name");
+    assertEqual(beShadowRefs[0], "refs/remotes/origin/a-backend/main", "[Phase 3] backend shadow ref name");
     assertEqual(feShadowRefs.length, 1, `[Phase 3] frontend has exactly 1 shadow ref (got: ${feShadowRefs.join(",")})`);
-    assertEqual(feShadowRefs[0], "refs/remotes/origin/shadow/frontend/main", "[Phase 3] frontend shadow ref name");
+    assertEqual(feShadowRefs[0], "refs/remotes/origin/a-frontend/main", "[Phase 3] frontend shadow ref name");
 
     // ── Drops: Mc0 (outer-init) and Mc3m (outer-only) on BOTH pairs ──────
-    assertEqual(findReplay(backend,  "origin/shadow/backend/main",  "origin", Mc0),  null,
+    assertEqual(findReplay(backend,  "origin/a-backend/main",  "origin", Mc0),  null,
       "[Phase 3] Mc0 (outer-init) dropped on backend");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mc0),  null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mc0),  null,
       "[Phase 3] Mc0 dropped on frontend");
-    assertEqual(findReplay(backend,  "origin/shadow/backend/main",  "origin", Mc3m), null,
+    assertEqual(findReplay(backend,  "origin/a-backend/main",  "origin", Mc3m), null,
       "[Phase 3] Mc3m (outer-only) dropped on backend");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mc3m), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mc3m), null,
       "[Phase 3] Mc3m dropped on frontend");
 
     // ── Asymmetric drops: be-only on frontend, fe-only-with-outer on backend ──
-    assertEqual(findReplay(backend,  "origin/shadow/backend/main",  "origin", Mc3fm), null,
+    assertEqual(findReplay(backend,  "origin/a-backend/main",  "origin", Mc3fm), null,
       "[Phase 3] Mc3fm (fe + outer, no be/cm change) dropped on backend");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mc3b),  null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mc3b),  null,
       "[Phase 3] Mc3b (be-only) dropped on frontend");
 
     // ── Cross-pair common: Fc1/Fc2 don't change common → NOT cross-pair-replayed on backend ──
-    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Fc1_mono), null,
+    assertEqual(findReplay(backend, "origin/a-backend/main", "origin", Fc1_mono), null,
       "[Phase 3] Fc1_mono not cross-pair-replayed on backend (no common change)");
-    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Fc2_mono), null,
+    assertEqual(findReplay(backend, "origin/a-backend/main", "origin", Fc2_mono), null,
       "[Phase 3] Fc2_mono not cross-pair-replayed on backend (no common change)");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Bc1_mono), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Bc1_mono), null,
       "[Phase 3] Bc1_mono not cross-pair-replayed on frontend (no common change)");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Bc2_mono), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Bc2_mono), null,
       "[Phase 3] Bc2_mono not cross-pair-replayed on frontend (no common change)");
 
     // ── Backend pair topology: Mc1 (merge), Fc0 (cross-pair common), Mc2 (merge of both) ──
-    const Mc1_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc1, "Mc1'_be");
+    const Mc1_be = findReplayOrFail(backend, "origin/a-backend/main", "origin", Mc1, "Mc1'_be");
     assertParents(backend, Mc1_be, [Bc0, Bc2], "Mc1'_be parents = [Bc0 (root graft), Bc2 (be shadow tip)]");
 
-    const Fc0_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Fc0_mono, "Fc0'_be (cross-pair common)");
+    const Fc0_be = findReplayOrFail(backend, "origin/a-backend/main", "origin", Fc0_mono, "Fc0'_be (cross-pair common)");
     assertParents(backend, Fc0_be, [Bc0], "Fc0'_be parents = [Bc0] (cross-pair common, single-parent graft on backend root)");
 
-    const Mc2_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc2, "Mc2'_be");
+    const Mc2_be = findReplayOrFail(backend, "origin/a-backend/main", "origin", Mc2, "Mc2'_be");
     assertParents(backend, Mc2_be, [Mc1_be, Fc0_be], "Mc2'_be parents = [Mc1'_be, Fc0'_be] (integrates cross-pair replay)");
 
     // ── Frontend pair topology: mirror — Bc0 (cross-pair) hangs off Fc0, Mc1 is the integrator ──
-    const Bc0_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Bc0_mono, "Bc0'_fe (cross-pair common)");
+    const Bc0_fe = findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Bc0_mono, "Bc0'_fe (cross-pair common)");
     assertParents(frontend, Bc0_fe, [Fc0], "Bc0'_fe parents = [Fc0] (cross-pair common, single-parent graft on frontend root)");
 
-    const Mc1_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc1, "Mc1'_fe");
+    const Mc1_fe = findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc1, "Mc1'_fe");
     assertParents(frontend, Mc1_fe, [Fc0, Bc0_fe], "Mc1'_fe parents = [Fc0 (root graft), Bc0'_fe (cross-pair)]");
 
-    const Mc2_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc2, "Mc2'_fe");
+    const Mc2_fe = findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc2, "Mc2'_fe");
     assertParents(frontend, Mc2_fe, [Mc1_fe, Fc2], "Mc2'_fe parents = [Mc1'_fe, Fc2 (fe shadow tip)]");
 
     // ── Mc3* keeps (existence-only): single-parent chains tail off Mc2'_* ──
-    findReplayOrFail(backend,  "origin/shadow/backend/main",  "origin", Mc3c,    "Mc3c'_be");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3c,    "Mc3c'_fe");
-    findReplayOrFail(backend,  "origin/shadow/backend/main",  "origin", Mc3bc,   "Mc3bc'_be");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3bc,   "Mc3bc'_fe");
-    findReplayOrFail(backend,  "origin/shadow/backend/main",  "origin", Mc3bcfm, "Mc3bcfm'_be");
-    findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3bcfm, "Mc3bcfm'_fe");
-    const Mc3fm_fe = findReplayOrFail(frontend, "origin/shadow/frontend/main", "origin", Mc3fm, "Mc3fm'_fe");
-    const Mc3b_be  = findReplayOrFail(backend,  "origin/shadow/backend/main",  "origin", Mc3b,  "Mc3b'_be");
+    findReplayOrFail(backend,  "origin/a-backend/main",  "origin", Mc3c,    "Mc3c'_be");
+    findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc3c,    "Mc3c'_fe");
+    findReplayOrFail(backend,  "origin/a-backend/main",  "origin", Mc3bc,   "Mc3bc'_be");
+    findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc3bc,   "Mc3bc'_fe");
+    findReplayOrFail(backend,  "origin/a-backend/main",  "origin", Mc3bcfm, "Mc3bcfm'_be");
+    findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc3bcfm, "Mc3bcfm'_fe");
+    const Mc3fm_fe = findReplayOrFail(frontend, "origin/a-frontend/main", "origin", Mc3fm, "Mc3fm'_fe");
+    const Mc3b_be  = findReplayOrFail(backend,  "origin/a-backend/main",  "origin", Mc3b,  "Mc3b'_be");
 
     // Identity mapping on export: Mira's replays carry her per-leaf identities.
     assertAuthor(backend, Mc3b_be, "Mira BE <mira@be.example.com>",
@@ -632,14 +642,14 @@ async function runScenario(): Promise<void> {
     // leaf-side merge and must carry outer + cross-pair slice spliced from the
     // latest kept ancestor on each pair's view of mono main.
     git("checkout main", backend.working);
-    const Bc3 = mergeRef(backend, "origin/shadow/backend/main", "Bc3");
+    const Bc3 = mergeRef(backend, "origin/a-backend/main", "Bc3");
     git("push origin main", backend.working);
-    assertParents(backend, Bc3, [Bc2, Mc3b_be], "Bc3 = merge(Bc2, shadow/backend/main tip)");
+    assertParents(backend, Bc3, [Bc2, Mc3b_be], "Bc3 = merge(Bc2, a-backend/main tip)");
 
     git("checkout main", frontend.working);
-    const Fc3 = mergeRef(frontend, "origin/shadow/frontend/main", "Fc3");
+    const Fc3 = mergeRef(frontend, "origin/a-frontend/main", "Fc3");
     git("push origin main", frontend.working);
-    assertParents(frontend, Fc3, [Fc2, Mc3fm_fe], "Fc3 = merge(Fc2, shadow/frontend/main tip)");
+    assertParents(frontend, Fc3, [Fc2, Mc3fm_fe], "Fc3 = merge(Fc2, a-frontend/main tip)");
 
     {
       const r = runSync({ from: "b" });
@@ -648,10 +658,10 @@ async function runScenario(): Promise<void> {
     git("fetch origin", mono.working);
 
     // ── Bc3'_mono and Fc3'_mono exist and become the new shadow tips ─────
-    const Bc3_mono = findReplayOrFail(mono, "origin/shadow/backend/main",  "backend",  Bc3, "Bc3'_mono");
-    const Fc3_mono = findReplayOrFail(mono, "origin/shadow/frontend/main", "frontend", Fc3, "Fc3'_mono");
-    assertTip(mono, "origin/shadow/backend/main",  Bc3_mono, "[Phase 4] shadow/backend/main tip = Bc3'_mono");
-    assertTip(mono, "origin/shadow/frontend/main", Fc3_mono, "[Phase 4] shadow/frontend/main tip = Fc3'_mono");
+    const Bc3_mono = findReplayOrFail(mono, "origin/b-backend/main",  "backend",  Bc3, "Bc3'_mono");
+    const Fc3_mono = findReplayOrFail(mono, "origin/b-frontend/main", "frontend", Fc3, "Fc3'_mono");
+    assertTip(mono, "origin/b-backend/main",  Bc3_mono, "[Phase 4] b-backend/main tip = Bc3'_mono");
+    assertTip(mono, "origin/b-frontend/main", Fc3_mono, "[Phase 4] b-frontend/main tip = Fc3'_mono");
 
     // ── Tree-shape round-trip: each pair's shadow tip = mono-main snapshot at the pair's latest kept commit ──
     // Backend pair's latest kept on mono main = Mc3b. mono main at Mc3b has:
@@ -677,7 +687,7 @@ async function runScenario(): Promise<void> {
     // First --from b: branch and its commits stay invisible on mono.
     // Then we merge feature/x into backend's main (which IS allowlisted) and
     // re-sync: the branch still has no shadow ref, but its commits reach
-    // mono's shadow/backend/main via merge reachability.
+    // mono's b-backend/main via merge reachability.
     git("checkout -b feature/x main", backend.working);
     const Bfx1 = commitFiles(backend, { "src/fx.txt": "fx v1\n" }, "Bfx1");
     git("push origin feature/x", backend.working);
@@ -689,15 +699,15 @@ async function runScenario(): Promise<void> {
     git("fetch origin", mono.working);
 
     // Filtered branch produces no shadow ref of its own…
-    assertRefAbsent(mono, "origin/shadow/backend/feature/x",
+    assertRefAbsent(mono, "origin/b-backend/feature/x",
       "[F1 step 1] filtered feature/x must not get a shadow ref on mono");
     // …and its commits aren't reachable from any allowed shadow ref either
     // (it's not yet merged into main).
-    assertEqual(findReplay(mono, "origin/shadow/backend/main", "backend", Bfx1), null,
+    assertEqual(findReplay(mono, "origin/b-backend/main", "backend", Bfx1), null,
       "[F1 step 1] Bfx1 not replayed on shadow/backend/main (branch not merged yet)");
 
     // Snapshot the shadow-ref set so we can confirm no NEW refs appear after the merge.
-    const monoShadowRefsBeforeMerge = listRefs(mono, "refs/remotes/origin/shadow").sort();
+    const monoShadowRefsBeforeMerge = listRefs(mono, "refs/remotes/origin/b-backend refs/remotes/origin/b-frontend").sort();
 
     // ── F1 step 2: merge feature/x into backend's main, re-sync ──────────
     git("checkout main", backend.working);
@@ -711,16 +721,16 @@ async function runScenario(): Promise<void> {
     git("fetch origin", mono.working);
 
     // The branch itself STILL has no shadow ref — the filter is branch-level.
-    assertRefAbsent(mono, "origin/shadow/backend/feature/x",
+    assertRefAbsent(mono, "origin/b-backend/feature/x",
       "[F1 step 2] filter is branch-level: feature/x stays out even after the merge");
     // No new shadow refs appeared.
-    const monoShadowRefsAfterMerge = listRefs(mono, "refs/remotes/origin/shadow").sort();
+    const monoShadowRefsAfterMerge = listRefs(mono, "refs/remotes/origin/b-backend refs/remotes/origin/b-frontend").sort();
     assertEqual(JSON.stringify(monoShadowRefsAfterMerge), JSON.stringify(monoShadowRefsBeforeMerge),
       "[F1 step 2] no new shadow refs from the merge — same set as before");
 
     // But Bfx1 and Bc4 DO reach shadow/backend/main via merge reachability.
-    const Bfx1_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bfx1, "Bfx1'_mono (via merge reachability)");
-    const Bc4_mono  = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc4,  "Bc4'_mono");
+    const Bfx1_mono = findReplayOrFail(mono, "origin/b-backend/main", "backend", Bfx1, "Bfx1'_mono (via merge reachability)");
+    const Bc4_mono  = findReplayOrFail(mono, "origin/b-backend/main", "backend", Bc4,  "Bc4'_mono");
     // Bfx1's parent on leaf is Bc3 (branch was cut from main = Bc3); maps to Bc3_mono.
     assertParents(mono, Bfx1_mono, [Bc3_mono],
       "[F1 step 2] Bfx1'_mono parents = [Bc3'_mono] (filtered-branch commit grafted via merge reachability)");
@@ -746,12 +756,12 @@ async function runScenario(): Promise<void> {
     git("fetch origin", frontend.working);
 
     // Filtered mono branch produces no shadow ref on either leaf…
-    assertRefAbsent(backend,  "origin/shadow/backend/internal/notes",  "[F2 step 1] no shadow ref on backend leaf");
-    assertRefAbsent(frontend, "origin/shadow/frontend/internal/notes", "[F2 step 1] no shadow ref on frontend leaf");
+    assertRefAbsent(backend,  "origin/a-backend/internal/notes",  "[F2 step 1] no shadow ref on backend leaf");
+    assertRefAbsent(frontend, "origin/a-frontend/internal/notes", "[F2 step 1] no shadow ref on frontend leaf");
     // …and Mf1x is not yet reachable from any allowed mono branch.
-    assertEqual(findReplay(backend,  "origin/shadow/backend/main",  "origin", Mf1x), null,
+    assertEqual(findReplay(backend,  "origin/a-backend/main",  "origin", Mf1x), null,
       "[F2 step 1] Mf1x not replayed on backend (branch not merged into main yet)");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mf1x), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mf1x), null,
       "[F2 step 1] Mf1x not replayed on frontend");
 
     // ── F2 step 2: merge internal/notes into mono's main (Mc4), re-sync ──
@@ -767,12 +777,12 @@ async function runScenario(): Promise<void> {
     git("fetch origin", frontend.working);
 
     // Branch refs still absent (filter is branch-level).
-    assertRefAbsent(backend,  "origin/shadow/backend/internal/notes",  "[F2 step 2] filter is branch-level on --from a too");
-    assertRefAbsent(frontend, "origin/shadow/frontend/internal/notes", "[F2 step 2] same on frontend leaf");
+    assertRefAbsent(backend,  "origin/a-backend/internal/notes",  "[F2 step 2] filter is branch-level on --from a too");
+    assertRefAbsent(frontend, "origin/a-frontend/internal/notes", "[F2 step 2] same on frontend leaf");
 
     // Backend: Mf1x reaches via merge reachability; Mc4 lands as the integration merge.
-    const Mf1x_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mf1x, "Mf1x'_be");
-    const Mc4_be  = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc4,  "Mc4'_be");
+    const Mf1x_be = findReplayOrFail(backend, "origin/a-backend/main", "origin", Mf1x, "Mf1x'_be");
+    const Mc4_be  = findReplayOrFail(backend, "origin/a-backend/main", "origin", Mc4,  "Mc4'_be");
     assertParents(backend, Mf1x_be, [Mc3b_be],
       "[F2 step 2] Mf1x'_be parents = [Mc3b'_be] (filtered-branch commit grafted onto kept-set tip)");
     assertParents(backend, Mc4_be, [Mc3b_be, Mf1x_be],
@@ -780,11 +790,11 @@ async function runScenario(): Promise<void> {
 
     // Frontend: be-only change on Mf1x → TREESAME drop. Mc4 also drops (merge of two
     // commits whose fe/cm projections both equal Mc3fm's). Tip stays at Mc3fm'_fe.
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mf1x), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mf1x), null,
       "[F2 step 2] Mf1x (be-only) dropped on frontend pair");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mc4), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mc4), null,
       "[F2 step 2] Mc4 (be-only merge) dropped on frontend pair");
-    assertTip(frontend, "origin/shadow/frontend/main", Mc3fm_fe,
+    assertTip(frontend, "origin/a-frontend/main", Mc3fm_fe,
       "[F2 step 2] frontend shadow tip unchanged at Mc3fm'_fe");
 
     // ── Phase 5: Mono integrates both pair shadows back into main (Mc5, Mc6) ──
@@ -794,8 +804,8 @@ async function runScenario(): Promise<void> {
     // Mc4, Mc6 = merge(Mc5, Fc3_mono) is a topology-preserving merge with no
     // new tree changes beyond what Mc5 already had.
     git("checkout main", mono.working);
-    const Mc5 = mergeRef(mono, "origin/shadow/backend/main",  "Mc5");
-    const Mc6 = mergeRef(mono, "origin/shadow/frontend/main", "Mc6");
+    const Mc5 = mergeRef(mono, "origin/b-backend/main",  "Mc5");
+    const Mc6 = mergeRef(mono, "origin/b-frontend/main", "Mc6");
     git("push origin main", mono.working);
 
     assertParents(mono, Mc5, [Mc4, Bc4_mono],
@@ -821,24 +831,24 @@ async function runScenario(): Promise<void> {
     // main, branches its own core-2.0, merges the shadow release (Br2/Fr2),
     // then merges core-2.0 into project (Bt2/Ft2). Final --from b syncs back.
     git("checkout main", mono.working);
-    const Mc7a = mergeRef(mono, "origin/shadow/backend/project", "Mc7a");
+    const Mc7a = mergeRef(mono, "origin/b-backend/project", "Mc7a");
     // Mc7b conflicts on backend/src/project-name.txt — Mc7a brought "project",
     // project-b shadow has "projectB". Operator drops project-b's identifier
     // (keeps "project" — main-side decides what name lives on main).
     let Mc7b: string;
     try {
-      Mc7b = mergeRef(mono, "origin/shadow/backend/project-b", "Mc7b");
+      Mc7b = mergeRef(mono, "origin/b-backend/project-b", "Mc7b");
     } catch {
       fs.writeFileSync(path.join(mono.working, "backend/src/project-name.txt"), "project\n");
       git("add -A", mono.working);
       git("commit --no-edit", mono.working);
       Mc7b = git("rev-parse HEAD", mono.working);
     }
-    const Mc8a = mergeRef(mono, "origin/shadow/frontend/project", "Mc8a");
+    const Mc8a = mergeRef(mono, "origin/b-frontend/project", "Mc8a");
     // Mc8b: symmetric conflict on frontend/src/project-name.txt.
     let Mc8b: string;
     try {
-      Mc8b = mergeRef(mono, "origin/shadow/frontend/project-b", "Mc8b");
+      Mc8b = mergeRef(mono, "origin/b-frontend/project-b", "Mc8b");
     } catch {
       fs.writeFileSync(path.join(mono.working, "frontend/src/project-name.txt"), "project\n");
       git("add -A", mono.working);
@@ -863,20 +873,20 @@ async function runScenario(): Promise<void> {
     // ── Backend: main catches up, then core-2.0 + project ────────────────
     git("fetch origin", backend.working);
     git("checkout main", backend.working);
-    const Bc5 = mergeRef(backend, "origin/shadow/backend/main", "Bc5");
+    const Bc5 = mergeRef(backend, "origin/a-backend/main", "Bc5");
     git("push origin main", backend.working);
     // Bc5's 2nd parent is the shadow/backend/main tip, which is Mc7b'_be —
     // Mc8a / Mc8b (frontend project absorptions) drop on backend pair so the
     // tip stays at Mc7b'_be after --from a.
-    const Mc7b_be = findReplayOrFail(backend, "origin/shadow/backend/main", "origin", Mc7b, "Mc7b'_be");
+    const Mc7b_be = findReplayOrFail(backend, "origin/a-backend/main", "origin", Mc7b, "Mc7b'_be");
     assertParents(backend, Bc5, [Bc4, Mc7b_be], "[release] Bc5 = merge(Bc4, Mc7b'_be)");
-    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mc8a), null,
+    assertEqual(findReplay(backend, "origin/a-backend/main", "origin", Mc8a), null,
       "[release] Mc8a (cross-pair fe-project merge) drops on backend pair");
-    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mc8b), null,
+    assertEqual(findReplay(backend, "origin/a-backend/main", "origin", Mc8b), null,
       "[release] Mc8b (cross-pair fe-project-b merge) drops on backend pair");
 
     git("checkout -b core-2.0 main", backend.working);
-    const Br2 = mergeRef(backend, "origin/shadow/backend/core-2.0", "Br2");
+    const Br2 = mergeRef(backend, "origin/a-backend/core-2.0", "Br2");
     git("push origin core-2.0", backend.working);
 
     git("checkout project", backend.working);
@@ -899,11 +909,11 @@ async function runScenario(): Promise<void> {
     // ── Frontend mirror ──────────────────────────────────────────────────
     git("fetch origin", frontend.working);
     git("checkout main", frontend.working);
-    const Fc4 = mergeRef(frontend, "origin/shadow/frontend/main", "Fc4");
+    const Fc4 = mergeRef(frontend, "origin/a-frontend/main", "Fc4");
     git("push origin main", frontend.working);
 
     git("checkout -b core-2.0 main", frontend.working);
-    const Fr2 = mergeRef(frontend, "origin/shadow/frontend/core-2.0", "Fr2");
+    const Fr2 = mergeRef(frontend, "origin/a-frontend/core-2.0", "Fr2");
     git("push origin core-2.0", frontend.working);
 
     git("checkout project", frontend.working);
@@ -925,24 +935,24 @@ async function runScenario(): Promise<void> {
     }
     git("fetch origin", mono.working);
 
-    // Mr1 lives only on mono's core-2.0 — must NOT appear on shadow/backend/main
+    // Mr1 lives only on mono's core-2.0 — must NOT appear on b-backend/main
     // or shadow/frontend/main (release branch is isolated from main).
-    assertEqual(findReplay(backend, "origin/shadow/backend/main", "origin", Mr1), null,
+    assertEqual(findReplay(backend, "origin/a-backend/main", "origin", Mr1), null,
       "[release] Mr1 (core-2.0-only) must not appear on backend's shadow/backend/main");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/main", "origin", Mr1), null,
+    assertEqual(findReplay(frontend, "origin/a-frontend/main", "origin", Mr1), null,
       "[release] Mr1 must not appear on frontend's shadow/frontend/main");
 
     // core-2.0 shadow refs land on mono carrying the release integration.
-    const Br2_mono = findReplayOrFail(mono, "origin/shadow/backend/core-2.0",  "backend",  Br2, "Br2'_mono");
-    const Fr2_mono = findReplayOrFail(mono, "origin/shadow/frontend/core-2.0", "frontend", Fr2, "Fr2'_mono");
-    assertTip(mono, "origin/shadow/backend/core-2.0",  Br2_mono, "[release] shadow/backend/core-2.0 tip = Br2'_mono");
-    assertTip(mono, "origin/shadow/frontend/core-2.0", Fr2_mono, "[release] shadow/frontend/core-2.0 tip = Fr2'_mono");
+    const Br2_mono = findReplayOrFail(mono, "origin/b-backend/core-2.0",  "backend",  Br2, "Br2'_mono");
+    const Fr2_mono = findReplayOrFail(mono, "origin/b-frontend/core-2.0", "frontend", Fr2, "Fr2'_mono");
+    assertTip(mono, "origin/b-backend/core-2.0",  Br2_mono, "[release] b-backend/core-2.0 tip = Br2'_mono");
+    assertTip(mono, "origin/b-frontend/core-2.0", Fr2_mono, "[release] b-frontend/core-2.0 tip = Fr2'_mono");
 
     // project shadow tips advance with Bt2'_mono / Ft2'_mono (project absorbed release).
-    const Bt2_mono = findReplayOrFail(mono, "origin/shadow/backend/project",  "backend",  Bt2, "Bt2'_mono");
-    const Ft2_mono = findReplayOrFail(mono, "origin/shadow/frontend/project", "frontend", Ft2, "Ft2'_mono");
-    assertTip(mono, "origin/shadow/backend/project",  Bt2_mono, "[release] shadow/backend/project tip = Bt2'_mono");
-    assertTip(mono, "origin/shadow/frontend/project", Ft2_mono, "[release] shadow/frontend/project tip = Ft2'_mono");
+    const Bt2_mono = findReplayOrFail(mono, "origin/b-backend/project",  "backend",  Bt2, "Bt2'_mono");
+    const Ft2_mono = findReplayOrFail(mono, "origin/b-frontend/project", "frontend", Ft2, "Ft2'_mono");
+    assertTip(mono, "origin/b-backend/project",  Bt2_mono, "[release] b-backend/project tip = Bt2'_mono");
+    assertTip(mono, "origin/b-frontend/project", Ft2_mono, "[release] b-frontend/project tip = Ft2'_mono");
 
     // Release content propagated to project: src/release.txt exists on both leaf project branches.
     assertContent(backend,  "project", "src/release.txt", "2.0\n", "[release] backend project has release v2");
@@ -966,19 +976,19 @@ async function runScenario(): Promise<void> {
     // Btb2's is on shadow/project-b. They never conflate.
     // (Tree content overlaps because mono main absorbed both projects via Mc7a/Mc7b
     // and composeMergeBaseTree splices mono's full state — that's by design.)
-    const Btb2_mono = findReplayOrFail(mono, "origin/shadow/backend/project-b",  "backend",  Btb2, "Btb2'_mono");
-    const Ftb2_mono = findReplayOrFail(mono, "origin/shadow/frontend/project-b", "frontend", Ftb2, "Ftb2'_mono");
-    assertTip(mono, "origin/shadow/backend/project-b",  Btb2_mono, "[release] shadow/backend/project-b tip = Btb2'_mono");
-    assertTip(mono, "origin/shadow/frontend/project-b", Ftb2_mono, "[release] shadow/frontend/project-b tip = Ftb2'_mono");
+    const Btb2_mono = findReplayOrFail(mono, "origin/b-backend/project-b",  "backend",  Btb2, "Btb2'_mono");
+    const Ftb2_mono = findReplayOrFail(mono, "origin/b-frontend/project-b", "frontend", Ftb2, "Ftb2'_mono");
+    assertTip(mono, "origin/b-backend/project-b",  Btb2_mono, "[release] b-backend/project-b tip = Btb2'_mono");
+    assertTip(mono, "origin/b-frontend/project-b", Ftb2_mono, "[release] b-frontend/project-b tip = Ftb2'_mono");
 
     // Cross-branch isolation: Bt2's replay belongs to shadow/project, not shadow/project-b.
-    assertEqual(findReplay(mono, "origin/shadow/backend/project-b",  "backend",  Bt2),  null,
+    assertEqual(findReplay(mono, "origin/b-backend/project-b",  "backend",  Bt2),  null,
       "[release] Bt2 not replayed on shadow/backend/project-b (different branch)");
-    assertEqual(findReplay(mono, "origin/shadow/backend/project",    "backend",  Btb2), null,
+    assertEqual(findReplay(mono, "origin/b-backend/project",    "backend",  Btb2), null,
       "[release] Btb2 not replayed on shadow/backend/project (different branch)");
-    assertEqual(findReplay(mono, "origin/shadow/frontend/project-b", "frontend", Ft2),  null,
+    assertEqual(findReplay(mono, "origin/b-frontend/project-b", "frontend", Ft2),  null,
       "[release] Ft2 not replayed on shadow/frontend/project-b");
-    assertEqual(findReplay(mono, "origin/shadow/frontend/project",   "frontend", Ftb2), null,
+    assertEqual(findReplay(mono, "origin/b-frontend/project",   "frontend", Ftb2), null,
       "[release] Ftb2 not replayed on shadow/frontend/project");
 
     // ── Fan-out dedup: Br2 / Fr2 (the release-integration commits on each leaf)
@@ -987,17 +997,17 @@ async function runScenario(): Promise<void> {
     // replay per leaf commit, referenced from multiple shadow refs — not three
     // separate synthetics. Identical SHA across {core-2.0, project, project-b}
     // proves the dedup.
-    const Br2_via_core   = findReplay(mono, "origin/shadow/backend/core-2.0",  "backend", Br2);
-    const Br2_via_proj   = findReplay(mono, "origin/shadow/backend/project",   "backend", Br2);
-    const Br2_via_projb  = findReplay(mono, "origin/shadow/backend/project-b", "backend", Br2);
+    const Br2_via_core   = findReplay(mono, "origin/b-backend/core-2.0",  "backend", Br2);
+    const Br2_via_proj   = findReplay(mono, "origin/b-backend/project",   "backend", Br2);
+    const Br2_via_projb  = findReplay(mono, "origin/b-backend/project-b", "backend", Br2);
     assertEqual(Br2_via_core, Br2_via_proj,
       "[release fan-out dedup] Br2 replay on shadow/backend/core-2.0 = replay on shadow/backend/project");
     assertEqual(Br2_via_core, Br2_via_projb,
       "[release fan-out dedup] Br2 replay on shadow/backend/core-2.0 = replay on shadow/backend/project-b");
 
-    const Fr2_via_core  = findReplay(mono, "origin/shadow/frontend/core-2.0",  "frontend", Fr2);
-    const Fr2_via_proj  = findReplay(mono, "origin/shadow/frontend/project",   "frontend", Fr2);
-    const Fr2_via_projb = findReplay(mono, "origin/shadow/frontend/project-b", "frontend", Fr2);
+    const Fr2_via_core  = findReplay(mono, "origin/b-frontend/core-2.0",  "frontend", Fr2);
+    const Fr2_via_proj  = findReplay(mono, "origin/b-frontend/project",   "frontend", Fr2);
+    const Fr2_via_projb = findReplay(mono, "origin/b-frontend/project-b", "frontend", Fr2);
     assertEqual(Fr2_via_core, Fr2_via_proj,
       "[release fan-out dedup] Fr2 replay deduped across frontend core-2.0 + project");
     assertEqual(Fr2_via_core, Fr2_via_projb,
@@ -1014,8 +1024,8 @@ async function runScenario(): Promise<void> {
     // in (Bf1 / Ff1), then merges the bug branch into project (Bt3 / Ft3).
     // Final --from b syncs the project absorption back to mono.
     git(`checkout -b project ${Mc0}`, mono.working);
-    const Mt1 = mergeRef(mono, "origin/shadow/backend/project",  "Mt1");
-    const Mt2 = mergeRef(mono, "origin/shadow/frontend/project", "Mt2");
+    const Mt1 = mergeRef(mono, "origin/b-backend/project",  "Mt1");
+    const Mt2 = mergeRef(mono, "origin/b-frontend/project", "Mt2");
     git("push origin project", mono.working);
 
     git("checkout -b bug/project/fix project", mono.working);
@@ -1037,7 +1047,7 @@ async function runScenario(): Promise<void> {
     git("checkout project", backend.working);
     git("checkout -b bug/project/fix", backend.working);
     allow("backend", "bug/project/fix");
-    const Bf1 = mergeRef(backend, "origin/shadow/backend/bug/project/fix", "Bf1");
+    const Bf1 = mergeRef(backend, "origin/a-backend/bug/project/fix", "Bf1");
     git("push origin bug/project/fix", backend.working);
     git("checkout project", backend.working);
     const Bt3 = mergeRef(backend, "bug/project/fix", "Bt3");
@@ -1048,7 +1058,7 @@ async function runScenario(): Promise<void> {
     git("checkout project", frontend.working);
     git("checkout -b bug/project/fix", frontend.working);
     allow("frontend", "bug/project/fix");
-    const Ff1 = mergeRef(frontend, "origin/shadow/frontend/bug/project/fix", "Ff1");
+    const Ff1 = mergeRef(frontend, "origin/a-frontend/bug/project/fix", "Ff1");
     git("push origin bug/project/fix", frontend.working);
     git("checkout project", frontend.working);
     const Ft3 = mergeRef(frontend, "bug/project/fix", "Ft3");
@@ -1070,30 +1080,30 @@ async function runScenario(): Promise<void> {
 
     // Mono's shadow ref tips advance: project moves to Bt3'_mono / Ft3'_mono,
     // bug/project/fix shadow refs exist with the integration merges.
-    const Bt3_mono = findReplayOrFail(mono, "origin/shadow/backend/project",         "backend",  Bt3, "Bt3'_mono");
-    const Ft3_mono = findReplayOrFail(mono, "origin/shadow/frontend/project",        "frontend", Ft3, "Ft3'_mono");
-    const Bf1_mono = findReplayOrFail(mono, "origin/shadow/backend/bug/project/fix", "backend",  Bf1, "Bf1'_mono");
-    const Ff1_mono = findReplayOrFail(mono, "origin/shadow/frontend/bug/project/fix","frontend", Ff1, "Ff1'_mono");
-    assertTip(mono, "origin/shadow/backend/project",          Bt3_mono, "[hotfix] backend project tip = Bt3'_mono");
-    assertTip(mono, "origin/shadow/frontend/project",         Ft3_mono, "[hotfix] frontend project tip = Ft3'_mono");
-    assertTip(mono, "origin/shadow/backend/bug/project/fix",  Bf1_mono, "[hotfix] backend bug tip = Bf1'_mono");
-    assertTip(mono, "origin/shadow/frontend/bug/project/fix", Ff1_mono, "[hotfix] frontend bug tip = Ff1'_mono");
+    const Bt3_mono = findReplayOrFail(mono, "origin/b-backend/project",         "backend",  Bt3, "Bt3'_mono");
+    const Ft3_mono = findReplayOrFail(mono, "origin/b-frontend/project",        "frontend", Ft3, "Ft3'_mono");
+    const Bf1_mono = findReplayOrFail(mono, "origin/b-backend/bug/project/fix", "backend",  Bf1, "Bf1'_mono");
+    const Ff1_mono = findReplayOrFail(mono, "origin/b-frontend/bug/project/fix","frontend", Ff1, "Ff1'_mono");
+    assertTip(mono, "origin/b-backend/project",          Bt3_mono, "[hotfix] backend project tip = Bt3'_mono");
+    assertTip(mono, "origin/b-frontend/project",         Ft3_mono, "[hotfix] frontend project tip = Ft3'_mono");
+    assertTip(mono, "origin/b-backend/bug/project/fix",  Bf1_mono, "[hotfix] backend bug tip = Bf1'_mono");
+    assertTip(mono, "origin/b-frontend/bug/project/fix", Ff1_mono, "[hotfix] frontend bug tip = Ff1'_mono");
 
     // Mf1 is be-only → kept on backend pair, dropped on frontend pair.
-    findReplayOrFail(backend, "origin/shadow/backend/bug/project/fix", "origin", Mf1, "Mf1'_be");
-    assertEqual(findReplay(frontend, "origin/shadow/frontend/bug/project/fix", "origin", Mf1), null,
+    findReplayOrFail(backend, "origin/a-backend/bug/project/fix", "origin", Mf1, "Mf1'_be");
+    assertEqual(findReplay(frontend, "origin/a-frontend/bug/project/fix", "origin", Mf1), null,
       "[hotfix] Mf1 (be-only fix) drops on frontend pair");
 
     void Mt1; void Mt2; void Bf1_mono;
 
     // ── Phase hotfix-roundtrip: chase the no-op frontend bug branch ───────
     // The frontend pair never saw Mf1, but the operator workflow still cycles
-    // the no-op through: mono merges shadow/frontend/bug/project/fix back into
+    // the no-op through: mono merges b-frontend/bug/project/fix back into
     // its own bug branch (Mf2), --from a propagates, frontend operator merges
     // shadow into bug (Ff2), bug into project (Ft4), --from b syncs. Each
     // merge is tree-equivalent to its first parent — content doesn't shift.
     git("checkout bug/project/fix", mono.working);
-    const Mf2 = mergeRef(mono, "origin/shadow/frontend/bug/project/fix", "Mf2");
+    const Mf2 = mergeRef(mono, "origin/b-frontend/bug/project/fix", "Mf2");
     git("push origin bug/project/fix", mono.working);
     assertParents(mono, Mf2, [Mf1, Ff1_mono],
       "[hotfix-roundtrip] Mf2 = merge(Mf1, Ff1'_mono)");
@@ -1106,7 +1116,7 @@ async function runScenario(): Promise<void> {
     // Frontend operator: pulls updated shadow, merges into bug, then bug into project.
     git("fetch origin", frontend.working);
     git("checkout bug/project/fix", frontend.working);
-    const Ff2 = mergeRef(frontend, "origin/shadow/frontend/bug/project/fix", "Ff2");
+    const Ff2 = mergeRef(frontend, "origin/a-frontend/bug/project/fix", "Ff2");
     git("push origin bug/project/fix", frontend.working);
     git("checkout project", frontend.working);
     const Ft4 = mergeRef(frontend, "bug/project/fix", "Ft4");
@@ -1125,8 +1135,8 @@ async function runScenario(): Promise<void> {
       "[hotfix-roundtrip] backend bug/project/fix still present");
     assertRefExists(frontend, "refs/heads/bug/project/fix",
       "[hotfix-roundtrip] frontend bug/project/fix still present");
-    assertRefExists(mono, "refs/remotes/origin/shadow/frontend/bug/project/fix",
-      "[hotfix-roundtrip] mono shadow/frontend/bug/project/fix still present");
+    assertRefExists(mono, "refs/remotes/origin/b-frontend/bug/project/fix",
+      "[hotfix-roundtrip] mono b-frontend/bug/project/fix still present");
 
     // One frontend assertion is enough — the entire no-op chain must NOT have
     // shifted component.txt off "v2\n". (Backend still has its fix from Bt3;
@@ -1173,12 +1183,12 @@ async function runScenario(): Promise<void> {
     git("checkout main", backend.working);
     git("checkout -b feature/conflict-a main", backend.working);
     allow("backend", "feature/conflict-a");
-    const Bca = mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "Bca");
+    const Bca = mergeRef(backend, "origin/a-backend/feature/conflict-a", "Bca");
     git("push origin feature/conflict-a", backend.working);
 
     git("checkout -b feature/conflict-b main", backend.working);
     allow("backend", "feature/conflict-b");
-    const Bcb = mergeRef(backend, "origin/shadow/backend/feature/conflict-b", "Bcb");
+    const Bcb = mergeRef(backend, "origin/a-backend/feature/conflict-b", "Bcb");
     git("push origin feature/conflict-b", backend.working);
 
     // Backend merges conflict-b into conflict-a — conflict on src/conflict.txt, resolved manually.
@@ -1235,7 +1245,7 @@ async function runScenario(): Promise<void> {
     // Backend dev merges the new shadow tip into feature/conflict-a → Brec.
     git("fetch origin", backend.working);
     git("checkout feature/conflict-a", backend.working);
-    const Brec = mergeRef(backend, "origin/shadow/backend/feature/conflict-a", "Brec");
+    const Brec = mergeRef(backend, "origin/a-backend/feature/conflict-a", "Brec");
     git("push origin feature/conflict-a", backend.working);
 
     // --from b succeeds: engine emits a squash replay carrying both Bm + Brec trailers.
@@ -1247,7 +1257,7 @@ async function runScenario(): Promise<void> {
     // Verify the squash (Brec'_mono) on mono's shadow ref encodes both the
     // halted-Bm and the recovery Brec trailers, and carries the operator's resolution.
     git("fetch origin", mono.working);
-    const Brec_mono = git("rev-parse origin/shadow/backend/feature/conflict-a", mono.working);
+    const Brec_mono = git("rev-parse origin/b-backend/feature/conflict-a", mono.working);
     const Brec_monoMsg = execSync(`git log -1 --format=%B ${Brec_mono}`, {
       cwd: mono.working, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
     });
@@ -1260,28 +1270,36 @@ async function runScenario(): Promise<void> {
     // actual merge (Mm is NOT replayed onto the shadow ref — it's directly
     // referenced as the 3rd parent so its tree carries the operator's
     // outer + inner resolutions).
-    const Bc5_mono = findReplayOrFail(mono, "origin/shadow/backend/main", "backend", Bc5, "Bc5'_mono");
-    const Bca_mono = findReplayOrFail(mono, "origin/shadow/backend/feature/conflict-a", "backend", Bca, "Bca'_mono");
-    const Bcb_mono = findReplayOrFail(mono, "origin/shadow/backend/feature/conflict-b", "backend", Bcb, "Bcb'_mono");
+    const Bc5_mono = findReplayOrFail(mono, "origin/b-backend/main", "backend", Bc5, "Bc5'_mono");
+    const Bca_mono = findReplayOrFail(mono, "origin/b-backend/feature/conflict-a", "backend", Bca, "Bca'_mono");
+    const Bcb_mono = findReplayOrFail(mono, "origin/b-backend/feature/conflict-b", "backend", Bcb, "Bcb'_mono");
     assertParents(mono, Bca_mono, [Bc5_mono, Mca], "[halt-recovery] Bca'_mono = merge(Bc5'_mono, Mca)");
     assertParents(mono, Bcb_mono, [Bc5_mono, Mcb], "[halt-recovery] Bcb'_mono = merge(Bc5'_mono, Mcb)");
     assertParents(mono, Brec_mono, [Bca_mono, Bcb_mono, Mm],
       "[halt-recovery] Brec'_mono = octopus(Bca'_mono, Bcb'_mono, Mm) — multi-trailer squash");
 
-    if (!Brec_monoMsg.includes(`Shadow-absorbed-backend-backend: ${Bm}`)) {
-      throw new Error(`[halt-recovery] squash missing absorbed-Bm trailer for ${Bm}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
+    // Multi-trailer squash: a single replay trailer line carries the direct
+    // counterpart (Brec) first, then the squash-absorbed halted ancestors
+    // (Bm, Bn1) as extra space-separated values.
+    const trailerLine = Brec_monoMsg.split("\n").find(l => l.startsWith("b-backend-to-a-backend:"));
+    if (!trailerLine) {
+      throw new Error(`[halt-recovery] squash missing replay trailer line\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
     }
-    if (!Brec_monoMsg.includes(`Shadow-absorbed-backend-backend: ${Bn1}`)) {
-      throw new Error(`[halt-recovery] squash missing absorbed-Bn1 trailer for ${Bn1}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
+    const trailerVals = trailerLine.slice("b-backend-to-a-backend:".length).trim().split(/\s+/);
+    if (trailerVals[0] !== Brec) {
+      throw new Error(`[halt-recovery] squash direct value should be Brec ${Brec}, got ${trailerVals[0]}\nline: ${trailerLine}`);
     }
-    if (!Brec_monoMsg.includes(`Shadow-replayed-backend-backend: ${Brec}`)) {
-      throw new Error(`[halt-recovery] squash missing Brec trailer for ${Brec}\nmsg:\n${Brec_monoMsg.slice(0, 800)}`);
+    if (!trailerVals.includes(Bm)) {
+      throw new Error(`[halt-recovery] squash missing absorbed-Bm ${Bm}\nline: ${trailerLine}`);
     }
-    assertContent(mono, "origin/shadow/backend/feature/conflict-a", "backend/src/conflict.txt", "value a + value b\n",
+    if (!trailerVals.includes(Bn1)) {
+      throw new Error(`[halt-recovery] squash missing absorbed-Bn1 ${Bn1}\nline: ${trailerLine}`);
+    }
+    assertContent(mono, "origin/b-backend/feature/conflict-a", "backend/src/conflict.txt", "value a + value b\n",
       "[halt-recovery] squash carries the agreed inner resolution");
-    assertContent(mono, "origin/shadow/backend/feature/conflict-a", "README.md", "# Monorepo (merged)\n",
+    assertContent(mono, "origin/b-backend/feature/conflict-a", "README.md", "# Monorepo (merged)\n",
       "[halt-recovery] squash carries operator's outer resolution");
-    assertContent(mono, "origin/shadow/backend/feature/conflict-a", "backend/src/post-halt.txt", "post halt\n",
+    assertContent(mono, "origin/b-backend/feature/conflict-a", "backend/src/post-halt.txt", "post halt\n",
       "[halt-recovery] squash preserves Bn1's post-halt content");
 
   } finally {

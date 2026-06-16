@@ -35,14 +35,15 @@ export default function run() {
     const r1 = runPush(env1, "Export app.ts");
     assertEqual(r1.status, 0, "[phase 1: merge-ancestry] push should succeed");
 
-    git(`fetch ${env1.remoteName} shadow/${env1.subdir}/main`, env1.localRepo);
-    const parentLine1 = git(`rev-list --parents -1 ${env1.remoteName}/shadow/${env1.subdir}/main`, env1.localRepo);
+    const pushShadow1 = `a-${env1.subdir}/main`;
+    git(`fetch ${env1.remoteName} ${pushShadow1}`, env1.localRepo);
+    const parentLine1 = git(`rev-list --parents -1 ${env1.remoteName}/${pushShadow1}`, env1.localRepo);
     const parents1 = parentLine1.split(/\s+/).filter(Boolean);
     assertEqual(parents1.length - 1, 1, "[phase 1] forwarded commit has exactly 1 parent");
     const extTip = git(`rev-parse ${env1.remoteName}/main`, env1.localRepo);
     assertEqual(parents1[1], extTip, "[phase 1] parent is the external main tip");
-    const msg1 = git(`log -1 --format=%B ${env1.remoteName}/shadow/${env1.subdir}/main`, env1.localRepo);
-    assertIncludes(msg1, "Shadow-replayed-", "[phase 1] commit has replay trailer");
+    const msg1 = git(`log -1 --format=%B ${env1.remoteName}/${pushShadow1}`, env1.localRepo);
+    assertIncludes(msg1, `a-${env1.subdir}-to-b-${env1.subdir}:`, "[phase 1] commit has replay trailer");
 
     // ── phase 2: local branch + merge → push ────────────────────────────
     git("checkout -b feature/test-branch", env1.localRepo);
@@ -144,7 +145,7 @@ export default function run() {
     const r5 = runPush(env2);
     assertEqual(r5.status, 0, "[phase 5: unmapped-parent] push should succeed");
 
-    const shadowBranch2 = `${env2.branchPrefix}/${sub}/main`;
+    const shadowBranch2 = `a-${sub}/main`;
     git(`fetch ${env2.remoteName} ${shadowBranch2}`, env2.localRepo);
     const parentLine5 = git(`log -1 --format=%P ${env2.remoteName}/${shadowBranch2}`, env2.localRepo);
     const parents5 = parentLine5.split(/\s+/).filter(Boolean);

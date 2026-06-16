@@ -82,8 +82,8 @@ async function main() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "backend",  b: "" }] },
-        { name: "frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "frontend", b: "" }] },
+        { name: "backend",  a: { remote: "origin", url: mono.bare, label: "a-backend"  }, b: { remote: "backend",  url: backend.bare,  label: "b-backend"  }, mappings: [{ a: "backend",  b: "" }] },
+        { name: "frontend", a: { remote: "origin", url: mono.bare, label: "a-frontend" }, b: { remote: "frontend", url: frontend.bare, label: "b-frontend" }, mappings: [{ a: "frontend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -112,7 +112,7 @@ async function main() {
     banner("Mira on mono merges shadow/frontend/main into core-dev");
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git(`merge --no-ff origin/shadow/frontend/main -m "Mira: merge shadow/frontend/main"`, mono.working);
+    git(`merge --no-ff origin/b-frontend/main -m "Mira: merge shadow/frontend/main"`, mono.working);
     git("push origin main", mono.working);
     const mcA = git("rev-parse HEAD", mono.working);
     console.log(`  Mc_A SHA: ${mcA.slice(0,12)}`);
@@ -132,7 +132,7 @@ async function main() {
     console.log(`  TS-1 under backend/: ${mcABackendTree === mcAp1Tree ? "✓" : "✗"}`);
     console.log(`  TS-2 under backend/: ${mcABackendTree === mcAp2Tree ? "✓" : "✗ (expected — sibling-pair 2nd parent has its own non-backend content)"}`);
     const p2Msg = git(`log -1 --format=%B ${mcAp2}`, mono.working);
-    const hasSiblingTrailer = /^Shadow-replayed-frontend/m.test(p2Msg);
+    const hasSiblingTrailer = /^b-frontend-to-a-frontend:/m.test(p2Msg);
     console.log(`  2nd parent has Shadow-replayed-frontend trailer: ${hasSiblingTrailer ? "✓" : "✗"}`);
     if (!hasSiblingTrailer) {
       console.log("  ✘ Setup error: 2nd parent has no frontend trailer; not Case C.");
@@ -152,8 +152,8 @@ async function main() {
     // this pair, and standard-workflow 3-way merge handles the resulting
     // stale-outer naturally.
     git("fetch origin", backend.working);
-    const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
-    const trailerRe = new RegExp(`^Shadow-replayed-[^:]+:\\s*${mcA}\\b`, "m");
+    const shadowLog = git(`log --format=%B refs/heads/a-backend/main`, backend.bare);
+    const trailerRe = new RegExp(`^a-backend-to-b-backend:\\s*${mcA}\\b`, "m");
     if (!trailerRe.test(shadowLog)) {
       console.log(`\n  ✓ PASS — no synthetic for ${mcA.slice(0,12)} on backend.shadow/backend/main.`);
       console.log(`    Case C correctly DROPPED by the same-pair discriminator.`);

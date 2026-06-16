@@ -15,11 +15,11 @@ backend/README.md   ←──── sync ────→  README.md
 other-stuff/...     (not synced)
 ```
 
-Shadow sync replays commits between them, adding or stripping the `backend/` prefix as needed. Each side gets a `shadow/` branch that the other team merges.
+Shadow sync replays commits between them, adding or stripping the `backend/` prefix as needed. Each endpoint has a **label**; commits replayed *from* an endpoint land on a shadow branch named after that label, which the other team merges.
 
 ```
-shadow-sync --from b:  RepoB → shadow/backend/main on RepoA → git merge → RepoA's main
-shadow-sync --from a:  RepoA → shadow/backend/main on RepoB → git merge → RepoB's main
+shadow-sync --from b:  RepoB(bb) → bb/main on RepoA → git merge → RepoA's main
+shadow-sync --from a:  RepoA(mb) → mb/main on RepoB → git merge → RepoB's main
 ```
 
 ### Where does the tool run?
@@ -40,8 +40,8 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
   "pairs": [
     {
       "name": "backend",
-      "a": { "remote": "main-repo",    "url": "https://github.com/org/monorepo.git" },
-      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git"  },
+      "a": { "remote": "main-repo",    "url": "https://github.com/org/monorepo.git", "label": "mb" },
+      "b": { "remote": "backend-repo", "url": "https://github.com/org/backend.git",   "label": "bb" },
       "mappings": [
         { "a": "backend", "b": "" }
       ]
@@ -51,12 +51,13 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 ```
 
 - `a` and `b` are symmetric — direction is chosen at runtime with `--from`
+- each endpoint sets a `label` (e.g. `"mb"`, `"bb"`) — it names that endpoint's shadow refs (`<label>/<branch>`) and replay-trailer keys (`<sourceLabel>-to-<targetLabel>`). Labels must be unique across all pairs and match `[A-Za-z0-9][A-Za-z0-9-]*`
 - `mappings` lists the folder pairs to sync. Each mapping's `a` and `b` are path prefixes on the respective sides (`""` for repo root, `"backend"` for a subdirectory)
 - One pair can carry multiple mappings — e.g. a `backend` mapping for the primary slice plus a `common` mapping for a shared folder that lives at different paths on each side
 - `url` tells the tool how to reach the repo
 - An endpoint may set `"anchorBranch"` (default `"main"`) — the branch whose init commit anchors replayed orphan history on that side. Set it if the repo's mainline is `master`/`trunk`
 
-Optional top-level fields (see `shadow-config.example.json`): `trailers.replayed` (trailer key prefix), `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `shadowBranchPrefix`, `identities`.
+Optional top-level fields (see `shadow-config.example.json`): `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `identities`.
 
 A top-level `"identities"` list maps one person's git identity across remotes. Each entry binds a remote name to that person's `{ name, email }` on it; replaying a commit from remote S to remote T rewrites the author/committer whose email matches the S binding (case-insensitive) to the T binding. Dates, messages, and anyone without a matching entry pass through verbatim. Emails must be unique per remote across entries — the mapping runs in both directions, so a duplicate would make the reverse lookup ambiguous. Only commits replayed after the config lands are affected; existing shadow commits keep their recorded identity.
 
@@ -69,7 +70,7 @@ A top-level `"identities"` list maps one person's git identity across remotes. E
 ]
 ```
 
-A pair may set `"shadowPrefix"` to replace its whole `<prefix>/<name>` shadow namespace — e.g. `"shadowPrefix": "sb"` puts the pair's shadow refs at `sb/main` instead of `shadow/backend/main` (slashes are allowed: `"s/b"` works too). Prefixes must not collide or nest across pairs. To change it on a live deployment, first rename the existing shadow refs on **every** remote that holds them (the target side of each sync direction), run `git fetch --prune --all` in the orchestrator clone, then flip the config — done in that order, the next sync is a no-op and history continues incrementally. Flipping the config without renaming the refs makes the engine treat the deployment as un-synced and re-replay everything.
+Labels are baked into shadow ref names and replay-trailer keys, which are the engine's only persistent state. Renaming a label on a live deployment makes the engine treat the deployment as un-synced and re-replay everything — change labels only as part of a full re-bootstrap, not on a running deployment.
 
 ### `branch-filters.json` (required)
 
@@ -104,10 +105,10 @@ npm run sync -- --from b -r backend
 npm run sync -- --from a -r backend -b feature/auth
 ```
 
-After syncing, merge the shadow branch:
+After syncing, merge the shadow branch (named after the label of the endpoint you synced *from* — `bb` in the example config):
 ```bash
 git fetch origin
-git merge origin/shadow/backend/main
+git merge origin/bb/main
 ```
 
 ### When merge replay halts
@@ -130,12 +131,12 @@ git merge --no-ff project
 git push origin core-dev    # creates Mm
 
 # 3. Run sync the OTHER direction so Mm reaches the source repo's shadow ref:
-npm run sync -- --from a    # Mm replayed onto shadow/<pair>/core-dev on source repo
+npm run sync -- --from a    # Mm replayed onto mb/core-dev on the backend repo
 
 # 4. On the source side, merge that shadow ref into the working branch:
 cd /path/to/backend
 git checkout core-dev
-git merge origin/shadow/backend/core-dev    # produces R_be
+git merge origin/mb/core-dev    # produces R_be
 git push origin core-dev
 
 # 5. Re-run the original direction. The engine sees R_be, fast-forwards through
@@ -144,11 +145,11 @@ git push origin core-dev
 npm run sync -- --from b
 ```
 
-The squash carries its own `Shadow-replayed-<pair>-<source-remote>` trailer plus one `Shadow-absorbed-<pair>-<source-remote>` trailer per absorbed source SHA. On subsequent runs `loadReplayedMappings` reads those trailers and skips the absorbed commits, so the squash is idempotent.
+The squash carries a single `<sourceLabel>-to-<targetLabel>` trailer whose value lists its own source SHA first, then one absorbed source SHA per folded commit. On subsequent runs `loadReplayedMappings` reads that trailer and skips the absorbed commits, so the squash is idempotent.
 
-Absorbed mappings are **lineage-scoped**: the squash stands in for an absorbed commit only on branches that contain the resolving merge (`R_be`). A branch that forked off the halted commit *before* the resolution landed does not inherit the squash — its shadow ref stays at the last faithful commit and the engine halts it with its own recipe: merge the resolved branch's **shadow ref** into the fork (the ref carries the resolution echo, which preserves the fork's own content during the absorbing replay), push, and re-run. Legacy squashes (absorbed SHAs under the replayed key) keep their old globally-valid behavior.
+Absorbed mappings are **lineage-scoped**: the squash stands in for an absorbed commit only on branches that contain the resolving merge (`R_be`). A branch that forked off the halted commit *before* the resolution landed does not inherit the squash — its shadow ref stays at the last faithful commit and the engine halts it with its own recipe: merge the resolved branch's **shadow ref** into the fork (the ref carries the resolution echo, which preserves the fork's own content during the absorbing replay), push, and re-run.
 
-**Hand-built resolution on the shadow ref (always available).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `Shadow-replayed-<pair>-<source-remote>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run.
+**Hand-built resolution on the shadow ref (always available).** When you'd rather build the resolution directly without touching the target's working branch, follow the recipe the engine printed: create a commit on the shadow ref whose tree is your manual resolution, parents are the divergent mapped parents, and message carries `<sourceLabel>-to-<targetLabel>: <Bm-sha>`. Push that to the shadow ref and re-run sync. `loadReplayedMappings` picks up the trailer and skips Bm on the next run.
 
 Both flows are exercised end-to-end by `shadow-tests/test-halt-recovery-variants.ts`.
 
@@ -251,12 +252,12 @@ cp node_modules/shadow-sync/branch-filters.example.json branch-filters.json
 # branch-filters.json with the branch allowlist per remote
 ```
 
-3. Sync and merge. The first run replays each side's full history into the other's `shadow/` branches, anchored at the target's init commit (or the closest round-tripped echo when one exists) — so plain `git merge origin/shadow/<pair>/<branch>` always finds a real merge base. The `Shadow-replayed-<pair>-<remote>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
+3. Sync and merge. The first run replays each side's full history into the other's shadow branches (named `<sourceLabel>/<branch>`), anchored at the target's init commit (or the closest round-tripped echo when one exists) — so plain `git merge origin/<sourceLabel>/<branch>` always finds a real merge base. The `<sourceLabel>-to-<targetLabel>` trailer makes replay idempotent: re-running is a no-op once both sides are in sync.
 
 ```bash
 npm run sync -- -r backend --from a    # push monorepo changes to external
 npm run sync -- -r backend --from b    # pull external changes to monorepo
-git merge origin/shadow/backend/main   # merge the shadow branch
+git merge origin/bb/main               # merge the shadow branch (bb = label synced from)
 ```
 
 The first sync is proportional to source-side history (per-commit replay). For a fresh monorepo joining mature source repos, run it locally once and push the resulting shadow branches; subsequent CI syncs only handle the delta.
@@ -273,7 +274,7 @@ Automated tests covering pull, push, merge, branching, binary files, LFS, symlin
 
 | File | Purpose |
 |------|---------|
-| `shadow-config.example.json` | Example pair definitions, trailers, git config overrides |
+| `shadow-config.example.json` | Example pair definitions, endpoint labels, git config overrides |
 | `branch-filters.example.json` | Example per-remote branch allowlist (required, fail-closed) |
 | `shadow-common.ts` | Config, git helpers, unified replay engine |
 | `shadow-sync.ts` | Single script for both directions (--from a or --from b) |

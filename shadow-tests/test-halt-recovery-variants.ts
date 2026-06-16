@@ -32,7 +32,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { setBranchFiltersForTesting, compileIgnorePattern } from "../shadow-common";
-import { createTestEnv, runCiSync, runPush, TestEnv } from "./harness";
+import { createTestEnv, runCiSync, runPush, trailerKeyOf, TestEnv } from "./harness";
 
 async function runAll(): Promise<void> {
   function git(cmd: string, cwd: string): void {
@@ -57,6 +57,21 @@ async function runAll(): Promise<void> {
     p1: string;
     p2: string;
     bm: string;
+  }
+
+  // The single replay trailer line now carries the direct-replay SHA first,
+  // then any squash-absorbed source SHAs as extra space-separated values.
+  function replayValues(msg: string, key: string): string[] {
+    const m = msg.split("\n").find(l => l.startsWith(`${key}:`));
+    return m ? m.slice(key.length + 1).trim().split(/\s+/).filter(Boolean) : [];
+  }
+  function assertDirectReplay(msg: string, key: string, sha: string, ctx: string): void {
+    const vals = replayValues(msg, key);
+    assert(vals[0] === sha, `${ctx}: expected direct replay ${sha} as first value on ${key}; got ${JSON.stringify(vals)}\n${msg}`);
+  }
+  function assertAbsorbed(msg: string, key: string, sha: string, ctx: string): void {
+    const vals = replayValues(msg, key);
+    assert(vals.slice(1).includes(sha), `${ctx}: expected absorbed ${sha} among ${key} values; got ${JSON.stringify(vals)}\n${msg}`);
   }
 
   /** Drive scenario through the Bm failure; return env and parsed mapped parents. */
@@ -108,13 +123,13 @@ async function runAll(): Promise<void> {
     // BE: Bcm, Bcx, Bpm, Bm
     git("checkout core-dev", env.remoteWorking);
     git("fetch origin", env.remoteWorking);
-    git('merge --no-ff origin/shadow/backend/core-dev -m "Bcm"', env.remoteWorking);
+    git('merge --no-ff origin/a-backend/core-dev -m "Bcm"', env.remoteWorking);
     writeFile(env.remoteWorking, "feature.ts", "be feature added in Bcx\n");
     git("add -A", env.remoteWorking);
     git('commit -m "Bcx"', env.remoteWorking);
     git("push origin core-dev", env.remoteWorking);
     git("checkout project", env.remoteWorking);
-    git('merge --no-ff origin/shadow/backend/project -m "Bpm"', env.remoteWorking);
+    git('merge --no-ff origin/a-backend/project -m "Bpm"', env.remoteWorking);
     git("push origin project", env.remoteWorking);
     git("checkout core-dev", env.remoteWorking);
     try {
@@ -170,7 +185,7 @@ async function runAll(): Promise<void> {
   function roundTripResolution(env: TestEnv): { mm: string; rbe: string } {
     const mm = operatorMergeProject(env);
 
-    // --from a propagates Mm onto backend's shadow/backend/core-dev as Mm'_on_be
+    // --from a propagates Mm onto backend's a-backend/core-dev as Mm'_on_be
     const r = runPush(env);
     if (r.status !== 0) throw new Error(`--from a propagation failed: ${r.stderr}`);
 
@@ -178,7 +193,7 @@ async function runAll(): Promise<void> {
     git("fetch origin --prune", env.remoteWorking);
     git("checkout core-dev", env.remoteWorking);
     try {
-      git('merge --no-ff origin/shadow/backend/core-dev -m "R_be"', env.remoteWorking);
+      git('merge --no-ff origin/a-backend/core-dev -m "R_be"', env.remoteWorking);
     } catch {
       // Inner resolutions are byte-identical between Bm and Mm'_on_be, so the
       // merge tree is clean; this catch only fires on phantom tooling conflicts.
@@ -198,24 +213,23 @@ async function runAll(): Promise<void> {
       assertEqual(r.status, 0, `--from b status after round-trip (stderr=${r.stderr})`);
 
       git("fetch origin --prune", env.localRepo);
-      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assert(sqHash.length === 40, "shadow ref must exist");
 
-      // sq must carry replay trailers for BOTH R_be (its own) and Bm (absorbed)
+      // sq's replay trailer carries R_be (direct) first, then Bm (absorbed).
+      const key = trailerKeyOf(env, "b");
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
-        `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${info.bm}`),
-        `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
+      assertDirectReplay(sqMsg, key, rbe, "sq R_be");
+      assertAbsorbed(sqMsg, key, info.bm, "sq Bm");
 
       // backend/feature.ts (Bcx's content) must be present on the shadow ref tree
-      const feature = gitOut(`show origin/shadow/backend/core-dev:backend/feature.ts`, env.localRepo);
+      const feature = gitOut(`show origin/b-backend/core-dev:backend/feature.ts`, env.localRepo);
       assert(feature.includes("be feature added in Bcx"), `feature.ts missing/wrong on shadow: ${feature}`);
 
       // Catch-up merge: shadow tip's outer matches M.core-dev's outer (FF'd from Mm),
       // so the merge is clean — no second resolution needed.
       git("checkout core-dev", env.localRepo);
-      git("merge --no-ff origin/shadow/backend/core-dev -m \"catch-up\"", env.localRepo);
+      git("merge --no-ff origin/b-backend/core-dev -m \"catch-up\"", env.localRepo);
       const localFeature = fs.readFileSync(path.join(env.localRepo, "backend/feature.ts"), "utf8");
       assert(localFeature.includes("be feature added in Bcx"), `feature.ts missing on M.core-dev`);
     } finally {
@@ -230,12 +244,12 @@ async function runAll(): Promise<void> {
       const r1 = runCiSync(env);
       assertEqual(r1.status, 0, `first post-roundtrip --from b status (stderr=${r1.stderr})`);
       git("fetch origin --prune", env.localRepo);
-      const sq1 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sq1 = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
 
       const r2 = runCiSync(env);
       assertEqual(r2.status, 0, `second --from b status (stderr=${r2.stderr})`);
       git("fetch origin --prune", env.localRepo);
-      const sq2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sq2 = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assertEqual(sq2, sq1, "sq SHA must be stable across re-runs");
       void info;
     } finally {
@@ -249,7 +263,7 @@ async function runAll(): Promise<void> {
       // Skip the round-trip — re-run --from b and verify the halt persists
       // with the same diagnostic and no spurious shadow advances.
       git("fetch origin --prune", env.localRepo);
-      const tipBefore = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const tipBefore = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
 
       const r = runCiSync(env);
       assert(r.status !== 0, "expected --from b to halt again without resolution");
@@ -257,7 +271,7 @@ async function runAll(): Promise<void> {
         `expected halt diagnostic, got:\n${r.stdout}\n${r.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const tipAfter = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const tipAfter = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assertEqual(tipAfter, tipBefore, "shadow tip must not advance while halted");
       void info;
     } finally {
@@ -281,12 +295,13 @@ async function runAll(): Promise<void> {
         git('commit --no-edit', env.localRepo);
       }
       const tree = gitOut("write-tree", env.localRepo);
+      const key = trailerKeyOf(env, "b");
       const X = gitOut(
-        `commit-tree ${tree} -p ${p1} -p ${p2} -m "Manual resolution of ${bm.slice(0, 7)}" -m "Shadow-replayed-backend-team: ${bm}"`,
+        `commit-tree ${tree} -p ${p1} -p ${p2} -m "Manual resolution of ${bm.slice(0, 7)}" -m "${key}: ${bm}"`,
         env.localRepo,
       );
-      git(`update-ref refs/heads/shadow/backend/core-dev ${X}`, env.localRepo);
-      git(`push origin shadow/backend/core-dev`, env.localRepo);
+      git(`update-ref refs/heads/b-backend/core-dev ${X}`, env.localRepo);
+      git(`push origin b-backend/core-dev`, env.localRepo);
       git("checkout core-dev", env.localRepo);
 
       // Re-run without the flag — A should resume normally via loadReplayedMappings
@@ -327,15 +342,14 @@ async function runAll(): Promise<void> {
       assertEqual(r.status, 0, `--from b after multi-commit halt: ${r.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assert(sqHash.length === 40, "shadow ref must exist post-absorption");
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
 
-      // sq must carry absorbed trailers for BOTH halted source SHAs (Bm AND Bm+1).
-      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${info.bm}`),
-        `sq missing absorbed Bm trailer for ${info.bm}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${bmPlus1}`),
-        `sq missing absorbed Bm+1 trailer for ${bmPlus1}\n${sqMsg}`);
+      // sq's replay trailer must carry BOTH halted source SHAs (Bm AND Bm+1) as absorbed values.
+      const key = trailerKeyOf(env, "b");
+      assertAbsorbed(sqMsg, key, info.bm, "multi-halt Bm");
+      assertAbsorbed(sqMsg, key, bmPlus1, "multi-halt Bm+1");
 
       // post-halt.ts (Bm+1's content) must survive in sq's tree. If
       // resolveHaltAwareParents skipped Bm+1's inherited mappedParents, or if
@@ -349,7 +363,7 @@ async function runAll(): Promise<void> {
       const rerun = runCiSync(env);
       assertEqual(rerun.status, 0, `idempotent re-run status: ${rerun.stderr}`);
       git("fetch origin --prune", env.localRepo);
-      const sqHash2 = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sqHash2 = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assertEqual(sqHash2, sqHash, "shadow tip stable across multi-trailer idempotent re-run");
     } finally {
       env.cleanup();
@@ -367,7 +381,7 @@ async function runAll(): Promise<void> {
     const { env, info } = setupAndFailReplay("halt-not-resolved-dropped-child");
     try {
       git("fetch origin --prune", env.localRepo);
-      const tipBefore = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const tipBefore = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
 
       git("checkout core-dev", env.remoteWorking);
       git('commit --allow-empty -m "D (dropped empty commit)"', env.remoteWorking);
@@ -386,14 +400,14 @@ async function runAll(): Promise<void> {
         `C must propagate the halt, not replay-then-FF-block; got:\n${r.stdout}\n${r.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const tipAfter = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const tipAfter = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       assertEqual(tipAfter, tipBefore, "shadow ref must not advance past the halt");
 
       const msg = gitOut(`log -1 --format=%B ${tipAfter}`, env.localRepo);
       assert(!msg.includes(info.bm), `Bm must NOT be absorbed/replayed onto the faithful tip\n${msg}`);
 
       // C's content must not have leaked onto the shadow ref.
-      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/core-dev", env.localRepo);
+      const tree = gitOut("ls-tree -r --name-only origin/b-backend/core-dev", env.localRepo);
       assert(!tree.includes("backend/after.ts"),
         `C's content must not land while the halt is unresolved; tree:\n${tree}`);
     } finally {
@@ -455,7 +469,7 @@ async function runAll(): Promise<void> {
 
     git("checkout core-dev", env.remoteWorking);
     git("fetch origin --prune", env.remoteWorking);
-    git('merge --no-ff origin/shadow/backend/core-dev origin/shadow/backend/project -m "Bm (multi-echo octopus)"', env.remoteWorking);
+    git('merge --no-ff origin/a-backend/core-dev origin/a-backend/project -m "Bm (multi-echo octopus)"', env.remoteWorking);
     const bm = gitOut("rev-parse HEAD", env.remoteWorking);
     git("push origin core-dev", env.remoteWorking);
 
@@ -471,9 +485,10 @@ async function runAll(): Promise<void> {
       // Precondition: Bm is a 3-parent octopus whose parents 2 and 3 carry the echo trailer.
       const bmParents = gitOut(`log -1 --format=%P ${bm}`, env.remoteWorking).split(/\s+/).filter(Boolean);
       assertEqual(bmParents.length, 3, `Bm should be a 3-parent octopus; got ${bmParents.length}`);
+      const pushKey = trailerKeyOf(env, "a");
       for (const p of [bmParents[1], bmParents[2]]) {
         const trailers = gitOut(`log -1 --format=%(trailers:only) ${p}`, env.remoteWorking);
-        assert(trailers.includes("Shadow-replayed-backend-origin:"),
+        assert(trailers.includes(`${pushKey}:`),
           `parent ${p.slice(0, 7)} missing echo trailer:\n${trailers}`);
       }
 
@@ -511,7 +526,7 @@ async function runAll(): Promise<void> {
       git("fetch origin --prune", env.remoteWorking);
       git("checkout core-dev", env.remoteWorking);
       try {
-        git('merge --no-ff origin/shadow/backend/core-dev -m "R_be (catch-up after multi-echo)"', env.remoteWorking);
+        git('merge --no-ff origin/a-backend/core-dev -m "R_be (catch-up after multi-echo)"', env.remoteWorking);
       } catch {
         git("add -A", env.remoteWorking);
         git('commit --no-edit', env.remoteWorking);
@@ -524,14 +539,13 @@ async function runAll(): Promise<void> {
       assertEqual(rB.status, 0, `--from b after multi-echo recovery: ${rB.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const sqHash = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
       const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
 
-      // Squashed shadow commit must carry trailers for BOTH R_be (its own) and Bm (absorbed halt).
-      assert(sqMsg.includes(`Shadow-replayed-backend-team: ${rbe}`),
-        `sq missing own R_be trailer for ${rbe}\n${sqMsg}`);
-      assert(sqMsg.includes(`Shadow-absorbed-backend-team: ${bm}`),
-        `sq missing absorbed Bm trailer for ${bm}\n${sqMsg}`);
+      // Squashed shadow commit's replay trailer: R_be direct, Bm absorbed.
+      const key = trailerKeyOf(env, "b");
+      assertDirectReplay(sqMsg, key, rbe, "multi-echo R_be");
+      assertAbsorbed(sqMsg, key, bm, "multi-echo Bm");
 
       // Tree content: api.ts (from Bc1) + notes.txt (from Mc) + feat.ts (from Mp).
       assertEqual(gitOut(`show ${sqHash}:backend/api.ts`, env.localRepo), "v_be_initial",
@@ -605,14 +619,14 @@ async function runAll(): Promise<void> {
       // BE operator: Bp1m + Bp1x on project-a, Bp2m on project-b.
       git("fetch origin --prune", env.remoteWorking);
       git("checkout project-a", env.remoteWorking);
-      git('merge --no-ff origin/shadow/backend/project-a -m "Bp1m"', env.remoteWorking);
+      git('merge --no-ff origin/a-backend/project-a -m "Bp1m"', env.remoteWorking);
       writeFile(env.remoteWorking, "feat-a-extra.ts", "extra\n");
       git("add -A", env.remoteWorking);
       git('commit -m "Bp1x"', env.remoteWorking);
       git("push origin project-a", env.remoteWorking);
 
       git("checkout project-b", env.remoteWorking);
-      git('merge --no-ff origin/shadow/backend/project-b -m "Bp2m"', env.remoteWorking);
+      git('merge --no-ff origin/a-backend/project-b -m "Bp2m"', env.remoteWorking);
       git("push origin project-b", env.remoteWorking);
 
       // Bm = merge project-b INTO project-a. Conflict on release-notes.txt.
@@ -639,7 +653,7 @@ async function runAll(): Promise<void> {
       // (feat-a-extra.ts from Bp1x), NOT project-b's (feat-b.ts which would
       // be present only if Bp2m' was picked as the partial tip).
       git("fetch origin --prune", env.localRepo);
-      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/project-a", env.localRepo);
+      const tree = gitOut("ls-tree -r --name-only origin/b-backend/project-a", env.localRepo);
       assert(tree.includes("backend/feat-a-extra.ts"),
         `partial tip must be Bp1x' (has feat-a-extra.ts); tree:\n${tree}`);
       assert(!tree.includes("backend/feat-b.ts"),
@@ -677,7 +691,7 @@ async function runAll(): Promise<void> {
     git("fetch origin --prune", env.remoteWorking);
     git("checkout side", env.remoteWorking);
     try {
-      git('merge --no-ff origin/shadow/backend/core-dev -m "Sm"', env.remoteWorking);
+      git('merge --no-ff origin/a-backend/core-dev -m "Sm"', env.remoteWorking);
     } catch {
       git("add -A", env.remoteWorking);
       git('commit --no-edit', env.remoteWorking);
@@ -705,7 +719,7 @@ async function runAll(): Promise<void> {
       const h = runCiSync(env);
       assert(h.status !== 0, "expected halt to persist with side in filter");
       git("fetch origin --prune", env.localRepo);
-      const sideTipBefore = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideTipBefore = gitOut("rev-parse origin/b-backend/side", env.localRepo);
 
       const { mm } = roundTripResolution(env);
 
@@ -718,8 +732,8 @@ async function runAll(): Promise<void> {
       assert(/squash-resolved on another (branch|lineage)/.test(out),
         `expected absorbed-elsewhere diagnostic, got:\n${out}`);
       git("fetch origin --prune", env.localRepo);
-      const sq = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
-      const sideTipAfter = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sq = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
+      const sideTipAfter = gitOut("rev-parse origin/b-backend/side", env.localRepo);
       assertEqual(sideTipAfter, sideTipBefore, "stranded fork's shadow ref must not move");
       assert(sideTipAfter !== sq, "stranded fork's shadow ref must not inherit the squash");
 
@@ -729,12 +743,11 @@ async function runAll(): Promise<void> {
       assertEqual(r2.status, 0, `sync after fork recovery: ${r2.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const sideTip = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/b-backend/side", env.localRepo);
       const sideMsg = gitOut(`log -1 --format=%B ${sideTip}`, env.localRepo);
-      assert(sideMsg.includes(`Shadow-replayed-backend-team: ${sm}`),
-        `side tip missing own Sm trailer\n${sideMsg}`);
-      assert(sideMsg.includes(`Shadow-absorbed-backend-team: ${bs1}`),
-        `side tip missing absorbed Bs1 trailer\n${sideMsg}`);
+      const key = trailerKeyOf(env, "b");
+      assertDirectReplay(sideMsg, key, sm, "side Sm");
+      assertAbsorbed(sideMsg, key, bs1, "side Bs1");
 
       // Parents: [squash (Bs1's anchor), Mm (echo of the merged shadow ref)].
       const parents = gitOut(`log -1 --format=%P ${sideTip}`, env.localRepo).split(/\s+/);
@@ -750,7 +763,7 @@ async function runAll(): Promise<void> {
       const r3 = runCiSync(env);
       assertEqual(r3.status, 0, `idempotent re-run: ${r3.stderr}`);
       git("fetch origin --prune", env.localRepo);
-      assertEqual(gitOut("rev-parse origin/shadow/backend/side", env.localRepo), sideTip,
+      assertEqual(gitOut("rev-parse origin/b-backend/side", env.localRepo), sideTip,
         "side tip stable across re-runs");
     } finally {
       env.cleanup();
@@ -770,7 +783,7 @@ async function runAll(): Promise<void> {
       const r1 = runCiSync(env);
       assertEqual(r1.status, 0, `recovery sync (side not in filter): ${r1.stderr}`);
       git("fetch origin --prune", env.localRepo);
-      const sq = gitOut("rev-parse origin/shadow/backend/core-dev", env.localRepo);
+      const sq = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
 
       // side enters the filter: trailer-derived scoping must halt the fork.
       setBranchFiltersForTesting(new Map([
@@ -786,9 +799,9 @@ async function runAll(): Promise<void> {
       // The fork's shadow ref is created at the last FAITHFUL tip — neither
       // the squash nor a tree containing the fork's unsynced work.
       git("fetch origin --prune", env.localRepo);
-      const sideTip = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/b-backend/side", env.localRepo);
       assert(sideTip !== sq, "stranded fork must not be created at the squash");
-      const tree = gitOut("ls-tree -r --name-only origin/shadow/backend/side", env.localRepo);
+      const tree = gitOut("ls-tree -r --name-only origin/b-backend/side", env.localRepo);
       assert(!tree.includes("backend/side.ts"), `faithful partial tip must predate Bs1; tree:\n${tree}`);
       assert(!tree.includes("backend/post-halt.ts"), `no squash content may leak onto the fork; tree:\n${tree}`);
 
@@ -798,10 +811,9 @@ async function runAll(): Promise<void> {
       assertEqual(r3.status, 0, `sync after fork recovery: ${r3.stderr}`);
 
       git("fetch origin --prune", env.localRepo);
-      const sideTip2 = gitOut("rev-parse origin/shadow/backend/side", env.localRepo);
+      const sideTip2 = gitOut("rev-parse origin/b-backend/side", env.localRepo);
       const sideMsg = gitOut(`log -1 --format=%B ${sideTip2}`, env.localRepo);
-      assert(sideMsg.includes(`Shadow-absorbed-backend-team: ${bs1}`),
-        `side tip missing absorbed Bs1 trailer\n${sideMsg}`);
+      assertAbsorbed(sideMsg, trailerKeyOf(env, "b"), bs1, "late-filter side Bs1");
       const src = innerTree(env.remoteWorking, sm);
       const shadow = innerTree(env.localRepo, sideTip2, "backend/");
       assertEqual(shadow.join("\n"), src.join("\n"), "shadow side tree must equal source side tree");

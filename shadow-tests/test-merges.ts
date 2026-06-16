@@ -12,7 +12,7 @@
  *   E. squash-merges — local + cross-repo squashes
  *      (formerly test-squash-merges.ts)
  *   F. manual-merge-recovery — outer-divergence hard fail + operator-driven
- *      reconciliation via Shadow-replayed-* trailer
+ *      reconciliation via the replay trailer
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -22,7 +22,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile, readLocalFile, readRemoteFile,
   getExternalShadowLogFull,
-  setTestBranchAllowlist,
+  setTestBranchAllowlist, shadowBranchOf, trailerKeyOf,
 } from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes } from "./assert";
 
@@ -78,8 +78,8 @@ function runMergeTopology(): void {
     assertEqual(r1.status, 0, "[topology 1: shared] ci-sync should succeed");
 
     git("fetch origin", env.localRepo);
-    const mainShadow = "origin/shadow/frontend/main";
-    const featShadow = "origin/shadow/frontend/feature/merge-test";
+    const mainShadow = `origin/${shadowBranchOf(env)}`;
+    const featShadow = "origin/b-frontend/feature/merge-test";
 
     assertEqual(git(`show ${mainShadow}:frontend/main.ts`, env.localRepo), "main v2", "[topology 1] main.ts v2 on main shadow");
     assertEqual(git(`show ${mainShadow}:frontend/feat.ts`, env.localRepo), "feat v2", "[topology 1] feat.ts on main shadow (merged)");
@@ -123,8 +123,8 @@ function runMergeTopology(): void {
     assertEqual(readShadowFile(env, "evil-feat.ts"), "ef\n", "[topology 2] evil-feat.ts on main shadow");
     assertEqual(readShadowFile(env, "evil2.ts"), "evil2 EVIL\n", "[topology 2] evil edit preserved on shadow");
 
-    git("fetch origin shadow/frontend/main", env.localRepo);
-    const evilParents = git("log -1 --format=%P origin/shadow/frontend/main", env.localRepo)
+    git(`fetch origin ${shadowBranchOf(env)}`, env.localRepo);
+    const evilParents = git(`log -1 --format=%P origin/${shadowBranchOf(env)}`, env.localRepo)
       .split(/\s+/).filter(Boolean).length;
     assertEqual(evilParents, 2, "[topology 2] evil merge tip is 2-parent");
 
@@ -146,8 +146,8 @@ function runMergeTopology(): void {
     assertEqual(readShadowFile(env, "oct-f1.ts"), "oct-f1\n", "[topology 3] oct-f1.ts on shadow");
     assertEqual(readShadowFile(env, "oct-f2.ts"), "oct-f2\n", "[topology 3] oct-f2.ts on shadow");
     assertEqual(readShadowFile(env, "oct-f3.ts"), "oct-f3\n", "[topology 3] oct-f3.ts on shadow");
-    git("fetch origin shadow/frontend/main", env.localRepo);
-    const octParents = git("log -1 --format=%P origin/shadow/frontend/main", env.localRepo)
+    git(`fetch origin ${shadowBranchOf(env)}`, env.localRepo);
+    const octParents = git(`log -1 --format=%P origin/${shadowBranchOf(env)}`, env.localRepo)
       .split(/\s+/).filter(Boolean).length;
     assertEqual(octParents, 4, "[topology 3] shadow main tip is 4-parent octopus merge");
   } finally {
@@ -159,7 +159,8 @@ function runMergeTopology(): void {
 function runEchoMapping(): void {
   const env = createTestEnv("pull-echo-mapping");
   try {
-    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
+    const pushShadow = shadowBranchOf(env, undefined, "a");  // ref on the external (team) remote
+    const pullShadow = shadowBranchOf(env);                  // ref on origin
 
     // Phase 1: no-ff merge with B-side commit before it
     commitOnRemote(env, { "base.txt": "base\n" }, "Add base.txt");
@@ -177,8 +178,8 @@ function runEchoMapping(): void {
     git("add b-pre.ts", env.remoteWorking);
     git('commit -m "a: B commit before merge"', env.remoteWorking);
 
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
-    git(`merge origin/${shadowBranch} --no-ff -m "merge shadow into B main"`, env.remoteWorking);
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge origin/${pushShadow} --no-ff -m "merge shadow into B main"`, env.remoteWorking);
 
     fs.writeFileSync(path.join(env.remoteWorking, "b-post.ts"), "B after merge\n");
     git("add b-post.ts", env.remoteWorking);
@@ -191,8 +192,8 @@ function runEchoMapping(): void {
     const r3 = runCiSync(env);
     assertEqual(r3.status, 0, "[echo-map 1] pull B→A should succeed");
 
-    git(`fetch origin ${shadowBranch}`, env.localRepo);
-    const shadowTip1 = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
+    git(`fetch origin ${pullShadow}`, env.localRepo);
+    const shadowTip1 = git(`rev-parse origin/${pullShadow}`, env.localRepo);
     const ancestors1 = git(`rev-list ${shadowTip1}`, env.localRepo).split("\n");
     assertIncludes(ancestors1.join("\n"), hashB,
       "[echo-map 1] original `b` hash must appear in shadow branch ancestry");
@@ -208,15 +209,15 @@ function runEchoMapping(): void {
     const r4 = runPush(env);
     assertEqual(r4.status, 0, "[echo-map 2] push A→B should succeed");
 
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
-    git(`merge --ff-only origin/${shadowBranch}`, env.remoteWorking);
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge --ff-only origin/${pushShadow}`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
     const r5 = runCiSync(env);
     assertEqual(r5.status, 0, "[echo-map 2] pull B→A should succeed");
 
-    git(`fetch origin ${shadowBranch}`, env.localRepo);
-    const shadowTip2 = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
+    git(`fetch origin ${pullShadow}`, env.localRepo);
+    const shadowTip2 = git(`rev-parse origin/${pullShadow}`, env.localRepo);
     assertEqual(shadowTip2, hashC,
       "[echo-map 2] shadow branch tip should be A's original `c` (echo mapped to original)");
   } finally {
@@ -242,8 +243,9 @@ function runEchoIntermediateOuter(): void {
     const r1 = runPush(env);
     assertEqual(r1.status, 0, "[m1] push should succeed");
 
-    git(`fetch origin shadow/${env.subdir}/main`, env.remoteWorking);
-    git(`merge --no-ff origin/shadow/${env.subdir}/main -m "B: merge shadow into main"`, env.remoteWorking);
+    const pushShadow = shadowBranchOf(env, undefined, "a");
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge --no-ff origin/${pushShadow} -m "B: merge shadow into main"`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
     fs.writeFileSync(path.join(env.remoteWorking, "after-merge.ts"), "B's work after merge\n");
@@ -255,7 +257,7 @@ function runEchoIntermediateOuter(): void {
     assertEqual(r2.status, 0, "[m1] pull should succeed");
 
     git("fetch origin", env.localRepo);
-    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
+    const shadowBranch = shadowBranchOf(env);
     const tipSha = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
 
     const mergesOutput = git(`log --merges --format=%H origin/${shadowBranch}`, env.localRepo);
@@ -333,8 +335,9 @@ function runEchoRoundTripShadowignore(): void {
 
     // Team merges the shadow back — this merge is the round-trip echo commit,
     // and its source tree still carries keep.secret at the team root.
-    git(`fetch origin shadow/${env.subdir}/main`, env.remoteWorking);
-    git(`merge --no-ff origin/shadow/${env.subdir}/main -m "B: merge shadow into main"`, env.remoteWorking);
+    const pushShadow = shadowBranchOf(env, undefined, "a");
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge --no-ff origin/${pushShadow} -m "B: merge shadow into main"`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
     assertEqual(runCiSync(env).status, 0, "[roundtrip-ignore] round-trip pull succeeds");
@@ -388,14 +391,14 @@ function runPushMergeSkippedParents(): void {
     const rPush = runPush(env);
     assertEqual(rPush.status, 0, "[skipped-parents push] should succeed");
 
-    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
+    const shadowBranch = shadowBranchOf(env, undefined, "a");
     git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
     const shadowTip = git(`rev-parse ${env.remoteName}/${shadowBranch}`, env.localRepo);
     const shadowTipParents = git(`rev-list --parents -1 ${shadowTip}`, env.localRepo).split(/\s+/).slice(1);
 
     assertEqual(shadowTipParents.length, 2, `[skipped-parents shadow] M6' has 2 parents (got ${shadowTipParents.length})`);
 
-    const trailerKey = `Shadow-replayed-${env.subdir}-origin`;
+    const trailerKey = trailerKeyOf(env, "a");
     const shadowLogFull = getExternalShadowLogFull(env, 50);
     const mapping = new Map<string, string>();
     {
@@ -461,8 +464,7 @@ function runSquashLocalBeforePush(): void {
     assertEqual(readExternalShadowFile(env, "feat-a-1.ts"), "step 1 v2\n", "[squash A] squashed file 1 on shadow");
     assertEqual(readExternalShadowFile(env, "feat-a-2.ts"), "step 2\n",    "[squash A] squashed file 2 on shadow");
 
-    const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
+    const shadowBranch = shadowBranchOf(env, undefined, "a");
     git(`fetch origin ${shadowBranch}`, env.remoteWorking);
     git(`merge --no-ff origin/${shadowBranch} -m "Bea: merge shadow"`, env.remoteWorking);
     git("push origin main", env.remoteWorking);
@@ -532,14 +534,13 @@ function runSquashCrossRepoBroken(): void {
     commitOnLocal(env, { "shared2.ts": "more mira\n" }, "Mira: shared2");
     const rPush = runPush(env);
     assertEqual(rPush.status, 0, "[squash C] push should succeed");
-    const miraShadowBefore = git(`rev-parse team/${env.branchPrefix}/${env.subdir}/main`, env.localRepo);
+    const pushShadow = shadowBranchOf(env, undefined, "a");
+    const miraShadowBefore = git(`rev-parse team/${pushShadow}`, env.localRepo);
 
     commitOnRemote(env, { "bea-native.txt": "bea native\n" }, "Bea: native");
 
-    const subdir = env.subdir;
-    const shadowBranch = `${env.branchPrefix}/${subdir}/main`;
-    git(`fetch origin ${shadowBranch}`, env.remoteWorking);
-    git(`merge --squash origin/${shadowBranch}`, env.remoteWorking);
+    git(`fetch origin ${pushShadow}`, env.remoteWorking);
+    git(`merge --squash origin/${pushShadow}`, env.remoteWorking);
     git('commit -m "Bea: squash shadow into main (cross-repo)"', env.remoteWorking);
     git("push origin main", env.remoteWorking);
 
@@ -548,8 +549,9 @@ function runSquashCrossRepoBroken(): void {
     assertEqual(r.stdout.includes("Found 0 previously replayed commit(s)"), true,
       "[squash C] engine fails to recognise the prior replay chain");
 
-    git(`fetch origin ${shadowBranch}`, env.localRepo);
-    const originShadowTip = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
+    const pullShadow = shadowBranchOf(env);
+    git(`fetch origin ${pullShadow}`, env.localRepo);
+    const originShadowTip = git(`rev-parse origin/${pullShadow}`, env.localRepo);
     let isAncestor = false;
     try {
       execSync(`git merge-base --is-ancestor ${miraShadowBefore} ${originShadowTip}`,
@@ -579,11 +581,11 @@ function runSquashFeatureAbsorbsShadow(): void {
     const r1 = runCiSync(env);
     assertEqual(r1.status, 0, "[squash D] mid-feature ci-sync should succeed");
 
-    const shadowBranch = `${env.branchPrefix}/${env.subdir}/main`;
-    git(`fetch origin ${shadowBranch}`, env.localRepo);
-    const shadowTipBefore = git(`rev-parse origin/${shadowBranch}`, env.localRepo);
+    const pullShadow = shadowBranchOf(env);
+    git(`fetch origin ${pullShadow}`, env.localRepo);
+    const shadowTipBefore = git(`rev-parse origin/${pullShadow}`, env.localRepo);
 
-    git(`merge --no-ff origin/${shadowBranch} -m "Mira: pull shadow into feature"`, env.localRepo);
+    git(`merge --no-ff origin/${pullShadow} -m "Mira: pull shadow into feature"`, env.localRepo);
 
     git("checkout main", env.localRepo);
     git("merge --squash feature-d", env.localRepo);
@@ -593,8 +595,9 @@ function runSquashFeatureAbsorbsShadow(): void {
     const r = runPush(env);
     assertEqual(r.status, 0, "[squash D] push exits 0 — engine doesn't detect the lost link");
 
-    git(`fetch ${env.remoteName} ${shadowBranch}`, env.localRepo);
-    const teamShadowAfter = git(`rev-parse ${env.remoteName}/${shadowBranch}`, env.localRepo);
+    const pushShadow = shadowBranchOf(env, undefined, "a");
+    git(`fetch ${env.remoteName} ${pushShadow}`, env.localRepo);
+    const teamShadowAfter = git(`rev-parse ${env.remoteName}/${pushShadow}`, env.localRepo);
 
     let isAncestor = false;
     try {
@@ -638,13 +641,15 @@ function runManualMergeRecovery(): void {
     assertEqual(runCiSync(env).status, 0, "[recovery] initial sync");
 
     // Rewrite shadow branch-a/branch-b tips to add a differing outer file,
-    // preserving each commit's frontend/ subtree and Shadow-replayed-team
+    // preserving each commit's frontend/ subtree and replay
     // trailer. This simulates outer state arriving via a sibling pair's
     // splice — the case where composeMergeBaseTree has nothing to fall back
     // to.
+    const shadowPrefix = `b-${env.subdir}`;       // pull refs land on origin under this label
+    const recoveryTrailer = trailerKeyOf(env, "b");
     git("fetch origin", local);
-    const shaA = git("rev-parse origin/shadow/frontend/branch-a", local);
-    const shaB = git("rev-parse origin/shadow/frontend/branch-b", local);
+    const shaA = git(`rev-parse origin/${shadowPrefix}/branch-a`, local);
+    const shaB = git(`rev-parse origin/${shadowPrefix}/branch-b`, local);
 
     function injectOuter(shadowSha: string, body: string): string {
       const blob = git("hash-object -w --stdin", local, { input: body });
@@ -667,8 +672,8 @@ function runManualMergeRecovery(): void {
 
     const newA = injectOuter(shaA, "from-A\n");
     const newB = injectOuter(shaB, "from-B\n");
-    git(`push origin ${newA}:refs/heads/shadow/frontend/branch-a --force`, local);
-    git(`push origin ${newB}:refs/heads/shadow/frontend/branch-b --force`, local);
+    git(`push origin ${newA}:refs/heads/${shadowPrefix}/branch-a --force`, local);
+    git(`push origin ${newB}:refs/heads/${shadowPrefix}/branch-b --force`, local);
 
     // Source-side octopus merge of branch-a + branch-b into main.
     git("checkout main", team);
@@ -683,12 +688,12 @@ function runManualMergeRecovery(): void {
     assertIncludes(r2.stderr, srcMerge, "[recovery] error includes full source merge SHA");
     assertIncludes(r2.stderr, newA, "[recovery] error includes mapped parent A");
     assertIncludes(r2.stderr, newB, "[recovery] error includes mapped parent B");
-    assertIncludes(r2.stderr, `Shadow-replayed-${env.subdir}-${env.remoteName}: ${srcMerge}`, "[recovery] error includes required trailer");
+    assertIncludes(r2.stderr, `${recoveryTrailer}: ${srcMerge}`, "[recovery] error includes required trailer");
 
     // ── Manual reconciliation (operator follows the recipe in the error) ──
     // Build a resolved tree: newA's tree (has frontend/base.ts, feat-a.ts,
     // outer.txt) + newB's feat-b.ts + an operator-chosen outer.txt.
-    const baseShadow = git("rev-parse origin/shadow/frontend/main", local);
+    const baseShadow = git(`rev-parse origin/${shadowPrefix}/main`, local);
     const idx = path.join(env.tmpDir, "idx-resolve");
     const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
     git(`read-tree "${newA}^{tree}"`, local, { env: idxEnv });
@@ -700,16 +705,16 @@ function runManualMergeRecovery(): void {
     fs.rmSync(idx, { force: true });
 
     const msgFile = path.join(env.tmpDir, "resolve-msg");
-    fs.writeFileSync(msgFile, `Manual resolution of ${srcMerge.slice(0, 7)}\n\nShadow-replayed-${env.subdir}-${env.remoteName}: ${srcMerge}\n`);
+    fs.writeFileSync(msgFile, `Manual resolution of ${srcMerge.slice(0, 7)}\n\n${recoveryTrailer}: ${srcMerge}\n`);
     const resolveCommit = git(`commit-tree ${resolvedTree} -p ${baseShadow} -p ${newA} -p ${newB} -F "${msgFile}"`, local);
     fs.rmSync(msgFile, { force: true });
-    git(`push origin ${resolveCommit}:refs/heads/shadow/frontend/main --force`, local);
+    git(`push origin ${resolveCommit}:refs/heads/${shadowPrefix}/main --force`, local);
 
     // Next sync sees the trailer and treats the source merge as already replayed.
     assertEqual(runCiSync(env).status, 0, "[recovery] sync succeeds after manual resolution");
     git("fetch origin", local);
     assertEqual(
-      git("rev-parse origin/shadow/frontend/main", local),
+      git(`rev-parse origin/${shadowPrefix}/main`, local),
       resolveCommit,
       "[recovery] shadow main tip stays at the manual resolution",
     );

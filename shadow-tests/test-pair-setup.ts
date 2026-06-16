@@ -16,7 +16,7 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile, readLocalFile,
   getShadowLogFull, getExternalShadowLogFull,
-  setTestBranchAllowlist,
+  setTestBranchAllowlist, trailerKeyOf, shadowBranchOf,
 } from "./harness";
 import { assertEqual, assertIncludes, assertNotIncludes, assertExitCode } from "./assert";
 
@@ -57,7 +57,7 @@ function runMultiRepo(): void {
     assertEqual(r1.status, 0, "[multi-repo phase 1] ci-sync should succeed");
     assertEqual(readShadowFile(env1, "app.tsx"), "export default () => <div/>;\n", "[multi-repo 1] frontend file on frontend shadow");
     assertEqual(readShadowFile(env1, "server.ts", backend), "app.listen(3000);\n", "[multi-repo 1] backend file on backend shadow");
-    assertIncludes(getShadowLogFull(env1), "Shadow-replayed-", "[multi-repo 1] replay trailers present");
+    assertIncludes(getShadowLogFull(env1), `${trailerKeyOf(env1, "b")}:`, "[multi-repo 1] replay trailers present");
     assertEqual(readShadowFile(env1, "server.ts"), null, "[multi-repo 1] backend file NOT on frontend shadow");
     assertEqual(readShadowFile(env1, "app.tsx", backend), null, "[multi-repo 1] frontend file NOT on backend shadow");
 
@@ -100,8 +100,8 @@ function runMultiRepo(): void {
     assertEqual(r4a.status, 0, "[multi-repo 4] sync from b should succeed");
 
     const pullLog = getShadowLogFull(env2);
-    assertIncludes(pullLog, `Shadow-replayed-${env2.subdir}-${env2.remoteName}:`, "[multi-repo 4] pull has b's remote trailer");
-    assertNotIncludes(pullLog, `Shadow-replayed-${env2.subdir}-origin:`, "[multi-repo 4] pull must NOT have a's trailer (would cascade)");
+    assertIncludes(pullLog, `${trailerKeyOf(env2, "b")}:`, "[multi-repo 4] pull has b's remote trailer");
+    assertNotIncludes(pullLog, `${trailerKeyOf(env2, "a")}:`, "[multi-repo 4] pull must NOT have a's trailer (would cascade)");
 
     mergeShadow(env2);
     commitOnLocal(env2, { "local.ts": "from a\n" }, "Add local from A");
@@ -109,8 +109,8 @@ function runMultiRepo(): void {
     assertEqual(r4b.status, 0, "[multi-repo 4] sync from a should succeed");
 
     const pushLog = getExternalShadowLogFull(env2);
-    assertIncludes(pushLog, `Shadow-replayed-${env2.subdir}-origin:`, "[multi-repo 4] push has a's remote trailer");
-    assertNotIncludes(pushLog, `Shadow-replayed-${env2.subdir}-${env2.remoteName}:`, "[multi-repo 4] push must NOT have b's trailer (would cascade)");
+    assertIncludes(pushLog, `${trailerKeyOf(env2, "a")}:`, "[multi-repo 4] push has a's remote trailer");
+    assertNotIncludes(pushLog, `${trailerKeyOf(env2, "b")}:`, "[multi-repo 4] push must NOT have b's trailer (would cascade)");
   } finally {
     env2.cleanup();
   }
@@ -136,7 +136,7 @@ function runMultiPairRootFiles(): void {
     assertEqual(rPushFrontend.status, 0, "[root-files] push frontend pair should succeed");
 
     // backend-repo: merge shadow, confirm isolation, add its own edit
-    const backendShadow = `${env.branchPrefix}/${backend.subdir}/main`;
+    const backendShadow = shadowBranchOf(env, backend, "a");
     git(`fetch origin ${backendShadow}`, backend.remoteWorking);
     git(`merge origin/${backendShadow} --no-ff -m "B: merge shadow"`, backend.remoteWorking);
 
@@ -158,7 +158,7 @@ function runMultiPairRootFiles(): void {
     git("push origin main", backend.remoteWorking);
 
     // frontend-repo: merge shadow, confirm isolation, add its own edit
-    const frontendShadow = `${env.branchPrefix}/${env.subdir}/main`;
+    const frontendShadow = shadowBranchOf(env, undefined, "a");
     git(`fetch origin ${frontendShadow}`, env.remoteWorking);
     git(`merge origin/${frontendShadow} --no-ff -m "C: merge shadow"`, env.remoteWorking);
 
@@ -232,9 +232,10 @@ function runPullConflict(): void {
 
     commitOnLocal(env, { "shared.ts": "line 1\nlocal change\nline 3\n" }, "Local edit");
 
-    git(`fetch origin shadow/${env.subdir}/main`, env.localRepo);
+    const conflictShadow = shadowBranchOf(env);
+    git(`fetch origin ${conflictShadow}`, env.localRepo);
     const mergeResult = gitSafe(
-      ["merge", "--no-ff", `origin/shadow/${env.subdir}/main`],
+      ["merge", "--no-ff", `origin/${conflictShadow}`],
       env.localRepo,
     );
     assertEqual(mergeResult.status !== 0, true, "[conflict] merge should fail with conflict");

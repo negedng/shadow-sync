@@ -24,8 +24,8 @@ function git(cmd: string, cwd: string): string {
 }
 
 function lsShadowFeat(localRepo: string): string {
-  git("fetch origin shadow/frontend/feat", localRepo);
-  return git("ls-tree -r --name-only origin/shadow/frontend/feat", localRepo);
+  git("fetch origin b-frontend/feat", localRepo);
+  return git("ls-tree -r --name-only origin/b-frontend/feat", localRepo);
 }
 
 // ── A. tip-only seed: fork below a tip-only mapped frontier ─────────────────
@@ -44,9 +44,9 @@ function runTipOnlySeed(): void {
     const monoTree = git('rev-parse "origin/main^{tree}"', env.localRepo);
     const monoTip = git("rev-parse origin/main", env.localRepo);
     const msgFile = `${env.tmpDir}/boot-msg.txt`;
-    fs.writeFileSync(msgFile, `tip-only bootstrap\n\nShadow-replayed-frontend-team: ${s2}\n`);
+    fs.writeFileSync(msgFile, `tip-only bootstrap\n\nb-frontend-to-a-frontend: ${s2}\n`);
     const boot = git(`commit-tree ${monoTree} -p ${monoTip} -F "${msgFile}"`, env.localRepo);
-    git(`push origin ${boot}:refs/heads/shadow/frontend/main`, env.localRepo);
+    git(`push origin ${boot}:refs/heads/b-frontend/main`, env.localRepo);
 
     // feat forks BELOW the mapped frontier (at S1) and adds S3.
     git("checkout -b feat main~1", env.remoteWorking);
@@ -66,7 +66,7 @@ function runTipOnlySeed(): void {
     assertNotIncludes(files, "frontend/b.ts", "[tip-only] S2's content absent (not an ancestor of S3)");
 
     // The graph anchor is targetInit — the inherent cost of the missing mapping.
-    const parents = git("log -1 --format=%P origin/shadow/frontend/feat", env.localRepo);
+    const parents = git("log -1 --format=%P origin/b-frontend/feat", env.localRepo);
     const targetInit = git("log --max-parents=0 --format=%H origin/main", env.localRepo);
     assertEqual(parents, targetInit, "[tip-only] replay anchored at targetInit");
   } finally {

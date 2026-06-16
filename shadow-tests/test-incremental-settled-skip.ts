@@ -54,7 +54,7 @@ function run(): void {
     // is root-sourced (anyRootSource true) and the candidate filter is a no-op.
     applyTestOverrides({
       repoRoot: mono.working,
-      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "be", b: "" }] }],
+      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare, label: "a-be" }, b: { remote: "backend", url: backend.bare, label: "b-be" }, mappings: [{ a: "be", b: "" }] }],
       shadowBranchPrefix: "shadow",
     });
     setBranchFiltersForTesting(new Map<string, RegExp[]>([
@@ -88,10 +88,10 @@ function run(): void {
     const r1 = runSync({ from: "b" });
     assertEqual(r1.exitCode, 0, `sync 1 --from b failed: ${r1.stderr.slice(0, 300)}`);
     git("fetch origin", mono.working);
-    const tip1 = git("rev-parse origin/shadow/be/main", mono.working);
+    const tip1 = git("rev-parse origin/b-be/main", mono.working);
 
     // Synced content reached the shadow (root -> be/).
-    const f3 = execSync("git show origin/shadow/be/main:be/f3.ts", { cwd: mono.working, encoding: "utf8" }).replace(/\r\n/g, "\n");
+    const f3 = execSync("git show origin/b-be/main:be/f3.ts", { cwd: mono.working, encoding: "utf8" }).replace(/\r\n/g, "\n");
     assertEqual(f3, "v3\n", "c3 content must reach the shadow on sync 1");
 
     // ── Sync 2: no source change. The dropped commits are now settled (reachable
@@ -99,7 +99,7 @@ function run(): void {
     const r2 = runSync({ from: "b" });
     assertEqual(r2.exitCode, 0, `sync 2 --from b failed: ${r2.stderr.slice(0, 300)}`);
     git("fetch origin", mono.working);
-    const tip2 = git("rev-parse origin/shadow/be/main", mono.working);
+    const tip2 = git("rev-parse origin/b-be/main", mono.working);
 
     // Behavior-preserving: nothing new replayed, shadow tip unchanged.
     assertEqual(tip2, tip1, "sync 2 must not advance the shadow tip (no new replays)");

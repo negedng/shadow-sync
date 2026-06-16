@@ -119,10 +119,10 @@ function runPullPaths(env: ReturnType<typeof createTestEnv>): void {
     const r5 = runCiSync(env);
     assertEqual(r5.status, 0, "[paths 5: unicode] should succeed");
     git("fetch origin", env.localRepo);
-    const uniContent = git(`show "origin/shadow/${env.subdir}/${uniBranch}:${env.subdir}/${uniFile}"`, env.localRepo);
+    const uniContent = git(`show "origin/b-${env.subdir}/${uniBranch}:${env.subdir}/${uniFile}"`, env.localRepo);
     assertEqual(uniContent, "こんにちは // résumé", "[paths 5] unicode file content on shadow");
     const refs = git("branch -r", env.localRepo);
-    assertEqual(refs.includes(`origin/shadow/${env.subdir}/feature/日本語`), true,
+    assertEqual(refs.includes(`origin/b-${env.subdir}/feature/日本語`), true,
       "[paths 5] unicode shadow branch exists");
 
     // phase 5b: Hungarian (Latin-extended + spaces + parens)
@@ -137,14 +137,14 @@ function runPullPaths(env: ReturnType<typeof createTestEnv>): void {
     const r5b = runCiSync(env);
     assertEqual(r5b.status, 0, "[paths 5b: hu-names] should succeed");
     git("fetch origin", env.localRepo);
-    const huShadowPath = `origin/shadow/${env.subdir}/main:${env.subdir}/${huFile}`;
+    const huShadowPath = `origin/b-${env.subdir}/main:${env.subdir}/${huFile}`;
     const huContent = spawnSync("git", ["show", huShadowPath], {
       cwd: env.localRepo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
     }).stdout.replace(/\r\n/g, "\n");
     assertEqual(huContent, "Tartalom árvíztűrő tükörfúrógép.\n", "[paths 5b] hu file content on shadow");
 
     const log = getShadowLogFull(env);
-    const trailerCount = (log.match(/Shadow-replayed-[^:]+:/g) ?? []).length;
+    const trailerCount = (log.match(/^b-frontend-to-a-frontend:/gm) ?? []).length;
     if (trailerCount < 5) throw new Error(`expected >=5 replay trailers, got ${trailerCount}`);
 
     // phase 6: case-conflict (Win/mac only — terminal)
@@ -203,7 +203,7 @@ function runWarnings(): void {
     assertEqual(r2a.status, 0, "[warnings 2: stale] sync of feature branch should succeed");
     git("fetch origin", env.localRepo);
     assertEqual(
-      git("branch -r", env.localRepo).includes(`origin/${env.branchPrefix}/${env.subdir}/feature/temp`),
+      git("branch -r", env.localRepo).includes(`origin/b-${env.subdir}/feature/temp`),
       true, "[warnings 2] feature shadow created",
     );
 
@@ -234,10 +234,10 @@ function runBranchesDefault(env1: ReturnType<typeof createTestEnv>): void {
     assertEqual(r1.status, 0, "[branches 1: feature] should succeed");
     git("fetch origin", env1.localRepo);
     assertEqual(
-      git("branch -r", env1.localRepo).includes("origin/shadow/frontend/feature/cool-thing"),
+      git("branch -r", env1.localRepo).includes("origin/b-frontend/feature/cool-thing"),
       true, "[branches 1] feature shadow branch exists",
     );
-    const cool = git("show \"origin/shadow/frontend/feature/cool-thing:frontend/cool.ts\"", env1.localRepo);
+    const cool = git("show \"origin/b-frontend/feature/cool-thing:frontend/cool.ts\"", env1.localRepo);
     assertEqual(cool, "export const cool = true;", "[branches 1] cool.ts on feature shadow");
 
     // phase 2: feature-range
@@ -258,8 +258,8 @@ function runBranchesDefault(env1: ReturnType<typeof createTestEnv>): void {
     assertEqual(r2.status, 0, "[branches 2: range] should succeed");
     assertIncludes(r2.stdout, "Replayed", "[branches 2] should replay");
     git("fetch origin", env1.localRepo);
-    const f1 = git("show \"origin/shadow/frontend/feature/range-test:frontend/feat1.ts\"", env1.localRepo);
-    const f2 = git("show \"origin/shadow/frontend/feature/range-test:frontend/feat2.ts\"", env1.localRepo);
+    const f1 = git("show \"origin/b-frontend/feature/range-test:frontend/feat1.ts\"", env1.localRepo);
+    const f2 = git("show \"origin/b-frontend/feature/range-test:frontend/feat2.ts\"", env1.localRepo);
     assertEqual(f1, "feat1", "[branches 2] feat1 on feature shadow");
     assertEqual(f2, "feat2", "[branches 2] feat2 on feature shadow");
 
@@ -277,10 +277,10 @@ function runBranchesDefault(env1: ReturnType<typeof createTestEnv>): void {
     assertEqual(r3.status, 0, "[branches 3: orphan] should not crash");
     git("fetch origin", env1.localRepo);
     assertEqual(
-      git("branch -r", env1.localRepo).includes(`origin/shadow/${env1.subdir}/docs`),
+      git("branch -r", env1.localRepo).includes(`origin/b-${env1.subdir}/docs`),
       true, "[branches 3] orphan shadow branch exists",
     );
-    const tip = git(`log -1 --format=%s origin/shadow/${env1.subdir}/docs`, env1.localRepo);
+    const tip = git(`log -1 --format=%s origin/b-${env1.subdir}/docs`, env1.localRepo);
     if (!tip) throw new Error("[branches 3] orphan shadow branch should have a commit");
   }
 }
@@ -292,16 +292,16 @@ function runBranchesCustomPrefix(): void {
     commitOnRemote(env2, { "hello.txt": "from external\n" }, "Add hello");
     const r4 = runCiSync(env2);
     assertEqual(r4.status, 0, "[branches 4: custom-prefix pull] should succeed");
-    assertIncludes(r4.stdout, "shd/frontend/main", "[branches 4] output references custom prefix");
+    assertIncludes(r4.stdout, "b-frontend/main", "[branches 4] output references pull-side shadow ref");
     mergeShadow(env2);
     assertEqual(readShadowFile(env2, "hello.txt"), "from external\n", "[branches 4] file on custom-prefix shadow");
 
     commitOnLocal(env2, { "feature.ts": "export const x = 1;\n" }, "Add feature");
     const r5 = runPush(env2, "Push feature");
     assertEqual(r5.status, 0, "[branches 5: custom-prefix push] should succeed");
-    assertIncludes(r5.stdout, "shd/frontend/main", "[branches 5] push references custom prefix");
+    assertIncludes(r5.stdout, "a-frontend/main", "[branches 5] push references push-side shadow ref");
     assertEqual(readExternalShadowFile(env2, "feature.ts"), "export const x = 1;\n", "[branches 5] file on external shadow");
-    assertIncludes(getExternalShadowLogFull(env2), "Shadow-replayed-", "[branches 5] trailer present");
+    assertIncludes(getExternalShadowLogFull(env2), "a-frontend-to-b-frontend:", "[branches 5] trailer present");
   } finally {
     env2.cleanup();
   }
@@ -443,8 +443,8 @@ function runShadowignoreNeverInTree(): void {
     const r4b = runPush(env2, "Second export");
     assertEqual(r4b.status, 0, "[shadowignore 4] second push should succeed");
 
-    git(`fetch ${env2.remoteName} shadow/${env2.subdir}/main`, env2.localRepo);
-    const commits = git(`log ${env2.remoteName}/shadow/${env2.subdir}/main --format=%H`, env2.localRepo)
+    git(`fetch ${env2.remoteName} a-${env2.subdir}/main`, env2.localRepo);
+    const commits = git(`log ${env2.remoteName}/a-${env2.subdir}/main --format=%H`, env2.localRepo)
       .split("\n").filter(Boolean);
     for (const hash of commits) {
       const tree = git(`ls-tree -r --name-only ${hash}`, env2.localRepo);

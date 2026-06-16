@@ -34,8 +34,8 @@ g(`mv ${oldDir} ${newDir}`); g(`commit -q -m "rename legacy_module v1 -> v2"`); 
 runCiSync(env);
 
 // Inspect the shadow tree on origin.
-execSync(`git fetch -q origin shadow/backend/main`, { cwd: env.localRepo, stdio: "pipe" });
-const tree = execSync(`git ls-tree -r --name-only origin/shadow/backend/main`, { cwd: env.localRepo, encoding: "utf8" })
+execSync(`git fetch -q origin b-backend/main`, { cwd: env.localRepo, stdio: "pipe" });
+const tree = execSync(`git ls-tree -r --name-only origin/b-backend/main`, { cwd: env.localRepo, encoding: "utf8" })
   .split("\n").filter(Boolean);
 const oldCount = tree.filter(l => l.includes("legacy_module_v1/")).length;
 const newCount = tree.filter(l => l.includes("legacy_module_v2/")).length;

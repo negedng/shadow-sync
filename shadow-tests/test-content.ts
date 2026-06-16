@@ -20,13 +20,23 @@ import {
   runCiSync, mergeShadow, runPush,
   readShadowFile, readExternalShadowFile,
   getShadowLogFull, getShadowDiffFiles, getShadowAuthors,
-  getExternalShadowLogFull, getExternalShadowDiffFiles,
+  getExternalShadowLogFull,
   setTestBranchAllowlist,
 } from "./harness";
 import { assertEqual, assertIncludes } from "./assert";
 
 function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+}
+
+/** --name-only diff of the latest push-side shadow commit (ref `a-<subdir>/main`). */
+function pushShadowDiffFiles(env: ReturnType<typeof createTestEnv>): string[] {
+  const ref = `a-${env.subdir}/main`;
+  try { git(`fetch ${env.remoteName} ${ref}`, env.localRepo); } catch { return []; }
+  try {
+    return git(`diff-tree --no-commit-id -r --name-only ${env.remoteName}/${ref}`, env.localRepo)
+      .split("\n").filter(Boolean);
+  } catch { return []; }
 }
 
 const PNG_BYTES = Buffer.from([
@@ -52,7 +62,7 @@ function runPullContent(env: ReturnType<typeof createTestEnv>): void {
     assertIncludes(r1.stdout, "Replayed", "[pull-content 1] should replay commits");
     assertEqual(readShadowFile(env, "app.ts"), "console.log('hello');\n", "[pull-content 1] app.ts content");
     assertEqual(readShadowFile(env, "utils.ts"), "export const x = 1;\n", "[pull-content 1] utils.ts content");
-    assertIncludes(getShadowLogFull(env), "Shadow-replayed-", "[pull-content 1] trailer present");
+    assertIncludes(getShadowLogFull(env), `b-${env.subdir}-to-a-${env.subdir}:`, "[pull-content 1] trailer present");
 
     const r1b = runCiSync(env);
     assertEqual(r1b.status, 0, "[pull-content 1] re-run should succeed");
@@ -103,8 +113,8 @@ function runPullContent(env: ReturnType<typeof createTestEnv>): void {
     git("push origin main", env.remoteWorking);
     const r5 = runCiSync(env);
     assertEqual(r5.status, 0, "[pull-content 5: binary] ci-sync should succeed");
-    git(`fetch origin shadow/${env.subdir}/main`, env.localRepo);
-    const binOut = execSync(`git show origin/shadow/${env.subdir}/main:${env.subdir}/icon.png`, {
+    git(`fetch origin b-${env.subdir}/main`, env.localRepo);
+    const binOut = execSync(`git show origin/b-${env.subdir}/main:${env.subdir}/icon.png`, {
       cwd: env.localRepo, stdio: ["pipe", "pipe", "pipe"],
     });
     assertEqual(binOut.length, PNG_BYTES.length, "[pull-content 5] binary file size matches");
@@ -188,7 +198,7 @@ function runPushContent(env1: ReturnType<typeof createTestEnv>): void {
     assertIncludes(r1.stdout, "Done", "[push-content 1] reports done");
     assertEqual(readExternalShadowFile(env1, "new-feature.ts"), "export function feat() {}\n", "[push-content 1] new-feature.ts on shadow");
     assertIncludes(getExternalShadowLogFull(env1), "Add new feature", "[push-content 1] commit message preserved");
-    const diff1 = getExternalShadowDiffFiles(env1);
+    const diff1 = pushShadowDiffFiles(env1);
     assertEqual(diff1.length, 1, `[push-content 1] diff-clean: 1 file, got ${diff1.join(",")}`);
     assertEqual(diff1[0], "new-feature.ts", "[push-content 1] diff shows only new-feature.ts");
 
@@ -207,8 +217,8 @@ function runPushContent(env1: ReturnType<typeof createTestEnv>): void {
     git('commit -m "Add binary image"', env1.localRepo);
     const r3 = runPush(env1, "Push binary");
     assertEqual(r3.status, 0, "[push-content 3: binary] push should succeed");
-    git(`fetch ${env1.remoteName} shadow/${env1.subdir}/main`, env1.localRepo);
-    const binOut = execSync(`git show ${env1.remoteName}/shadow/${env1.subdir}/main:image.png`, {
+    git(`fetch ${env1.remoteName} a-${env1.subdir}/main`, env1.localRepo);
+    const binOut = execSync(`git show ${env1.remoteName}/a-${env1.subdir}/main:image.png`, {
       cwd: env1.localRepo, stdio: ["pipe", "pipe", "pipe"],
     });
     assertEqual(binOut.length, 32, "[push-content 3] binary size matches");
@@ -218,7 +228,7 @@ function runPushContent(env1: ReturnType<typeof createTestEnv>): void {
     commitOnLocal(env1, { "base.txt": "updated base\n" }, "Update base.txt");
     const r4 = runPush(env1);
     assertEqual(r4.status, 0, "[push-content 4: diff-clean update] push should succeed");
-    const diff4 = getExternalShadowDiffFiles(env1);
+    const diff4 = pushShadowDiffFiles(env1);
     assertEqual(diff4.length, 1, `[push-content 4] 1 file, got ${diff4.join(",")}`);
     assertEqual(diff4[0], "base.txt", "[push-content 4] diff shows only updated file");
 
@@ -226,7 +236,7 @@ function runPushContent(env1: ReturnType<typeof createTestEnv>): void {
     commitOnLocal(
       env1,
       { "lit-trailer.ts": "export const lit = 1;\n" },
-      `Refactor referencing Shadow-replayed-${env1.subdir}-${env1.remoteName}: abc1234`,
+      `Refactor referencing a-${env1.subdir}-to-b-${env1.subdir}: abc1234`,
     );
     const r5 = runPush(env1);
     assertEqual(r5.status, 0, "[push-content 5: literal-trailer] push should succeed");
@@ -347,7 +357,7 @@ function runPushOps(env: ReturnType<typeof createTestEnv>): void {
 // Special tree-entry kinds. Runs on the shared env after the other sub-tests;
 // uses cacheinfo paths that don't collide with prior content.
 function runSpecialModes(env: ReturnType<typeof createTestEnv>): void {
-  const shadowRef = `${env.branchPrefix}/${env.subdir}/main`;
+  const shadowRef = `b-${env.subdir}/main`;
 
   function lsTree(targetPath: string): string {
     git(`fetch origin ${shadowRef}`, env.localRepo);

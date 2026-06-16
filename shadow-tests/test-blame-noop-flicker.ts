@@ -137,8 +137,8 @@ export default function run(): void {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "common-backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "common", b: "src/common" }] },
-        { name: "common-frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "common", b: "src/common" }] },
+        { name: "common-backend",  a: { remote: "origin", url: mono.bare, label: "a-common-backend"  }, b: { remote: "backend",  url: backend.bare,  label: "b-common-backend"  }, mappings: [{ a: "common", b: "src/common" }] },
+        { name: "common-frontend", a: { remote: "origin", url: mono.bare, label: "a-common-frontend" }, b: { remote: "frontend", url: frontend.bare, label: "b-common-frontend" }, mappings: [{ a: "common", b: "src/common" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -176,8 +176,8 @@ export default function run(): void {
     git("fetch origin", mono.working);
 
     // ── Phase 5: Mira merges BACKEND shadow first, then FRONTEND shadow ───────
-    mergeRef(mono, "origin/shadow/common-backend/main",  "Mb mira merges backend shadow");
-    mergeRef(mono, "origin/shadow/common-frontend/main", "Mf mira merges frontend shadow (net no-op)");
+    mergeRef(mono, "origin/b-common-backend/main",  "Mb mira merges backend shadow");
+    mergeRef(mono, "origin/b-common-frontend/main", "Mf mira merges frontend shadow (net no-op)");
     git("push origin main", mono.working);
 
     assertEqual(git(`show main:${MONO_FILE}`, mono.working).trim(), "v2", "[Phase 5] mono/main common == v2");
@@ -198,10 +198,10 @@ export default function run(): void {
 
     // ── Phase 6: round-trip --from a — frontend flicker lands in backend shadow ─
     assertEqual(runSync({ from: "a" }).exitCode, 0, "[Phase 6 --from a]");
-    git("fetch origin shadow/common-backend/main", backend.working);
+    git("fetch origin a-common-backend/main", backend.working);
 
     // Sanity: the frontend-origin flicker really reached backend's shadow.
-    const beShadow = "origin/shadow/common-backend/main";
+    const beShadow = "origin/a-common-backend/main";
     assertIncludes(pathLogFull(backend, beShadow, EXT_FILE), "mid",
       "[Phase 6] backend's shadow carries the frontend 'mid' flicker (full-history)");
 
@@ -275,8 +275,8 @@ export default function run(): void {
     // mono merged backend FIRST, so on every shadow the frontend side sits on a
     // SECOND parent. Diagnostics-only for now: let git tell us whether FF vs
     // --no-ff actually changes blame on the losing side.
-    const feShadow = "origin/shadow/common-frontend/main";
-    git(`fetch origin shadow/common-frontend/main`, frontend.working);
+    const feShadow = "origin/a-common-frontend/main";
+    git(`fetch origin a-common-frontend/main`, frontend.working);
     console.log("\n── FRONTEND SHADOW (after round-trip) full-history(common): ──");
     console.log(pathLogFull(frontend, feShadow, EXT_FILE).replace(/^/gm, "      "));
 
@@ -329,7 +329,7 @@ export default function run(): void {
 
     // ── Probe: shadow-branch blame across repos (for the who-do-I-see table) ──
     git("fetch origin", mono.working);
-    for (const ref of ["origin/shadow/common-backend/main", "origin/shadow/common-frontend/main"]) {
+    for (const ref of ["origin/b-common-backend/main", "origin/b-common-frontend/main"]) {
       console.log(`\n── MONO shadow ref ${ref} ──`);
       console.log("  blame(common) author:", blameAuthorEmail(mono, ref, MONO_FILE, 1));
       console.log("  path-log(common):\n" + pathLog(mono, ref, MONO_FILE).replace(/^/gm, "      "));

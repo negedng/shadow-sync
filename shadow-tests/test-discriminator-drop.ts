@@ -83,7 +83,7 @@ async function main() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "backend", b: "" }] },
+        { name: "backend", a: { remote: "origin", url: mono.bare, label: "a-backend" }, b: { remote: "backend", url: backend.bare, label: "b-backend" }, mappings: [{ a: "backend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -109,8 +109,8 @@ async function main() {
     r = await runSync({ from: "a" }); if (r.exitCode !== 0) throw new Error("r1 a");
 
     // Capture shadow tip BEFORE the operator merges.
-    const preSHA = git("rev-parse refs/heads/shadow/backend/main", backend.bare);
-    const preCount = parseInt(git("rev-list --count refs/heads/shadow/backend/main", backend.bare), 10);
+    const preSHA = git("rev-parse refs/heads/a-backend/main", backend.bare);
+    const preCount = parseInt(git("rev-list --count refs/heads/a-backend/main", backend.bare), 10);
     console.log(`  Pre-merge shadow tip: ${preSHA.slice(0,12)} (commit count: ${preCount})`);
 
     banner("did-then-undid: TS-1 -s ours merge, side branch HAS a kept commit (load-bearing)");
@@ -157,12 +157,12 @@ async function main() {
     //     the merge is load-bearing and SHOULD appear on the shadow chain.
     //   frontend-only stale (mergeD): side branch contributed nothing in scope,
     //     so the merge is vacuous and SHOULD NOT appear.
-    const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
-    const shadowCount = parseInt(git("rev-list --count refs/heads/shadow/backend/main", backend.bare), 10);
+    const shadowLog = git(`log --format=%B refs/heads/a-backend/main`, backend.bare);
+    const shadowCount = parseInt(git("rev-list --count refs/heads/a-backend/main", backend.bare), 10);
     console.log(`  Shadow chain commit count: ${shadowCount} (was ${preCount})`);
 
     const mergeHasSynthetic = (sha: string): boolean => {
-      const re = new RegExp(`^Shadow-replayed-[^:]+:\\s*${sha}\\b`, "m");
+      const re = new RegExp(`^a-backend-to-b-backend:\\s*${sha}\\b`, "m");
       return re.test(shadowLog);
     };
     const undidPresent = mergeHasSynthetic(mergeC);

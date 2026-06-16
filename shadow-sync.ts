@@ -167,7 +167,7 @@ function _runSyncCore(options: SyncOptions): number {
       }
 
       const branchFailures = pushShadowBranches({
-        pairName: pair.name,
+        sourceLabel: source.label,
         targetRemote: target.remote,
         branches: validBranches,
         branchMapping: result.branchMapping,
@@ -199,11 +199,11 @@ function _runSyncCore(options: SyncOptions): number {
 
     // Detect stale shadow branches (only when syncing all branches from a remote)
     if (!options.branch) {
-      const shadowPrefix = `${target.remote}/${shadowBranchName(pair.name, "")}`;
+      const shadowNamespace = `${target.remote}/${shadowBranchName(source.label, "")}`;
       const allShadow = git(["branch", "-r"])
         .split("\n").map(l => l.trim())
-        .filter(l => l.startsWith(shadowPrefix));
-      const activeBranches = new Set(branches.map(b => `${target.remote}/${shadowBranchName(pair.name, b)}`));
+        .filter(l => l.startsWith(shadowNamespace));
+      const activeBranches = new Set(branches.map(b => `${target.remote}/${shadowBranchName(source.label, b)}`));
       const stale = allShadow.filter(s => !activeBranches.has(s));
       if (stale.length > 0) {
         console.log(`\n⚠ Stale shadow branches (branch deleted from '${source.remote}'):`);
@@ -232,18 +232,18 @@ function _runSyncCore(options: SyncOptions): number {
  * doesn't abort the others. Returns the failure count.
  */
 function pushShadowBranches(opts: {
-  pairName: string;
+  sourceLabel: string;
   targetRemote: string;
   branches: string[];
   branchMapping: Map<string, string>;
   upToDate: boolean;
   dryRun: boolean;
 }): number {
-  const { pairName, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
+  const { sourceLabel, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
   let failures = 0;
 
   for (const branch of branches) {
-    const shadow = shadowBranchName(pairName, branch);
+    const shadow = shadowBranchName(sourceLabel, branch);
     const replayedSHA = branchMapping.get(branch);
 
     if (!replayedSHA) {

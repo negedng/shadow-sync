@@ -75,15 +75,18 @@ function isAncestor(repo: Repo, anc: string, desc: string): boolean {
 }
 /** Search the WHOLE object DB (reachable + dangling) for a replay carrying the
  *  given source trailer — needed because an orphaned replay isn't on any ref. */
-function replayAnywhere(repo: Repo, pair: string, srcRemote: string, sourceSha: string): string | null {
-  const trailer = `Shadow-replayed-${pair}-${srcRemote}: ${sourceSha}`;
+function replayAnywhere(repo: Repo, trailerKey: string, sourceSha: string): string | null {
+  // Absorbed SHAs now ride the single replay trailer as extra space-separated
+  // values (`<key>: <direct> <absorbed...>`), so match the sha anywhere on a
+  // line that carries this key — not just immediately after the colon.
+  const line = new RegExp(`^${trailerKey}:(?:\\s+\\S+)*\\s+${sourceSha}(?:\\s|$)`, "m");
   const reachable = execSync("git rev-list --all", { cwd: repo.working, encoding: "utf8", maxBuffer: 50 * 1024 * 1024 }).split("\n").filter(Boolean);
   const dangling = execSync("git fsck --no-reflogs", { cwd: repo.working, encoding: "utf8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] })
     .split("\n").filter(l => l.includes("dangling commit")).map(l => l.trim().split(/\s+/)[2]);
   for (const c of [...reachable, ...dangling]) {
     try {
       const b = execSync(`git log -1 --format=%B ${c}`, { cwd: repo.working, encoding: "utf8" });
-      if (b.includes(trailer)) return c;
+      if (line.test(b)) return c;
     } catch { /* skip */ }
   }
   return null;
@@ -98,7 +101,7 @@ function run(): void {
 
     applyTestOverrides({
       repoRoot: mono.working,
-      pairs: [{ name: "p", a: { remote: "origin", url: mono.bare }, b: { remote: "ext", url: ext.bare }, mappings: [{ a: "common", b: "src/common" }] }],
+      pairs: [{ name: "p", a: { remote: "origin", url: mono.bare, label: "a-p" }, b: { remote: "ext", url: ext.bare, label: "b-p" }, mappings: [{ a: "common", b: "src/common" }] }],
       shadowBranchPrefix: "shadow",
     });
     setBranchFiltersForTesting(new Map<string, RegExp[]>([
@@ -147,12 +150,12 @@ function run(): void {
     assertEqual(runSync({ from: "a" }).exitCode, 0, "sync --from a failed");
     git("fetch ext", mono.working);
 
-    const tip = git("rev-parse ext/shadow/p/main", mono.working);
-    const XaRep = replayAnywhere(mono, "p", "origin", Xa);
-    const XbRep = replayAnywhere(mono, "p", "origin", Xb);
+    const tip = git("rev-parse ext/a-p/main", mono.working);
+    const XaRep = replayAnywhere(mono, "a-p-to-b-p", Xa);
+    const XbRep = replayAnywhere(mono, "a-p-to-b-p", Xb);
     console.log(`tip=${tip.slice(0,8)} Xa.replay=${XaRep?.slice(0,8) ?? "—"} Xb.replay=${XbRep?.slice(0,8) ?? "—"}`);
     console.log("--- shadow tip history ---");
-    console.log(git("log ext/shadow/p/main --format=%h_%s --max-count=25", mono.working));
+    console.log(git("log ext/a-p/main --format=%h_%s --max-count=25", mono.working));
 
     const XaReach = XaRep ? isAncestor(mono, XaRep, tip) : false;
     const XbReach = XbRep ? isAncestor(mono, XbRep, tip) : false;

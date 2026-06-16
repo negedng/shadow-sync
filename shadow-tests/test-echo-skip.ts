@@ -48,7 +48,7 @@ function run(): void {
 
     applyTestOverrides({
       repoRoot: mono.working,
-      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "be", b: "src" }] }],
+      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare, label: "a-be" }, b: { remote: "backend", url: backend.bare, label: "b-be" }, mappings: [{ a: "be", b: "src" }] }],
       shadowBranchPrefix: "shadow",
     });
     setBranchFiltersForTesting(new Map<string, RegExp[]>([
@@ -71,7 +71,7 @@ function run(): void {
     // Integrate the imported shadow into mono main -> echoes now live on main.
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git("merge --no-ff origin/shadow/be/main -m \"integrate backend\"", mono.working);
+    git("merge --no-ff origin/b-be/main -m \"integrate backend\"", mono.working);
     git("push origin main", mono.working);
 
     // A genuinely-new, mono-origin commit that must export.
@@ -91,7 +91,7 @@ function run(): void {
     // The new mono-origin commit still exported to backend's shadow.
     git("fetch backend", mono.working);
     // mapping be(a) -> src(b): mono be/new.ts lands at src/new.ts on backend's shadow.
-    const exported = execSync("git show backend/shadow/be/main:src/new.ts", { cwd: mono.working, encoding: "utf8" }).replace(/\r\n/g, "\n");
+    const exported = execSync("git show backend/a-be/main:src/new.ts", { cwd: mono.working, encoding: "utf8" }).replace(/\r\n/g, "\n");
     assertEqual(exported, "fromMono\n", "new mono-origin commit must export to backend shadow");
 
     console.log("PASS — echo-skip: echoes skipped in scan, new mono commit still exported.");

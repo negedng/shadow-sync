@@ -55,7 +55,7 @@ function run(): void {
 
     applyTestOverrides({
       repoRoot: mono.working,
-      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare }, b: { remote: "backend", url: backend.bare }, mappings: [{ a: "be", b: "src" }] }],
+      pairs: [{ name: "be", a: { remote: "origin", url: mono.bare, label: "a-be" }, b: { remote: "backend", url: backend.bare, label: "b-be" }, mappings: [{ a: "be", b: "src" }] }],
       shadowBranchPrefix: "shadow",
     });
     setBranchFiltersForTesting(new Map<string, RegExp[]>([
@@ -74,7 +74,7 @@ function run(): void {
     git("push origin main", backend.working);
     assertEqual(runSync({ from: "b" }).exitCode, 0, "unicode import failed");
     git("fetch origin", mono.working);
-    assertEqual(showFile(mono.working, "origin/shadow/be/main:be/café résumé.txt"), "über\n",
+    assertEqual(showFile(mono.working, "origin/b-be/main:be/café résumé.txt"), "über\n",
       "[1] unicode file must land on mono shadow (silently dropped without -z parsing)");
 
     // 2. export: same shape through the non-root a-side mapping
@@ -82,7 +82,7 @@ function run(): void {
     git("push origin main", mono.working);
     assertEqual(runSync({ from: "a" }).exitCode, 0, "unicode export failed");
     git("fetch backend", mono.working);
-    assertEqual(showFile(mono.working, "backend/shadow/be/main:src/űrlap (v2).ts"), "mező\n",
+    assertEqual(showFile(mono.working, "backend/a-be/main:src/űrlap (v2).ts"), "mező\n",
       "[2] unicode file must land on backend shadow");
 
     // 3. quote + backslash in the path — C-quoted by git regardless of
@@ -100,7 +100,7 @@ function run(): void {
       git("push origin main", backend.working);
       assertEqual(runSync({ from: "b" }).exitCode, 0, "quoted import failed");
       git("fetch origin", mono.working);
-      assertEqual(showFile(mono.working, 'origin/shadow/be/main:be/wi"th\\quote.txt'), "quoted-content\n",
+      assertEqual(showFile(mono.working, 'origin/b-be/main:be/wi"th\\quote.txt'), "quoted-content\n",
         "[3] quote/backslash path must land on mono shadow");
     } else {
       console.log("  [3 info] quote/backslash phase skipped on win32 (NTFS forbids the chars)");

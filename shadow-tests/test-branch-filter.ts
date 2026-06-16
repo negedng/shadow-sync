@@ -29,7 +29,7 @@ function git(cmd: string, cwd: string): string {
 
 function hasShadowBranch(env: ReturnType<typeof createTestEnv>, branch: string): boolean {
   try { git("fetch origin", env.localRepo); } catch { /* empty origin is fine */ }
-  return git("branch -r", env.localRepo).includes(`origin/shadow/${env.subdir}/${branch}`);
+  return git("branch -r", env.localRepo).includes(`origin/b-${env.subdir}/${branch}`);
 }
 
 function makeBranchWithCommit(env: ReturnType<typeof createTestEnv>, branch: string, file: string): void {
@@ -145,7 +145,7 @@ function testMergedIntoAllowed(): void {
     assertEqual(hasShadowBranch(env, "feature/y"), false, "[filter-merged-into-allowed] feature/y shadow absent (filtered, orphan)");
 
     git("fetch origin", env.localRepo);
-    const shadowMain = `origin/shadow/${env.subdir}/main`;
+    const shadowMain = `origin/b-${env.subdir}/main`;
     const treeFiles = git(`ls-tree -r --name-only ${shadowMain}`, env.localRepo).split("\n").filter(Boolean);
     assertEqual(treeFiles.includes(`${env.subdir}/fx1.ts`), true,  "[filter-merged-into-allowed] fx1.ts reaches shadow/main via merge reachability");
     assertEqual(treeFiles.includes(`${env.subdir}/fx2.ts`), true,  "[filter-merged-into-allowed] fx2.ts reaches shadow/main via merge reachability");
@@ -180,7 +180,7 @@ function testOrphanMultiCommit(): void {
       assertEqual(hasShadowBranch(env, "feature/x"), false, `[filter-orphan-multi] cycle ${cycle}: feature/x shadow STILL absent`);
 
       git("fetch origin", env.localRepo);
-      const shadowMain = `origin/shadow/${env.subdir}/main`;
+      const shadowMain = `origin/b-${env.subdir}/main`;
       const treeFiles = git(`ls-tree -r --name-only ${shadowMain}`, env.localRepo).split("\n").filter(Boolean);
       for (let i = 1; i <= 3; i++) {
         assertEqual(treeFiles.includes(`${env.subdir}/fx${i}.ts`), false,

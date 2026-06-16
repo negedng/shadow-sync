@@ -86,8 +86,8 @@ async function run(): Promise<void> {
       pairs: [
         {
           name: "leaf",
-          a: { remote: "origin", url: mono.bare },
-          b: { remote: "leaf",   url: leaf.bare },
+          a: { remote: "origin", url: mono.bare, label: "a-leaf" },
+          b: { remote: "leaf",   url: leaf.bare, label: "b-leaf" },
           mappings: [
             { a: "leaf",   b: ""           },
             { a: "common", b: "src/common" },
@@ -111,7 +111,7 @@ async function run(): Promise<void> {
     // Bootstrap shadow tip must route common/util.ts via the longer mapping —
     // NOT via the primary mapping's canonical leaf path.
     {
-      const tree = listTreePaths(mono, "origin/shadow/leaf/main");
+      const tree = listTreePaths(mono, "origin/b-leaf/main");
       if (tree.includes("leaf/src/common/util.ts")) {
         throw new Error(`bootstrap: leaf/src/common/util.ts must NOT appear (longest-prefix routing). Tree:\n  ${tree.join("\n  ")}`);
       }
@@ -121,7 +121,7 @@ async function run(): Promise<void> {
     }
 
     // ── Integrate on mono, add a mono-side commit, push back to leaf ──────
-    git("merge --no-ff origin/shadow/leaf/main -m Mc1", mono.working);
+    git("merge --no-ff origin/b-leaf/main -m Mc1", mono.working);
     // Mc2 touches the common slice — gives --from a something to replay so
     // the round-trip echo-splice path inside composeMergeBaseTree fires.
     commitFiles(mono, { "common/util.ts": "util v2\n" }, "Mc2");
@@ -134,7 +134,7 @@ async function run(): Promise<void> {
     // ── Leaf integrates the shadow back into main, pushes ────────────────
     git("fetch origin", leaf.working);
     const Lc1 = (() => {
-      git("merge --no-ff origin/shadow/leaf/main -m Lc1", leaf.working);
+      git("merge --no-ff origin/a-leaf/main -m Lc1", leaf.working);
       return git("rev-parse HEAD", leaf.working);
     })();
     git("push origin main", leaf.working);
@@ -150,7 +150,7 @@ async function run(): Promise<void> {
     // composeMergeBaseTree's echo-splice path must filter the primary
     // mapping's slice through the auto-ignore patterns, so leaf-canonical
     // common stays out of mono's `leaf/src/common/`. Common is at root only.
-    const tip = git("rev-parse origin/shadow/leaf/main", mono.working);
+    const tip = git("rev-parse origin/b-leaf/main", mono.working);
     const tipTree = listTreePaths(mono, tip);
     if (tipTree.includes("leaf/src/common/util.ts")) {
       throw new Error(

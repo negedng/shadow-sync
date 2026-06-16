@@ -82,8 +82,8 @@ async function main() {
     applyTestOverrides({
       repoRoot: mono.working,
       pairs: [
-        { name: "backend",  a: { remote: "origin", url: mono.bare }, b: { remote: "backend",  url: backend.bare  }, mappings: [{ a: "backend",  b: "" }] },
-        { name: "frontend", a: { remote: "origin", url: mono.bare }, b: { remote: "frontend", url: frontend.bare }, mappings: [{ a: "frontend", b: "" }] },
+        { name: "backend",  a: { remote: "origin", url: mono.bare, label: "a-backend"  }, b: { remote: "backend",  url: backend.bare,  label: "b-backend"  }, mappings: [{ a: "backend",  b: "" }] },
+        { name: "frontend", a: { remote: "origin", url: mono.bare, label: "a-frontend" }, b: { remote: "frontend", url: frontend.bare, label: "b-frontend" }, mappings: [{ a: "frontend", b: "" }] },
       ],
       shadowBranchPrefix: "shadow",
     });
@@ -114,7 +114,7 @@ async function main() {
     banner("Round 2: Mira merges shadow/backend/main on mono with -X ours");
     git("fetch origin", mono.working);
     git("checkout main", mono.working);
-    git(`merge --no-ff -X ours origin/shadow/backend/main -m "Mira: merge shadow (took mono's)"`, mono.working);
+    git(`merge --no-ff -X ours origin/b-backend/main -m "Mira: merge shadow (took mono's)"`, mono.working);
     git("push origin main", mono.working);
 
     // Verify the resulting merge is actually TS-1 (took mono's tree).
@@ -149,8 +149,8 @@ async function main() {
     // Assertion: backend.shadow/backend/main contains a synthetic with
     // Shadow-replayed-<mono-remote>: <Mira_merge_sha>.
     git("fetch origin", backend.working);
-    const shadowLog = git(`log --format=%B refs/heads/shadow/backend/main`, backend.bare);
-    const trailerRe = new RegExp(`^Shadow-replayed-[^:]+:\\s*${miraMergeSha}\\b`, "m");
+    const shadowLog = git(`log --format=%B refs/heads/a-backend/main`, backend.bare);
+    const trailerRe = new RegExp(`^a-backend-to-b-backend:\\s*${miraMergeSha}\\b`, "m");
     if (trailerRe.test(shadowLog)) {
       console.log(`  ✓ PASS — synthetic for Mira_merge (${miraMergeSha.slice(0,12)}) exists on backend.shadow/backend/main.`);
     } else {
