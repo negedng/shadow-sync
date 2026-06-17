@@ -57,7 +57,7 @@ Create a `shadow-config.json` (copy from `shadow-config.example.json`):
 - `url` tells the tool how to reach the repo
 - An endpoint may set `"anchorBranch"` (default `"main"`) — the branch whose init commit anchors replayed orphan history on that side. Set it if the repo's mainline is `master`/`trunk`
 
-Optional top-level fields (see `shadow-config.example.json`): `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `identities`, `sides`.
+Optional top-level fields (see `shadow-config.example.json`): `gitConfigOverrides` (`-c` flags applied to every git call), `maxBuffer`, `maxCommitsPerSync` (fail closed above this many commits per run; default 300, override with `--allow-many-commits`), `maxCommitBytes` (fail closed if any one commit replays more than this many bytes of mapped, non-ignored content; default 10 MB, override with `--allow-large-commits`), `identities`, `sides`.
 
 A top-level `"sides"` object gives the two endpoints friendly names for the `--from` flag — e.g. `"sides": { "a": "mono", "b": "ext" }` lets `--from mono` / `--from ext` stand in for `--from a` / `--from b` (the literal `a`/`b` keep working). The two names must be distinct and not be the literal `"a"`/`"b"`. The codebase still refers to the sides as `a`/`b` internally.
 
@@ -227,6 +227,8 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 | `-b` / `--branch` | Branch to sync (bypasses `branch-filters.json`) | All allowed branches |
 | `-n` / `--dry-run` | Replay but push nothing | off |
 | `--tags` | Also run the tag sync phase | off |
+| `--allow-many-commits` | Override the `maxCommitsPerSync` safety limit | off |
+| `--allow-large-commits` | Override the `maxCommitBytes` safety limit | off |
 | `-h` / `--help` | Show usage | |
 
 ## Setup

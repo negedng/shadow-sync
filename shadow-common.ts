@@ -76,6 +76,8 @@ interface ShadowSyncConfig {
   identities: IdentityProfile[];
   gitConfigOverrides: Record<string, string>;
   maxBuffer: number;
+  maxCommitsPerSync: number;
+  maxCommitBytes: number;
   sides: Sides | null;
 }
 
@@ -258,6 +260,13 @@ function parseJsonFile<T>(filePath: string): T {
   }
 }
 
+// Safety-limit defaults: a single sync run replaying more than this many
+// commits, or any one commit replaying more than this many bytes, fails closed
+// unless the operator opts in (see mirrorHistory). Override per-deployment via
+// the maxCommitsPerSync / maxCommitBytes config fields.
+const DEFAULT_MAX_COMMITS_PER_SYNC = 300;
+const DEFAULT_MAX_COMMIT_BYTES = 10 * 1024 * 1024;
+
 function loadConfig(): ShadowSyncConfig {
   if (!fs.existsSync(CONFIG_PATH)) {
     return {
@@ -265,6 +274,8 @@ function loadConfig(): ShadowSyncConfig {
       identities: [],
       gitConfigOverrides: {},
       maxBuffer: 50 * 1024 * 1024,
+      maxCommitsPerSync: DEFAULT_MAX_COMMITS_PER_SYNC,
+      maxCommitBytes: DEFAULT_MAX_COMMIT_BYTES,
       sides: null,
     };
   }
@@ -273,6 +284,8 @@ function loadConfig(): ShadowSyncConfig {
 
   const gitConfigOverrides = (doc.gitConfigOverrides as Record<string, string>) ?? {};
   const maxBuffer = (doc.maxBuffer as number) ?? 50 * 1024 * 1024;
+  const maxCommitsPerSync = (doc.maxCommitsPerSync as number) ?? DEFAULT_MAX_COMMITS_PER_SYNC;
+  const maxCommitBytes = (doc.maxCommitBytes as number) ?? DEFAULT_MAX_COMMIT_BYTES;
 
   const pairs = (doc.pairs as SyncPair[]) ?? [];
   validatePairs(pairs);
@@ -281,7 +294,7 @@ function loadConfig(): ShadowSyncConfig {
   const sides = (doc.sides as Sides | undefined) ?? null;
   validateSides(sides);
 
-  return { pairs, identities, gitConfigOverrides, maxBuffer, sides };
+  return { pairs, identities, gitConfigOverrides, maxBuffer, maxCommitsPerSync, maxCommitBytes, sides };
 }
 
 const config = loadConfig();
@@ -289,6 +302,9 @@ const config = loadConfig();
 export const PAIRS: SyncPair[] = [...config.pairs];
 const IDENTITIES: IdentityProfile[] = [...config.identities];
 const MAX_BUFFER = config.maxBuffer;
+// Mutable so tests can dial the safety gates down without 300 real commits.
+let MAX_COMMITS_PER_SYNC = config.maxCommitsPerSync;
+let MAX_COMMIT_BYTES = config.maxCommitBytes;
 let _sides: Sides | null = config.sides;
 
 /** Resolve a `--from` value to a side. Accepts the literal "a"/"b" or, when
@@ -329,6 +345,8 @@ export function applyTestOverrides(opts: {
   shadowBranchPrefix?: string;
   identities?: IdentityProfile[];
   sides?: Sides | null;
+  maxCommitsPerSync?: number;
+  maxCommitBytes?: number;
 }): void {
   // Validate before mutating module state so a rejected override can't poison
   // a later in-process run.
@@ -342,6 +360,8 @@ export function applyTestOverrides(opts: {
   IDENTITIES.length = 0;
   IDENTITIES.push(...identities);
   if (opts.sides !== undefined) _sides = opts.sides;
+  MAX_COMMITS_PER_SYNC = opts.maxCommitsPerSync ?? config.maxCommitsPerSync;
+  MAX_COMMIT_BYTES = opts.maxCommitBytes ?? config.maxCommitBytes;
 }
 
 
@@ -429,6 +449,22 @@ function batchObjectsExist(shas: string[]): Set<string> {
   return present;
 }
 
+
+/** Byte size of each present blob in `shas` — one `cat-file --batch-check`
+ *  instead of a spawn per sha. Missing objects are omitted from the map. */
+function batchBlobSizes(shas: string[]): Map<string, number> {
+  const sizes = new Map<string, number>();
+  const uniq = [...new Set(shas)].filter(Boolean);
+  if (uniq.length === 0) return sizes;
+  const res = git(["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", safe: true, raw: true });
+  if (!res.ok) return sizes;
+  for (const line of res.stdout.split("\n")) {
+    // "<sha> <type> <size>" for present; "<sha> missing" for absent.
+    const m = line.match(/^([0-9a-f]+) \S+ (\d+)$/);
+    if (m) sizes.set(m[1], Number(m[2]));
+  }
+  return sizes;
+}
 
 /** Every endpoint label across all pairs — the prefixes that mark shadow refs. */
 function allLabels(): string[] {
@@ -868,6 +904,44 @@ function sliceChangedVsParent(
   const diff = diffSyncedDirs(parent, commit, dc);
   if (!diff.ok) return true;  // fail closed: keep
   return diff.entries.some(e => routeSourcePath(e.filePath, dc, ignoreBySrc) !== null);
+}
+
+// git's canonical empty-tree object — the "parent" for a root commit's diff so
+// every blob the commit introduces counts toward its replayed size.
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+// Blob SHAs a commit would actually replay: its diff vs first parent (empty
+// tree for a root commit), restricted to mapped + non-ignored paths (same
+// predicate as sliceChangedVsParent) and to content-bearing statuses (A/M/T).
+function commitReplayedBlobShas(c: TopoCommit, dc: DirectionConfig): string[] {
+  const parent = c.parents[0] ?? EMPTY_TREE;
+  const diff = diffSyncedDirs(parent, c.hash, dc);
+  if (!diff.ok) return [];  // size unknown — count check / replay surfaces failures
+  const ignoreBySrc = dc.mappings.map((m, i) =>
+    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], c.parents[0]));
+  return diff.entries
+    .filter(e => e.status !== "D" && routeSourcePath(e.filePath, dc, ignoreBySrc) !== null)
+    .map(e => e.newHash);
+}
+
+// Compact byte size for operator-facing messages, e.g. 12.3 MB / 900 KB.
+function humanBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+// Per-commit replayed byte size for every commit, summing surviving blob sizes.
+// One cat-file batch across all commits' blobs (a shared blob is summed once
+// per commit it appears in, which is the size that commit replays).
+function commitReplayedBytes(commits: TopoCommit[], dc: DirectionConfig): Map<string, number> {
+  const blobsByCommit = commits.map(c => commitReplayedBlobShas(c, dc));
+  const sizes = batchBlobSizes(blobsByCommit.flat());
+  const bytes = new Map<string, number>();
+  commits.forEach((c, i) => {
+    bytes.set(c.hash, blobsByCommit[i].reduce((sum, sha) => sum + (sizes.get(sha) ?? 0), 0));
+  });
+  return bytes;
 }
 
 // Returns true iff `git log pi ^p1` contains any commit in keptSet —
@@ -2242,6 +2316,8 @@ export function mirrorHistory(opts: {
   pair: SyncPair;
   from: "a" | "b";
   branches: string[];
+  allowManyCommits?: boolean;
+  allowLargeCommits?: boolean;
 }): {
   mirrored: number;
   branchMapping: Map<string, string>;
@@ -2249,7 +2325,7 @@ export function mirrorHistory(opts: {
   upToDate: boolean;
   haltedBranches: HaltedBranch[];
 } {
-  const { pair, from, branches } = opts;
+  const { pair, from, branches, allowManyCommits, allowLargeCommits } = opts;
   const dc = buildDirectionConfig(pair, from);
 
   // One in-memory source graph (two batched git calls).
@@ -2284,6 +2360,25 @@ export function mirrorHistory(opts: {
   }
 
   console.log(`Found ${newCommits.length} new commit(s) to replay.\n`);
+
+  // Safety gates — fail closed before any local replay/push work. Each names
+  // its override flag so the operator opts in deliberately.
+  if (!allowManyCommits && newCommits.length > MAX_COMMITS_PER_SYNC) {
+    fail(`${newCommits.length} commits to replay exceeds the safety limit of ${MAX_COMMITS_PER_SYNC}. ` +
+      `Re-run with --allow-many-commits to override (or raise maxCommitsPerSync in the config).`);
+  }
+  if (!allowLargeCommits) {
+    const bytes = commitReplayedBytes(newCommits, dc);
+    const oversized = newCommits.filter(c => (bytes.get(c.hash) ?? 0) > MAX_COMMIT_BYTES);
+    if (oversized.length > 0) {
+      const list = oversized
+        .map(c => `  ${c.hash.slice(0, 9)}  ${humanBytes(bytes.get(c.hash) ?? 0)}`)
+        .join("\n");
+      fail(`${oversized.length} commit(s) replay more than ${humanBytes(MAX_COMMIT_BYTES)} of content:\n${list}\n` +
+        `Re-run with --allow-large-commits to override, .shadowignore the oversized path(s) to ` +
+        `exclude them, or raise maxCommitBytes in the config.`);
+    }
+  }
 
   // Fallback root for orphan parents (see resolveHaltAwareParents).
   const anchorBranch = dc.target.anchorBranch ?? "main";

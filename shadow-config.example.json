@@ -34,5 +34,8 @@
     "core.quotepath": "false"
   },
 
-  "maxBuffer": 52428800
+  "maxBuffer": 52428800,
+
+  "maxCommitsPerSync": 300,
+  "maxCommitBytes": 10485760
 }

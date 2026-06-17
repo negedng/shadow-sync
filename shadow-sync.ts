@@ -34,6 +34,10 @@ export interface SyncOptions {
   dryRun?: boolean;
   tags?: boolean;
   stream?: boolean;
+  /** Override the >300-commits-per-sync safety limit. */
+  allowManyCommits?: boolean;
+  /** Override the >10MB-per-commit safety limit. */
+  allowLargeCommits?: boolean;
 }
 
 export interface SyncResult {
@@ -156,6 +160,8 @@ function _runSyncCore(options: SyncOptions): number {
         pair,
         from: fromSide,
         branches: validBranches,
+        allowManyCommits: options.allowManyCommits,
+        allowLargeCommits: options.allowLargeCommits,
       });
 
       if (result.haltedBranches.length > 0) {
@@ -319,6 +325,8 @@ const USAGE = `Usage: npx tsx shadow-sync.ts [options]
   -b, --branch <name>  Sync only this branch (bypasses branch-filters.json)
   -n, --dry-run        Replay but push nothing
       --tags           Also sync tags (off by default)
+      --allow-many-commits   Override the >300-commits-per-sync safety limit
+      --allow-large-commits  Override the >10MB-per-commit safety limit
   -h, --help           Show this help`;
 
 if (require.main === module) {
@@ -332,6 +340,8 @@ if (require.main === module) {
         branch:    { type: "string",  short: "b" },
         "dry-run":   { type: "boolean", short: "n" },
         tags:        { type: "boolean" },
+        "allow-many-commits":  { type: "boolean" },
+        "allow-large-commits": { type: "boolean" },
         help:        { type: "boolean", short: "h" },
       },
       strict: true,
@@ -352,6 +362,8 @@ if (require.main === module) {
     branch: values.branch as string | undefined,
     dryRun: (values["dry-run"] as boolean | undefined) ?? false,
     tags: (values.tags as boolean | undefined) ?? false,
+    allowManyCommits: (values["allow-many-commits"] as boolean | undefined) ?? false,
+    allowLargeCommits: (values["allow-large-commits"] as boolean | undefined) ?? false,
     stream: true,
   });
 
