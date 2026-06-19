@@ -229,6 +229,7 @@ Both reusable workflows invoke `npm run sync -- --from b/a`, so the consumer's `
 | `--tags` | Also run the tag sync phase | off |
 | `--allow-many-commits` | Override the `maxCommitsPerSync` safety limit | off |
 | `--allow-large-commits` | Override the `maxCommitBytes` safety limit | off |
+| `--allow-shadow-force` | On shadow divergence (rewritten source history), force-push the replay with `--force-with-lease` instead of failing closed. Coordinate first — the other side may have merged the old shadow history | off |
 | `-h` / `--help` | Show usage | |
 
 ## Setup

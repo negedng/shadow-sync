@@ -38,6 +38,9 @@ export interface SyncOptions {
   allowManyCommits?: boolean;
   /** Override the >10MB-per-commit safety limit. */
   allowLargeCommits?: boolean;
+  /** On shadow-ref divergence (rewritten source history), let the engine
+   *  force-push the replay with --force-with-lease instead of failing closed. */
+  allowShadowForce?: boolean;
 }
 
 export interface SyncResult {
@@ -181,6 +184,7 @@ function _runSyncCore(options: SyncOptions): number {
         branchMapping: result.branchMapping,
         upToDate: result.upToDate,
         dryRun,
+        allowShadowForce: options.allowShadowForce ?? false,
       });
       if (branchFailures > 0) {
         console.error(`  ✘ ${branchFailures} shadow branch update(s) failed on ${pair.name}.`);
@@ -247,8 +251,9 @@ function pushShadowBranches(opts: {
   branchMapping: Map<string, string>;
   upToDate: boolean;
   dryRun: boolean;
+  allowShadowForce: boolean;
 }): number {
-  const { sourceLabel, sourceRemote, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
+  const { sourceLabel, sourceRemote, targetRemote, branches, branchMapping, upToDate, dryRun, allowShadowForce } = opts;
   let failures = 0;
 
   for (const branch of branches) {
@@ -271,6 +276,10 @@ function pushShadowBranches(opts: {
       continue;
     }
 
+    // Set to the expected remote SHA when a divergence is being force-resolved,
+    // so the push below guards the rewind with --force-with-lease.
+    let forceLease: string | null = null;
+
     if (currentSHA) {
       const isAncestor = git(
         ["merge-base", "--is-ancestor", replayedSHA, currentSHA], { safe: true },
@@ -289,31 +298,42 @@ function pushShadowBranches(opts: {
           console.log(`  ${shadow}: ${targetRemote} has same tree on different topology; leaving target tip in place.`);
           continue;
         }
-        console.error(
-          `✘ ${shadow}: ${targetRemote} diverged with different tree — the engine cannot ` +
-          `fast-forward and never force-pushes shadow refs.\n` +
-          `  Likely cause: source history on '${branch}' was rewritten (rebase / reset --hard / ` +
-          `filter-branch), or the shadow ref was edited by hand.\n` +
-          `  Operator must reconcile one of two ways:\n` +
-          `    A) Rewrite was unintended — restore '${branch}' on '${sourceRemote}' to its pre-rewrite\n` +
-          `       tip and re-run the sync (it fast-forwards again):\n` +
-          `         git push --force-with-lease ${sourceRemote} <old-tip>:${branch}\n` +
-          `    B) Rewrite was intended — advance the shadow to the replay computed this run. Coordinate\n` +
-          `       first: the other side may have merged the old shadow history and must reconcile.\n` +
-          `         git push --force-with-lease ${targetRemote} ${replayedSHA}:refs/heads/${shadow}\n` +
-          `  To avoid this, merge the shadow into the mainline BEFORE rebasing/squashing on top.`);
-        failures++;
-        continue;
+        if (!allowShadowForce) {
+          console.error(
+            `✘ ${shadow}: ${targetRemote} diverged with different tree — the engine cannot ` +
+            `fast-forward and never force-pushes shadow refs.\n` +
+            `  Likely cause: source history on '${branch}' was rewritten (rebase / reset --hard / ` +
+            `filter-branch), or the shadow ref was edited by hand.\n` +
+            `  Operator must reconcile one of two ways:\n` +
+            `    A) Rewrite was unintended — restore '${branch}' on '${sourceRemote}' to its pre-rewrite\n` +
+            `       tip and re-run the sync (it fast-forwards again):\n` +
+            `         git push --force-with-lease ${sourceRemote} <old-tip>:${branch}\n` +
+            `    B) Rewrite was intended — re-run with --allow-shadow-force to let the engine advance\n` +
+            `       the shadow to this run's replay with --force-with-lease. Coordinate first: the\n` +
+            `       other side may have merged the old shadow history and must reconcile. Manual form:\n` +
+            `         git push --force-with-lease ${targetRemote} ${replayedSHA}:refs/heads/${shadow}\n` +
+            `  To avoid this, merge the shadow into the mainline BEFORE rebasing/squashing on top.`);
+          failures++;
+          continue;
+        }
+        // --allow-shadow-force: rewind the shadow to the replay, guarded by a
+        // lease on the SHA we diverged against (rejects if the other side moved
+        // it since this run started).
+        console.log(`  ⚠ ${shadow}: ${targetRemote} diverged; advancing with --force-with-lease (--allow-shadow-force).`);
+        forceLease = currentSHA;
       }
     }
 
     if (dryRun) {
-      console.log(`  [DRY RUN] would push ${replayedSHA} → ${targetRemote}/${shadow}`);
+      console.log(`  [DRY RUN] would ${forceLease ? "force-push (with lease) " : "push "}${replayedSHA} → ${targetRemote}/${shadow}`);
       continue;
     }
 
-    console.log(`  Pushing to ${targetRemote}/${shadow}...`);
-    const pushRes = git(["push", targetRemote, `${replayedSHA}:refs/heads/${shadow}`], { safe: true });
+    console.log(`  ${forceLease ? "Force-pushing (with lease)" : "Pushing"} to ${targetRemote}/${shadow}...`);
+    const pushArgs = forceLease
+      ? ["push", `--force-with-lease=refs/heads/${shadow}:${forceLease}`, targetRemote, `${replayedSHA}:refs/heads/${shadow}`]
+      : ["push", targetRemote, `${replayedSHA}:refs/heads/${shadow}`];
+    const pushRes = git(pushArgs, { safe: true });
     if (!pushRes.ok) {
       console.error(`  ✘ ${shadow}: push failed: ${pushRes.stderr}`);
       failures++;
@@ -337,6 +357,9 @@ const USAGE = `Usage: npx tsx shadow-sync.ts [options]
       --tags           Also sync tags (off by default)
       --allow-many-commits   Override the >300-commits-per-sync safety limit
       --allow-large-commits  Override the >10MB-per-commit safety limit
+      --allow-shadow-force   On shadow divergence (rewritten source history),
+                             force-push the replay with --force-with-lease
+                             instead of failing closed
   -h, --help           Show this help`;
 
 if (require.main === module) {
@@ -352,6 +375,7 @@ if (require.main === module) {
         tags:        { type: "boolean" },
         "allow-many-commits":  { type: "boolean" },
         "allow-large-commits": { type: "boolean" },
+        "allow-shadow-force":  { type: "boolean" },
         help:        { type: "boolean", short: "h" },
       },
       strict: true,
@@ -374,6 +398,7 @@ if (require.main === module) {
     tags: (values.tags as boolean | undefined) ?? false,
     allowManyCommits: (values["allow-many-commits"] as boolean | undefined) ?? false,
     allowLargeCommits: (values["allow-large-commits"] as boolean | undefined) ?? false,
+    allowShadowForce: (values["allow-shadow-force"] as boolean | undefined) ?? false,
     stream: true,
   });
 

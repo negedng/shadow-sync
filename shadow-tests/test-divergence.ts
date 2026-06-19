@@ -216,6 +216,53 @@ function runConcurrentMerges(): void {
   }
 }
 
+// ── D. --allow-shadow-force: opt-in force-with-lease on divergence ─────────
+function runShadowForce(): void {
+  const env = createTestEnv("shadow-force");
+  try {
+    commitOnRemote(env, { "a.ts": "A\n" }, "Add A");
+    commitOnRemote(env, { "b.ts": "B\n" }, "Add B");
+    assertEqual(runCiSync(env).status, 0, "[shadow-force] initial sync should succeed");
+    assertEqual(readShadowFile(env, "b.ts"), "B\n", "[shadow-force] B synced");
+
+    const mainShadowRef = `b-${env.subdir}/main`;
+    const before = git(`rev-parse origin/${mainShadowRef}`, env.localRepo);
+
+    // Rewrite source history: drop B, add C in its place.
+    const aSha = git("rev-parse HEAD~1", env.remoteWorking);
+    git(`reset --hard ${aSha}`, env.remoteWorking);
+    git("push origin main --force", env.remoteWorking);
+    commitOnRemote(env, { "c.ts": "C\n" }, "Add C");
+
+    // Without the flag: fails closed, shadow unchanged.
+    const blocked = runCiSync(env);
+    assertNotEqual(blocked.status, 0, "[shadow-force] diverged sync fails without the flag");
+    assertIncludes(blocked.stderr + blocked.stdout, "--allow-shadow-force",
+      "[shadow-force] error names the override flag");
+    git("fetch origin", env.localRepo);
+    assertEqual(git(`rev-parse origin/${mainShadowRef}`, env.localRepo), before,
+      "[shadow-force] shadow head must NOT advance without the flag");
+
+    // With the flag: force-with-lease advances the shadow to the rewritten replay.
+    const forced = runCiSync(env, { allowShadowForce: true });
+    assertEqual(forced.status, 0, "[shadow-force] sync with --allow-shadow-force should succeed");
+    assertIncludes(forced.stdout, "force-with-lease", "[shadow-force] logs the lease-guarded push");
+    git("fetch origin", env.localRepo);
+    assertNotEqual(git(`rev-parse origin/${mainShadowRef}`, env.localRepo), before,
+      "[shadow-force] shadow head advanced to the rewritten replay");
+    assertEqual(readShadowFile(env, "c.ts"), "C\n", "[shadow-force] rewritten commit C now on shadow");
+    assertEqual(readShadowFile(env, "b.ts"), null, "[shadow-force] dropped commit B no longer on shadow");
+
+    // Idempotent: a follow-up sync fast-forwards cleanly (no divergence).
+    const again = runCiSync(env);
+    assertEqual(again.status, 0, "[shadow-force] follow-up sync is clean");
+    assertNotIncludes(again.stderr + again.stdout, "diverged with different tree",
+      "[shadow-force] no divergence after the forced advance");
+  } finally {
+    env.cleanup();
+  }
+}
+
 export default function run(): void {
   // Not a filter test — wildcard.
   setTestBranchAllowlist({ origin: ["**"], team: ["**"] });
@@ -223,6 +270,7 @@ export default function run(): void {
     runForceRewrite();
     runPushDiverged();
     runConcurrentMerges();
+    runShadowForce();
   } finally {
     setTestBranchAllowlist();
   }

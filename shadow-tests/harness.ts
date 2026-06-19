@@ -276,7 +276,7 @@ export function trailerKeyOf(env: TestEnv, from: "a" | "b", remote?: RemoteInfo)
 /** Apply test overrides and run sync in-process. */
 function runSyncInProcess(env: TestEnv, opts: {
   from: "a" | "b"; pair?: string; dryRun?: boolean; tags?: boolean;
-  allowManyCommits?: boolean; allowLargeCommits?: boolean;
+  allowManyCommits?: boolean; allowLargeCommits?: boolean; allowShadowForce?: boolean;
   maxCommitsPerSync?: number; maxCommitBytes?: number;
 }): RunResult {
   // Orchestrator mode reads source state from the remote-tracking ref. Tests
@@ -303,6 +303,7 @@ function runSyncInProcess(env: TestEnv, opts: {
     tags: opts.tags,
     allowManyCommits: opts.allowManyCommits,
     allowLargeCommits: opts.allowLargeCommits,
+    allowShadowForce: opts.allowShadowForce,
   });
 
   return {
@@ -315,7 +316,7 @@ function runSyncInProcess(env: TestEnv, opts: {
 /** Pull: replay external remote commits into shadow branches on origin. */
 export function runCiSync(env: TestEnv, opts: {
   dryRun?: boolean; tags?: boolean;
-  allowManyCommits?: boolean; allowLargeCommits?: boolean;
+  allowManyCommits?: boolean; allowLargeCommits?: boolean; allowShadowForce?: boolean;
   maxCommitsPerSync?: number; maxCommitBytes?: number;
 } = {}): RunResult {
   return runSyncInProcess(env, { from: "b", ...opts });
