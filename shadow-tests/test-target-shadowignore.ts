@@ -11,7 +11,7 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import { createTestEnv, setTestBranchAllowlist, commitOnRemote, runCiSync, readShadowFile } from "./harness";
-import { compileShadowIgnoreLine, pathIgnored, IgnoreRule } from "../shadow-common";
+import { compileShadowIgnoreLine, pathIgnored, computeAutoIgnorePatterns, IgnoreRule } from "../shadow-common";
 import { assertEqual } from "./assert";
 
 // ── Unit: the gitignore-faithful .shadowignore rule engine ──────────────────
@@ -81,7 +81,20 @@ import { assertEqual } from "./assert";
   check(hard, ".shadowignore", true, "precedence: appended hard rule overrides user `!`");
   check(hard, "a/.shadowignore", true, "precedence: hard rule matches nested .shadowignore");
 
-  console.log("PASS — .shadowignore rule engine (unit): negation, ignored-parent, dir-only, nesting, globs.");
+  // 10. Contract lock: auto-ignore is STRUCTURAL — computed by
+  //     computeAutoIgnorePatterns from the mapping topology, NOT folded into the
+  //     diff-overlay rule set (readShadowIgnorePatterns no longer accepts it; the
+  //     overlay relies on owner-routing). It is applied only in spliceMappings,
+  //     which the round-trip assertion in test-autoignore-nested-mapping covers.
+  //     Here we pin that the structural strip still exists for nested mappings.
+  const auto = computeAutoIgnorePatterns({
+    mappings: [{ a: "leaf", b: "" }, { a: "common", b: "src/common" }],
+  } as any);
+  check(auto[0].b, "src/common/util.ts", true, "auto-ignore: parent mapping strips nested sibling subtree");
+  check(auto[0].b, "other/util.ts", false, "auto-ignore: parent mapping keeps its own content");
+  assertEqual(auto[1].b.length, 0, "auto-ignore: the nested (leaf) mapping has no sibling-strip rules");
+
+  console.log("PASS — .shadowignore rule engine (unit): negation, ignored-parent, dir-only, nesting, globs, auto-ignore.");
 }
 
 const env = createTestEnv("target-shadowignore", "frontend");

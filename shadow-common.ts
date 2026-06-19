@@ -96,7 +96,8 @@ interface DirectionConfig {
    *  carrying each mapping's original idx. */
   mappingsByDepth: Array<DirMappingDirected & { idx: number }>;
   /** Per-mapping ignores stripping content owned by a sibling mapping nested
-   *  under this one's source/target dir. Indexed by mapping idx. */
+   *  under this one's source/target dir. Indexed by mapping idx. Applied only in
+   *  spliceMappings — the diff overlay relies on owner-routing instead. */
   autoIgnoreBySourceIdx: IgnoreRule[][];
   autoIgnoreByTargetIdx: IgnoreRule[][];
   identityByEmail: Map<string, RepoIdentity>;
@@ -917,8 +918,7 @@ function commitReplayedBlobShas(c: TopoCommit, dc: DirectionConfig): string[] {
   const parent = c.parents[0] ?? EMPTY_TREE;
   const diff = diffSyncedDirs(parent, c.hash, dc);
   if (!diff.ok) return [];  // size unknown — count check / replay surfaces failures
-  const ignoreBySrc = dc.mappings.map((m, i) =>
-    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], c.parents[0]));
+  const ignoreBySrc = sourceIgnoreByIdx(dc, c.hash, c.parents[0]);
   return diff.entries
     .filter(e => e.status !== "D" && routeSourcePath(e.filePath, dc, ignoreBySrc) !== null)
     .map(e => e.newHash);
@@ -982,8 +982,7 @@ function isLoadBearing(
     if (!slicePresent(c.hash, m.source) || !slicePresent(p1, m.source)) return true;
   }
 
-  const ignoreBySrc = dc.mappings.map((m, i) =>
-    readShadowIgnorePatterns(c.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], p1));
+  const ignoreBySrc = sourceIgnoreByIdx(dc, c.hash, p1);
   if (sliceChangedVsParent(p1, c.hash, dc, ignoreBySrc)) return true;
 
   if (c.parents.length === 1) return false;
@@ -1158,7 +1157,7 @@ function nestedRelativeIgnorePatterns(outerPath: string, innerPath: string): Ign
 
 // A mapping's slice excludes content owned by sibling mappings nested under it
 // (e.g. primary at "" with a sibling at "src/common").
-function computeAutoIgnorePatterns(
+export function computeAutoIgnorePatterns(
   pair: SyncPair,
 ): { a: IgnoreRule[]; b: IgnoreRule[] }[] {
   return pair.mappings.map(m => {
@@ -1179,23 +1178,34 @@ function computeAutoIgnorePatterns(
 // source-side metadata for shadow-sync, never replayed onto the target.
 const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
 
-// Read .shadowignore files for a mapping: every ancestor from the repo root
-// down to the mapping root, plus every nested file at or below it (recursive),
-// at the commit's snapshot (patterns can evolve through history). User file
-// rules come first (lower precedence); the auto-derived nested-mapping ignores
-// (`extraPatterns`) and the .shadowignore self-strip are appended last as
-// non-negated rules, so a user `!` can never re-include them.
+// The .shadowignore rules governing `dir` at this snapshot: every ancestor file
+// from the repo root down to `dir`, plus every nested file at or below it
+// (patterns can evolve through history). User file rules come first; the
+// self-strip is appended last as a non-negated rule so a user `!` can never
+// re-include .shadowignore files into the replayed tree. Auto-ignore is NOT
+// here — owner-routing makes it redundant on the diff-overlay, and
+// spliceMappings adds it where it is load-bearing.
 function readShadowIgnorePatterns(
   commitHash: string,
-  sourceDir: string,
-  extraPatterns: IgnoreRule[] = [],
+  dir: string,
   parentHash?: string,
 ): IgnoreRule[] {
   return [
-    ...readShadowIgnoreFilePatterns(commitHash, sourceDir, parentHash),
-    ...extraPatterns,
+    ...readShadowIgnoreFilePatterns(commitHash, dir, parentHash),
     { regex: SHADOWIGNORE_SELF_RE, negated: false, dirOnly: false },
   ];
+}
+
+// Per-mapping source-side ignore rules at a source commit; parentHash enables
+// the static-history fast path in readShadowIgnoreFilePatterns.
+function sourceIgnoreByIdx(dc: DirectionConfig, commitHash: string, parentHash?: string): IgnoreRule[][] {
+  return dc.mappings.map(m => readShadowIgnorePatterns(commitHash, m.source, parentHash));
+}
+
+// Per-mapping target-side ignore rules read from the base tree being built on,
+// so they evolve per target branch. Symmetric with sourceIgnoreByIdx.
+function targetIgnoreByIdx(dc: DirectionConfig, baseTree: string): IgnoreRule[][] {
+  return dc.mappings.map(m => readShadowIgnorePatterns(baseTree, m.target));
 }
 
 // Memo of file-derived patterns per (commit-or-tree, mapping-root). Git objects
@@ -1466,7 +1476,7 @@ function buildReplayedTree(opts: {
   // source commit. Unioned with the source patterns in routeSourcePath; blocks
   // incoming changes only (the diff overlay), never purging the base.
   const shadowIgnorePatternsByTargetIdx: IgnoreRule[][] = parentTree
-    ? dc.mappings.map(m => readShadowIgnorePatterns(parentTree, m.target))
+    ? targetIgnoreByIdx(dc, parentTree)
     : [];
 
   // No -M/-C, so renames surface as D+A — we only handle A/M/D/T.
@@ -1549,15 +1559,17 @@ function filterTreeByIgnore(treeSha: string, rules: IgnoreRule[]): string {
   });
 }
 
-/** For each mapping, read `<fromHash>:<m[side]>` (auto-ignore filtered, so
- *  sibling-owned paths don't bleed in) and splice it into `base` at `m.target`.
+/** For each mapping, read `<fromHash>:<m[side]>`, strip it through the side's
+ *  auto-ignore (so sibling-owned nested content doesn't bleed in) plus the
+ *  per-commit file/self rules when supplied (round-trip source splice), then
+ *  splice into `base` at `m.target`.
  *  Returns null if a root slice fails to resolve — caller decides fallback vs halt. */
 function spliceMappings(
   base: string,
   fromHash: string,
   side: "source" | "target",
   dc: DirectionConfig,
-  extraIgnoreByIdx?: IgnoreRule[][],
+  fileSelfRulesByIdx?: IgnoreRule[][],
 ): string | null {
   const autoPatterns = side === "source" ? dc.autoIgnoreBySourceIdx : dc.autoIgnoreByTargetIdx;
   const slices: Array<{ subdir: string; content: string }> = [];
@@ -1572,10 +1584,12 @@ function spliceMappings(
       slices.push({ subdir: m.target, content: emptyTreeSha() });
       continue;
     }
-    // extraIgnoreByIdx (per-commit .shadowignore, round-trip source splice only)
-    // already folds in auto + self-strip via readShadowIgnorePatterns; without
-    // it, fall back to the auto-derived sibling ignores alone.
-    const patterns = extraIgnoreByIdx ? (extraIgnoreByIdx[i] ?? []) : (autoPatterns[i] ?? []);
+    // Auto-ignore always applies here (no owner-routing in a whole-subtree
+    // read, so a sibling's nested content would otherwise bleed in). The
+    // round-trip source splice also passes the per-commit file + self rules.
+    // Self and auto match disjoint path sets, so appending auto after the
+    // file/self rules preserves "auto/self outrank a user `!`" precedence.
+    const patterns = [...(fileSelfRulesByIdx?.[i] ?? []), ...(autoPatterns[i] ?? [])];
     const filtered = filterTreeByIgnore(res.stdout, patterns);
     slices.push({ subdir: m.target, content: filtered });
   }
@@ -2268,11 +2282,11 @@ function replayCommits(opts: {
       }
       const mappedParents = resolved.parents;
 
-      // Per-mapping ignore (self + auto + .shadowignore). Computed before the
-      // base tree so composeMergeBaseTree can filter the round-trip source
-      // splice — the one place fresh, unfiltered source enters the base.
-      const shadowIgnoreBySourceIdx = dc.mappings.map((m, i) =>
-        readShadowIgnorePatterns(commit.hash, m.source, dc.autoIgnoreBySourceIdx[i] ?? [], commit.parents[0]));
+      // Per-mapping source ignore (file rules + self). Computed before the base
+      // tree so composeMergeBaseTree can filter the round-trip source splice —
+      // the one place fresh, unfiltered source enters the base. spliceMappings
+      // re-adds auto-ignore there; the diff overlay relies on owner-routing.
+      const shadowIgnoreBySourceIdx = sourceIgnoreByIdx(dc, commit.hash, commit.parents[0]);
 
       let parentTree: string | null;
       if (mappedParents.length === 0) {
