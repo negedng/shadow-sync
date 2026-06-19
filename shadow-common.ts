@@ -1029,6 +1029,14 @@ function dropNonLoadBearingCommits(
  * Map echo commits (source → target SHA) so they count as already replayed.
  * Keyed on this pair's target-direction trailer only — a sibling pair's
  * trailer must NOT match, so cross-pair commits still replay.
+ *
+ * Import is idempotent, so exactly one genuine echo points at each target. A
+ * cherry-pick copies the trailer verbatim, producing a SECOND commit pointing
+ * at the same target — that is a fresh change, not an echo, and must replay.
+ * Candidates arrive oldest-first, so the first commit per target wins (the
+ * genuine echo) and later duplicates are left unmapped. Absorption packs all
+ * its originals into one trailer on one commit and matchOriginalHash reads only
+ * the first, so distinct echo commits never share a target unless one is a copy.
  */
 function addEchoMappings(
   sourceCommits: TopoCommit[],
@@ -1051,8 +1059,11 @@ function addEchoMappings(
   if (candidates.length === 0) return;
 
   const present = batchObjectsExist(candidates.map(c => c.target));
+  const claimed = new Set<string>();
   for (const { hash, target } of candidates) {
-    if (present.has(target)) syncedShaMap.set(hash, target);
+    if (!present.has(target) || claimed.has(target)) continue;
+    claimed.add(target);
+    syncedShaMap.set(hash, target);
   }
 }
 
@@ -1809,7 +1820,14 @@ function flattenMappings(direct: Map<string, string>, absorbed: AbsorbedMap): Ma
  *  first-parent line (the branch HEAD itself may be outer-only and unmapped).
  *  Squash-absorbed counterparts count only on lineages containing their
  *  absorber — a fork stranded behind a foreign squash keeps its last faithful
- *  tip instead of inheriting the squash's tree. */
+ *  tip instead of inheriting the squash's tree.
+ *
+ *  The walk is monotonic: a candidate target is accepted only if it
+ *  fast-forwards over the next resolvable commit below it. This rejects an echo
+ *  (or rebased echo) whose target DIVERGES from a just-replayed commit beneath
+ *  it on the line — anchoring on it would point the shadow at the echo's foreign
+ *  target and skip the real replayed lineage. A normal round-trip echo, whose
+ *  target legitimately descends from the lineage, is still accepted. */
 function mapBranchesToTargetTips(
   graph: SourceGraph,
   remote: string,
@@ -1825,9 +1843,16 @@ function mapBranchesToTargetTips(
     // Squash-absorbed counterparts stand in only on lineages containing their absorber.
     const resolve = (hash: string): string | undefined =>
       syncedShaMap.get(hash) ?? absorbedMap.get(hash)?.find(e => isSourceAncestor(e.absorber, tip))?.target;
-    const h = firstParentUntil(graph, tip, x => resolve(x) !== undefined);
-    const replayed = h ? resolve(h) : undefined;
-    if (replayed) branchMapping.set(branch, replayed);
+
+    let chosen: string | undefined;
+    for (let h: string | undefined = tip; h; h = graphParentsOf(graph, h)[0]) {
+      const target = resolve(h);
+      if (target === undefined) continue;
+      if (chosen === undefined) chosen = target;        // newest resolvable: provisional tip
+      else if (isSourceAncestor(target, chosen)) break;  // tip fast-forwards over it -> keep tip
+      else chosen = target;                              // tip diverged from it -> demote to it
+    }
+    if (chosen) branchMapping.set(branch, chosen);
   }
   return branchMapping;
 }
@@ -2210,12 +2235,15 @@ function replayCommits(opts: {
         continue;
       }
 
-      // Carries our own trailer → forwarded earlier and merged back; record only.
-      const isEcho = hasTrailer(meta.trailers, replayedKey);
+      // Carries our OWN replay trailer → a cherry-pick (git copies the message
+      // verbatim) of a commit we already replayed. Still replay it — the pick may
+      // re-introduce content the target no longer has — but strip the copied
+      // trailer so it isn't duplicated on the re-emitted commit.
+      const isCherryPickedCopy = hasTrailer(meta.trailers, replayedKey);
 
       if (verbose) {
-        if (isEcho) {
-          console.log(`  [${idx}/${total}] Skipping ${meta.short} (echo from other direction).`);
+        if (isCherryPickedCopy) {
+          console.log(`  [${idx}/${total}] Replaying ${meta.short} (cherry-picked copy of an already-replayed commit).`);
         } else {
           const label = commit.parents.length > 1
             ? `merge commit ${meta.short}`
@@ -2280,7 +2308,7 @@ function replayCommits(opts: {
 
       // One trailer; value lists the direct counterpart first, absorbed next.
       const trailerValue = [commit.hash, ...absorbed].join(" ");
-      const base = isEcho ? stripReplayedTrailers(meta.message, dc) : meta.message;
+      const base = isCherryPickedCopy ? stripReplayedTrailers(meta.message, dc) : meta.message;
       const msg = appendTrailer(base, `${replayedKey}: ${trailerValue}`);
 
       const parentArgs = mappedParents.flatMap(p => ["-p", p]);
@@ -2301,9 +2329,9 @@ function replayCommits(opts: {
         haltRecords.delete(sha);
       }
       if (absorbed.length > 0) {
-        console.log(`  ✓ Replayed${isEcho ? " (recorded)" : ""}, absorbing ${absorbed.length} halted ancestor(s): ${absorbed.map(s => s.slice(0, 7)).join(", ")}.`);
+        console.log(`  ✓ Replayed${isCherryPickedCopy ? " (cherry-picked copy)" : ""}, absorbing ${absorbed.length} halted ancestor(s): ${absorbed.map(s => s.slice(0, 7)).join(", ")}.`);
       } else if (verbose) {
-        console.log(isEcho ? "  ✓ Recorded." : "  ✓ Replayed.");
+        console.log(isCherryPickedCopy ? "  ✓ Replayed (cherry-picked copy)." : "  ✓ Replayed.");
       }
     }
   });
@@ -2336,10 +2364,14 @@ export function mirrorHistory(opts: {
   // Synced: already replayed (source origin) + echo (target origin) with trailer
   const { direct: syncedShaMap, absorbed: absorbedMap } = loadReplayedMappings({ branches, dc });
   console.log(`Found ${syncedShaMap.size} previously replayed commit(s)${absorbedMap.size > 0 ? ` (+${absorbedMap.size} squash-absorbed)` : ""}.`);
+  // Settled from DIRECT replays only (pre-echo): the frontier's "ancestry already
+  // has a verdict" guarantee holds only for commits a prior same-from sync actually
+  // replayed. Echoes enter via the reverse direction and carry no such guarantee —
+  // a genuine commit beneath an echo on the first-parent line would be wrongly
+  // settled-dropped. Must run before addEchoMappings mixes echoes into the map.
+  const settledSourceHash = computeSettledCommits(graph, branches, dc, syncedShaMap, absorbedMap);
   addEchoMappings(sourceCommits, dc, syncedShaMap);
   const syncedSourceHash = new Set([...syncedShaMap.keys(), ...absorbedMap.keys()]);
-  // Commits a prior sync already settled (reachable from the per-branch frontier of newest-replayed commits).
-  const settledSourceHash = computeSettledCommits(graph, branches, dc, syncedShaMap, absorbedMap);
   let newToScan = 0, settledDropped = 0;
   for (const c of sourceCommits) {
     if (syncedSourceHash.has(c.hash)) continue;
