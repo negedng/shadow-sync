@@ -175,6 +175,7 @@ function _runSyncCore(options: SyncOptions): number {
 
       const branchFailures = pushShadowBranches({
         sourceLabel: source.label,
+        sourceRemote: source.remote,
         targetRemote: target.remote,
         branches: validBranches,
         branchMapping: result.branchMapping,
@@ -240,13 +241,14 @@ function _runSyncCore(options: SyncOptions): number {
  */
 function pushShadowBranches(opts: {
   sourceLabel: string;
+  sourceRemote: string;
   targetRemote: string;
   branches: string[];
   branchMapping: Map<string, string>;
   upToDate: boolean;
   dryRun: boolean;
 }): number {
-  const { sourceLabel, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
+  const { sourceLabel, sourceRemote, targetRemote, branches, branchMapping, upToDate, dryRun } = opts;
   let failures = 0;
 
   for (const branch of branches) {
@@ -287,11 +289,19 @@ function pushShadowBranches(opts: {
           console.log(`  ${shadow}: ${targetRemote} has same tree on different topology; leaving target tip in place.`);
           continue;
         }
-        console.error(`✘ ${shadow}: ${targetRemote} diverged with different tree. ` +
-             `Engine cannot fast-forward and force-push is disabled. ` +
-             `Source main may have been rewritten or the shadow ref was edited manually. ` +
-             `Operator must reconcile by either restoring the expected source history or ` +
-             `manually pushing ${replayedSHA} to ${targetRemote}/${shadow}.`);
+        console.error(
+          `✘ ${shadow}: ${targetRemote} diverged with different tree — the engine cannot ` +
+          `fast-forward and never force-pushes shadow refs.\n` +
+          `  Likely cause: source history on '${branch}' was rewritten (rebase / reset --hard / ` +
+          `filter-branch), or the shadow ref was edited by hand.\n` +
+          `  Operator must reconcile one of two ways:\n` +
+          `    A) Rewrite was unintended — restore '${branch}' on '${sourceRemote}' to its pre-rewrite\n` +
+          `       tip and re-run the sync (it fast-forwards again):\n` +
+          `         git push --force-with-lease ${sourceRemote} <old-tip>:${branch}\n` +
+          `    B) Rewrite was intended — advance the shadow to the replay computed this run. Coordinate\n` +
+          `       first: the other side may have merged the old shadow history and must reconcile.\n` +
+          `         git push --force-with-lease ${targetRemote} ${replayedSHA}:refs/heads/${shadow}\n` +
+          `  To avoid this, merge the shadow into the mainline BEFORE rebasing/squashing on top.`);
         failures++;
         continue;
       }
