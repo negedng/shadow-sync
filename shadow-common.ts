@@ -1096,14 +1096,20 @@ function computeSettledCommits(
 
   // Reachability must follow ALL parents — a dropped commit can sit on a
   // non-first-parent side branch below a mapped merge.
-  const stack = [...frontier];
+  return collectReachable(graph, frontier);
+}
+
+// Every commit reachable from `startHashes` over all parent edges.
+function collectReachable(graph: SourceGraph, startHashes: string[]): Set<string> {
+  const seen = new Set<string>();
+  const stack = [...startHashes];
   while (stack.length) {
-    const x = stack.pop()!;
-    if (settled.has(x)) continue;
-    settled.add(x);
-    for (const p of graph.parents.get(x) ?? []) stack.push(p);
+    const h = stack.pop()!;
+    if (seen.has(h)) continue;
+    seen.add(h);
+    for (const p of graph.parents.get(h) ?? []) stack.push(p);
   }
-  return settled;
+  return seen;
 }
 
 // ── Ignore patterns ──────────────────────────────────────────────
@@ -2395,8 +2401,30 @@ export function mirrorHistory(opts: {
 
   // Safety gates — fail closed before any local replay/push work. Each names
   // its override flag so the operator opts in deliberately.
-  if (!allowManyCommits && newCommits.length > MAX_COMMITS_PER_SYNC) {
-    fail(`${newCommits.length} commits to replay exceeds the safety limit of ${MAX_COMMITS_PER_SYNC}. ` +
+  //
+  // A branch with no shadow ref yet is being synced for the first time — adding
+  // it to the filter is the deliberate act, so its backlog is intentional. Once
+  // some branch is established, gate only commits reachable from established
+  // branches; a first-time branch's history is exempt (and logged), while an
+  // accidental push to an established branch still fails closed. The very first
+  // bootstrap (nothing established) gates everything, as before.
+  const establishedBranches = branches.filter(b =>
+    refExists(`${dc.target.remote}/${shadowBranchName(dc.source.label, b)}`));
+  let gatedCommits = newCommits;
+  if (establishedBranches.length > 0 && establishedBranches.length < branches.length) {
+    const tips = establishedBranches
+      .map(b => git(["rev-parse", `${dc.source.remote}/${b}`], { safe: true }))
+      .filter(r => r.ok && r.stdout).map(r => r.stdout.trim());
+    const reachable = collectReachable(graph, tips);
+    gatedCommits = newCommits.filter(c => reachable.has(c.hash));
+    const exempt = newCommits.length - gatedCommits.length;
+    if (exempt > 0) {
+      const newBranches = branches.filter(b => !establishedBranches.includes(b));
+      console.log(`Exempting ${exempt} commit(s) on ${newBranches.length} newly-added branch(es) from the commit-count limit: ${newBranches.join(", ")}.`);
+    }
+  }
+  if (!allowManyCommits && gatedCommits.length > MAX_COMMITS_PER_SYNC) {
+    fail(`${gatedCommits.length} commits to replay exceeds the safety limit of ${MAX_COMMITS_PER_SYNC}. ` +
       `Re-run with --allow-many-commits to override (or raise maxCommitsPerSync in the config).`);
   }
   if (!allowLargeCommits) {
