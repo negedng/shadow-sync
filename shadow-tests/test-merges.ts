@@ -148,6 +148,180 @@ function runTwoParentOuterReconcile(sameOuterFile: boolean): void {
   }
 }
 
+// ── I. resolved halt feeding a downstream merge ─────────────────────────────
+// M1 = merge(a,b) halts on a conflicting outer; branch-c carries a NON-
+// conflicting outer addition; M2 = merge(M1, c) halts too (inherits M1's
+// anchors). After M1 is resolved (hand-built resolution + replay trailer), M2
+// must replay AND carry branch-c's change alongside M1's resolution — the
+// resolved-halt-parent + non-conflicting-sibling composition.
+function runResolvedHaltDownstreamMerge(): void {
+  const env = createTestEnv("resolved-halt-downstream-merge");
+  const local = env.localRepo, team = env.remoteWorking, sub = env.subdir;
+  const shadowPrefix = `b-${sub}`;
+  try {
+    fs.writeFileSync(path.join(team, "shared.txt"), "base\n");
+    git("add shared.txt", team); git('commit -m "Base"', team); git("push origin main", team);
+
+    git("checkout -b branch-a", team);
+    fs.writeFileSync(path.join(team, "shared.txt"), "A\n");
+    fs.writeFileSync(path.join(team, "feat-a.txt"), "a\n");
+    git("add -A", team); git('commit -m "feat A"', team); git("push origin branch-a", team);
+
+    git("checkout main", team); git("checkout -b branch-b", team);
+    fs.writeFileSync(path.join(team, "shared.txt"), "B\n");
+    fs.writeFileSync(path.join(team, "feat-b.txt"), "b\n");
+    git("add -A", team); git('commit -m "feat B"', team); git("push origin branch-b", team);
+
+    git("checkout main", team); git("checkout -b branch-c", team);
+    fs.writeFileSync(path.join(team, "feat-c.txt"), "c\n");
+    git("add -A", team); git('commit -m "feat C"', team); git("push origin branch-c", team);
+
+    assertEqual(runCiSync(env).status, 0, "[resolved-downstream] initial fan-out sync");
+
+    git("fetch origin", local);
+    const newA = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-a`, local), { "outer.txt": "from-A\n" });
+    const newB = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-b`, local), { "outer.txt": "from-B\n" });
+    const newC = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-c`, local), { "outer-c.txt": "from-C\n" });
+    git(`push origin ${newA}:refs/heads/${shadowPrefix}/branch-a --force`, local);
+    git(`push origin ${newB}:refs/heads/${shadowPrefix}/branch-b --force`, local);
+    git(`push origin ${newC}:refs/heads/${shadowPrefix}/branch-c --force`, local);
+
+    git("checkout -b branchH branch-a", team);
+    try { git("merge --no-ff --no-commit branch-b", team); } catch { /* inner conflict */ }
+    fs.writeFileSync(path.join(team, "shared.txt"), "RESOLVED\n");
+    git("add shared.txt", team);
+    git('commit -m "M1: merge branch-b"', team);
+    const M1 = git("rev-parse HEAD", team);
+    git('merge --no-ff branch-c -m "M2: merge branch-c"', team);
+    git("push origin branchH", team);
+
+    // Both M1 and M2 halt: M1 on the conflicting outer, M2 inheriting M1's anchors.
+    const r1 = runCiSync(env);
+    assertEqual(r1.status, 1, "[resolved-downstream] M1 + M2 both halt before resolution");
+    assertIncludes(r1.stdout, "2 halt(s) (2 commit(s) blocked)", "[resolved-downstream] count: two halts");
+
+    // Resolve M1: hand-build a resolution on branchH's shadow with M1's mapped
+    // parents and the replay trailer naming M1.
+    const trailer = trailerKeyOf(env, "b");
+    const idx = path.join(env.tmpDir, "idx-resolve");
+    const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
+    git(`read-tree "${newA}^{tree}"`, local, { env: idxEnv });
+    const featB = git(`rev-parse ${newB}:${sub}/feat-b.txt`, local);
+    git(`update-index --add --cacheinfo 100644,${featB},${sub}/feat-b.txt`, local, { env: idxEnv });
+    const sharedBlob = git("hash-object -w --stdin", local, { input: "RESOLVED\n" });
+    git(`update-index --add --cacheinfo 100644,${sharedBlob},${sub}/shared.txt`, local, { env: idxEnv });
+    const outerBlob = git("hash-object -w --stdin", local, { input: "resolved\n" });
+    git(`update-index --add --cacheinfo 100644,${outerBlob},outer.txt`, local, { env: idxEnv });
+    const resolvedTree = git("write-tree", local, { env: idxEnv });
+    fs.rmSync(idx, { force: true });
+    const msgFile = path.join(env.tmpDir, "resolve-msg");
+    fs.writeFileSync(msgFile, `Manual resolution of M1\n\n${trailer}: ${M1}\n`);
+    const resolveCommit = git(`commit-tree ${resolvedTree} -p ${newA} -p ${newB} -F "${msgFile}"`, local);
+    fs.rmSync(msgFile, { force: true });
+    git(`push origin ${resolveCommit}:refs/heads/${shadowPrefix}/branchH --force`, local);
+
+    // M2 now replays with [M1_resolved, c']; the non-conflicting change must survive.
+    const r2 = runCiSync(env);
+    assertEqual(r2.status, 0, "[resolved-downstream] M2 replays once M1 is resolved");
+    assertNotIncludes(r2.stdout, "halt(s)", "[resolved-downstream] no halts after resolution");
+
+    git(`fetch origin ${shadowPrefix}/branchH`, local);
+    const ref = `origin/${shadowPrefix}/branchH`;
+    assertEqual(git(`log -1 --format=%P ${ref}`, local).split(/\s+/).filter(Boolean).length, 2,
+      "[resolved-downstream] M2 replay is a 2-parent merge");
+    assertEqual(git(`show ${ref}:outer-c.txt`, local), "from-C",
+      "[resolved-downstream] branch-c's non-conflicting outer change survived into M2");
+    assertEqual(git(`show ${ref}:outer.txt`, local), "resolved",
+      "[resolved-downstream] M1's resolved outer preserved");
+    assertEqual(git(`show ${ref}:${sub}/shared.txt`, local), "RESOLVED",
+      "[resolved-downstream] M1's inner resolution preserved");
+    assertEqual(git(`show ${ref}:${sub}/feat-c.txt`, local), "c",
+      "[resolved-downstream] branch-c's inner change present");
+  } finally {
+    env.cleanup();
+  }
+}
+
+// ── J. source-side commit cannot resolve an outer (mono-owned) divergence ───
+// M1 = merge(a,b) outer-diverges -> halt. M2 = merge(M1,c) and M3 = merge(M2,r)
+// follow on the source. A source-side M3 CANNOT reconcile the outer (it lives
+// in the mapped-parent anchors, which the source can't author) — all three
+// halt. Only a mono-side reconciliation (mapping M1) heals the chain, after
+// which M1->M2->M3 all replay with every branch's content preserved.
+function runSourceSideCannotResolveOuter(): void {
+  const env = createTestEnv("source-side-cannot-resolve-outer");
+  const local = env.localRepo, team = env.remoteWorking, sub = env.subdir;
+  const shadowPrefix = `b-${sub}`;
+  try {
+    fs.writeFileSync(path.join(team, "shared.txt"), "base\n");
+    git("add shared.txt", team); git('commit -m "Base"', team); git("push origin main", team);
+    const branches: [string, Record<string, string>][] = [
+      ["branch-a", { "shared.txt": "A\n", "feat-a.txt": "a\n" }],
+      ["branch-b", { "shared.txt": "B\n", "feat-b.txt": "b\n" }],
+      ["branch-c", { "feat-c.txt": "c\n" }],
+      ["branch-r", { "feat-r.txt": "r\n" }],
+    ];
+    for (const [br, files] of branches) {
+      git("checkout main", team); git(`checkout -b ${br}`, team);
+      for (const [f, c] of Object.entries(files)) fs.writeFileSync(path.join(team, f), c);
+      git("add -A", team); git(`commit -m "${br}"`, team); git(`push origin ${br}`, team);
+    }
+    assertEqual(runCiSync(env).status, 0, "[src-cant-resolve] initial fan-out sync");
+
+    git("fetch origin", local);
+    const newA = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-a`, local), { "outer.txt": "from-A\n" });
+    const newB = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-b`, local), { "outer.txt": "from-B\n" });
+    git(`push origin ${newA}:refs/heads/${shadowPrefix}/branch-a --force`, local);
+    git(`push origin ${newB}:refs/heads/${shadowPrefix}/branch-b --force`, local);
+
+    git("checkout -b branchH branch-a", team);
+    try { git("merge --no-ff --no-commit branch-b", team); } catch { /* inner conflict */ }
+    fs.writeFileSync(path.join(team, "shared.txt"), "RESOLVED\n");
+    git("add shared.txt", team); git('commit -m "M1: merge branch-b"', team);
+    const M1 = git("rev-parse HEAD", team);
+    git('merge --no-ff branch-c -m "M2: merge branch-c"', team);
+    git('merge --no-ff branch-r -m "M3: merge branch-r"', team);
+    git("push origin branchH", team);
+
+    // The source-side M3 does NOT resolve the outer: M1, M2, M3 all halt.
+    const r1 = runCiSync(env);
+    assertEqual(r1.status, 1, "[src-cant-resolve] source-side M3 cannot fix the outer — chain halts");
+    assertIncludes(r1.stdout, "3 halt(s) (3 commit(s) blocked)", "[src-cant-resolve] all three halt");
+
+    // Reconcile on mono (hand-built resolution mapping M1). Whole chain cascades.
+    const trailer = trailerKeyOf(env, "b");
+    const idx = path.join(env.tmpDir, "idx-resolve");
+    const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
+    git(`read-tree "${newA}^{tree}"`, local, { env: idxEnv });
+    const featB = git(`rev-parse ${newB}:${sub}/feat-b.txt`, local);
+    git(`update-index --add --cacheinfo 100644,${featB},${sub}/feat-b.txt`, local, { env: idxEnv });
+    const sharedBlob = git("hash-object -w --stdin", local, { input: "RESOLVED\n" });
+    git(`update-index --add --cacheinfo 100644,${sharedBlob},${sub}/shared.txt`, local, { env: idxEnv });
+    const outerBlob = git("hash-object -w --stdin", local, { input: "resolved\n" });
+    git(`update-index --add --cacheinfo 100644,${outerBlob},outer.txt`, local, { env: idxEnv });
+    const resolvedTree = git("write-tree", local, { env: idxEnv });
+    fs.rmSync(idx, { force: true });
+    const msgFile = path.join(env.tmpDir, "resolve-msg");
+    fs.writeFileSync(msgFile, `Manual resolution of M1\n\n${trailer}: ${M1}\n`);
+    const resolveCommit = git(`commit-tree ${resolvedTree} -p ${newA} -p ${newB} -F "${msgFile}"`, local);
+    fs.rmSync(msgFile, { force: true });
+    git(`push origin ${resolveCommit}:refs/heads/${shadowPrefix}/branchH --force`, local);
+
+    const r2 = runCiSync(env);
+    assertEqual(r2.status, 0, "[src-cant-resolve] mono reconciliation heals the whole chain");
+    assertNotIncludes(r2.stdout, "halt(s)", "[src-cant-resolve] no halts after reconciliation");
+
+    git(`fetch origin ${shadowPrefix}/branchH`, local);
+    const ref = `origin/${shadowPrefix}/branchH`;
+    assertEqual(git(`show ${ref}:outer.txt`, local), "resolved", "[src-cant-resolve] reconciled outer on M3'");
+    assertEqual(git(`show ${ref}:${sub}/shared.txt`, local), "RESOLVED", "[src-cant-resolve] M1 inner resolution on M3'");
+    assertEqual(git(`show ${ref}:${sub}/feat-c.txt`, local), "c", "[src-cant-resolve] M2's branch-c content on M3'");
+    assertEqual(git(`show ${ref}:${sub}/feat-r.txt`, local), "r", "[src-cant-resolve] M3's branch-r content on M3'");
+  } finally {
+    env.cleanup();
+  }
+}
+
 // ── A. merge-topology: shared SHAs, evil merges, octopus merges ────────────
 function runMergeTopology(): void {
   const env = createTestEnv("pull-merge-topology");
@@ -894,6 +1068,8 @@ export default function run(): void {
     runManualMergeRecovery();
     runTwoParentOuterReconcile(false);  // mergeable outer + inner conflict -> replays
     runTwoParentOuterReconcile(true);   // genuine outer conflict -> still halts
+    runResolvedHaltDownstreamMerge();   // resolved halt feeding a downstream merge
+    runSourceSideCannotResolveOuter();  // source-side commit can't fix a mono-owned outer divergence
   } finally {
     setTestBranchAllowlist();
   }
