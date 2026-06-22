@@ -978,6 +978,7 @@ function isLoadBearing(
 
   // A source slice missing at c or p1 (non-root dir not born yet, or just
   // vanished) always load-bears.
+  // TODO: XOR is enough
   for (const m of dc.mappings) {
     if (!slicePresent(c.hash, m.source) || !slicePresent(p1, m.source)) return true;
   }
@@ -1174,9 +1175,12 @@ export function computeAutoIgnorePatterns(
   });
 }
 
-// Always strip .shadowignore files themselves from the synced tree — they're
-// source-side metadata for shadow-sync, never replayed onto the target.
-const SHADOWIGNORE_SELF_RE = /^(?:.*\/)?\.shadowignore$/;
+// The .shadowignore filename: source-side metadata for shadow-sync, never
+// replayed onto the target.
+const SHADOWIGNORE_FILE = ".shadowignore";
+
+// Always strip .shadowignore files themselves from the synced tree.
+const SHADOWIGNORE_SELF_RE = new RegExp(`^(?:.*/)?${escapeRegex(SHADOWIGNORE_FILE)}$`);
 
 // The .shadowignore rules governing `dir` at this snapshot: every ancestor file
 // from the repo root down to `dir`, plus every nested file at or below it
@@ -1217,9 +1221,9 @@ function ancestorIgnorePaths(sourceDir: string): string[] {
   const out: string[] = [];
   if (sourceDir) {
     const parts = sourceDir.split("/");
-    for (let i = parts.length - 1; i > 0; i--) out.push(`${parts.slice(0, i).join("/")}/.shadowignore`);
+    for (let i = parts.length - 1; i > 0; i--) out.push(`${parts.slice(0, i).join("/")}/${SHADOWIGNORE_FILE}`);
   }
-  out.push(".shadowignore");
+  out.push(SHADOWIGNORE_FILE);
   return out;
 }
 
@@ -1272,7 +1276,7 @@ function readShadowIgnoreFilePatterns(commitHash: string, sourceDir: string, par
 
   const patterns: IgnoreRule[] = [];
   for (const ignorePath of [...new Set(found)]) {
-    const dir = ignorePath === ".shadowignore" ? "" : ignorePath.slice(0, -"/.shadowignore".length);
+    const dir = ignorePath === SHADOWIGNORE_FILE ? "" : ignorePath.slice(0, -(SHADOWIGNORE_FILE.length + 1));
     const res = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
     if (!res.ok || !res.stdout) continue;
     for (const raw of res.stdout.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"))) {
