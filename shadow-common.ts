@@ -2049,6 +2049,9 @@ interface HaltRecord {
 interface ReplayHalts {
   haltedSources: Set<string>;
   haltRecords: Map<string, HaltRecord>;
+  /** Commits dropped mid-replay because their source content was missing —
+   *  neither replayed nor halted, so excluded from the replayed count. */
+  skipped: number;
 }
 
 // Operator text per halt cause: `summary` for the one-line log, `failure` for
@@ -2265,6 +2268,7 @@ function replayCommits(opts: {
 
   const haltedSources = new Set<string>();
   const haltRecords = new Map<string, HaltRecord>();
+  let skipped = 0;
 
   withTmpIndex("replay", idxEnv => {
     const tmpIndex = idxEnv.GIT_INDEX_FILE;
@@ -2347,6 +2351,7 @@ function replayCommits(opts: {
 
       if (!tree) {
         if (verbose) console.log(`  Skipping ${meta.short} (source content missing).`);
+        skipped++;
         continue;
       }
 
@@ -2382,7 +2387,7 @@ function replayCommits(opts: {
     }
   });
 
-  return { haltedSources, haltRecords };
+  return { haltedSources, haltRecords, skipped };
 }
 
 /** Replay one side of a pair onto the other; `from` selects the source. */
@@ -2491,7 +2496,7 @@ export function mirrorHistory(opts: {
     targetInit = initRes.stdout.split("\n")[0] || null;
   }
 
-  const { haltedSources, haltRecords } = replayCommits({ newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph });
+  const { haltedSources, haltRecords, skipped } = replayCommits({ newCommits, syncedShaMap, absorbedMap, targetInit, dc, graph });
 
   // Surface ORIGINAL halts (diagnostic present). Stranded propagated commits
   // whose root halt was squash-absorbed on another lineage get a promoted
@@ -2523,11 +2528,14 @@ export function mirrorHistory(opts: {
   }
 
   console.log();
-  const replayedCount = newCommits.length - haltedSources.size;
+  // Skipped commits (missing source content) are neither replayed nor halted,
+  // so exclude them from the replayed count and surface them in the accounting.
+  const replayedCount = newCommits.length - haltedSources.size - skipped;
+  const skippedNote = skipped > 0 ? ` (${skipped} skipped: source content missing)` : "";
   if (haltedBranches.length > 0) {
-    console.log(`Done. ${replayedCount} commit(s) replayed; ${haltedBranches.length} halt(s) (${haltedSources.size} commit(s) blocked).`);
+    console.log(`Done. ${replayedCount} commit(s) replayed; ${haltedBranches.length} halt(s) (${haltedSources.size} commit(s) blocked)${skippedNote}.`);
   } else {
-    console.log(`Done. ${newCommits.length} commit(s) replayed.`);
+    console.log(`Done. ${replayedCount} commit(s) replayed${skippedNote}.`);
   }
 
   return {

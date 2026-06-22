@@ -103,6 +103,10 @@ export default function run(): void {
     assertEqual(r.status, 1, "[dropped-mask] sync halts on the unresolvable outer divergence");
     assertIncludes(r.stdout + r.stderr, H.slice(0, 7), "[dropped-mask] halt names the source merge H");
     assertIncludes(r.stdout + r.stderr, "outer-state divergence", "[dropped-mask] halt cause is outer divergence");
+    // Accounting: H and C are the only new commits (D dropped); both halt, none
+    // replays, none skipped. Pins the replayed/halt/blocked counts.
+    assertIncludes(r.stdout, "0 commit(s) replayed; 2 halt(s) (2 commit(s) blocked).",
+      "[dropped-mask] count line: 0 replayed, 2 halts, 2 blocked, 0 skipped");
 
     // Core invariant: no commit on the branchH shadow carries branch-m's content
     // (feat-m) while missing H's second-parent content (feat-b). The pre-fix bug

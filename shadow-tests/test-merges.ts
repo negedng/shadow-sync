@@ -125,11 +125,13 @@ function runTwoParentOuterReconcile(sameOuterFile: boolean): void {
     if (sameOuterFile) {
       assertEqual(r.status, 1, `[${tag}] genuine outer conflict must still halt`);
       assertIncludes(r.stderr, "cannot auto-resolve replay parent tree", `[${tag}] error names the outer-divergence halt`);
+      assertIncludes(r.stdout, "1 halt(s) (1 commit(s) blocked)", `[${tag}] count: one halt, one blocked`);
       return;
     }
 
     assertEqual(r.status, 0, `[${tag}] mergeable outer + inner conflict must NOT halt`);
     assertNotIncludes(r.stdout + r.stderr, "cannot auto-resolve replay parent tree", `[${tag}] no spurious outer-divergence halt`);
+    assertNotIncludes(r.stdout, "halt(s)", `[${tag}] count: no halts reported`);
 
     git(`fetch origin ${shadowPrefix}/branch-a`, local);
     const mergeParents = git(`log -1 --format=%P ${branchAShadow}`, local).split(/\s+/).filter(Boolean);
@@ -783,6 +785,7 @@ function runManualMergeRecovery(): void {
     const r2 = runCiSync(env);
     assertEqual(r2.status, 1, "[recovery] sync fails on outer divergence");
     assertIncludes(r2.stderr, "cannot auto-resolve replay parent tree", "[recovery] error names the failure");
+    assertIncludes(r2.stdout, "1 halt(s) (1 commit(s) blocked)", "[recovery] count: one halt, one blocked");
     assertIncludes(r2.stderr, srcMerge, "[recovery] error includes full source merge SHA");
     assertIncludes(r2.stderr, newA, "[recovery] error includes mapped parent A");
     assertIncludes(r2.stderr, newB, "[recovery] error includes mapped parent B");
