@@ -1722,12 +1722,6 @@ function composeMergeBaseTree(opts: {
 // ── Ancestry resolution ──────────────────────────────────────────────────────
 
 
-/** For parents outside the sync's scope, anchor to the newest replayed ancestor. */
-function findEchoAnchor(graph: SourceGraph, parentHash: string, syncedShaMap: Map<string, string>): string | null {
-  const h = firstParentUntil(graph, parentHash, x => syncedShaMap.has(x));
-  return h ? syncedShaMap.get(h)! : null;
-}
-
 // True iff `ancestor` is an ancestor of (or equals) `descendant` on the source
 // side. Missing objects read as not-an-ancestor — fail closed toward halting.
 function isSourceAncestor(ancestor: string, descendant: string): boolean {
@@ -1748,7 +1742,8 @@ interface ResolvedParents {
  * 2. parent is in a Halt state (substitute its anchors)
  * 3. parent squash-absorbed: its squash stands in only if this commit
  *    descends from the absorber; foreign lineages halt instead
- * 4. unknown parents replaced by echo anchor or root
+ * 4. unmapped parents: first-parent walk to the nearest synced or halted
+ *    ancestor — a masked halt substitutes its anchors, else echo anchor or root
  */
 function resolveHaltAwareParents(
   commit: TopoCommit,
@@ -1783,8 +1778,21 @@ function resolveHaltAwareParents(
       }
       pushUnique(valid.target);
     } else {
-      // not mapped, and either not halted or halted without anchors
-      pushUnique(findEchoAnchor(graph, parentHash, syncedShaMap) ?? targetInit);
+      // Unmapped parent. Walk first-parent to the nearest mapped-or-halted
+      // ancestor — dropped intermediaries are transparent (matching the gate
+      // and collectAbsorbedHalted). A halt masked behind dropped commits
+      // substitutes its anchors, exactly as a direct halted parent would;
+      // anchoring below it would drop the halt's content. Otherwise anchor to
+      // the synced ancestor (echo) or the target root.
+      const anchor = firstParentUntil(graph, parentHash, x => syncedShaMap.has(x) || haltedSources.has(x));
+      const maskedAnchors = anchor !== undefined && !syncedShaMap.has(anchor)
+        ? haltRecords.get(anchor)?.anchorCommits
+        : undefined;
+      if (maskedAnchors && maskedAnchors.length > 0) {
+        for (const ac of maskedAnchors) pushUnique(ac);
+      } else {
+        pushUnique((anchor !== undefined ? syncedShaMap.get(anchor) : undefined) ?? targetInit);
+      }
     }
   }
   return { parents };
@@ -1792,7 +1800,10 @@ function resolveHaltAwareParents(
 
 /**
  * Halted unmapped ancestors reachable through the commit's parents — encoded
- * as extra trailers on its replay so later runs treat them as replayed.
+ * as extra trailers on its replay so later runs treat them as replayed. A
+ * dropped (non-halted, unmapped) commit is transparent on its first-parent
+ * line, so a halt masked behind one is still reached — matching the masked
+ * halt that resolveHaltAwareParents substitutes anchors for.
  */
 function collectAbsorbedHalted(
   commit: TopoCommit,
@@ -1807,9 +1818,14 @@ function collectAbsorbedHalted(
     const p = stack.pop()!;
     if (seen.has(p) || syncedShaMap.has(p)) continue;
     seen.add(p);
-    if (!haltedSources.has(p)) continue;
-    absorbed.add(p);
-    for (const pp of graphParentsOf(graph, p)) stack.push(pp);
+    if (haltedSources.has(p)) {
+      absorbed.add(p);
+      for (const pp of graphParentsOf(graph, p)) stack.push(pp);
+    } else {
+      // Dropped intermediary: follow only the first-parent line.
+      const fp = graphParentsOf(graph, p)[0];
+      if (fp) stack.push(fp);
+    }
   }
   return [...absorbed];
 }
