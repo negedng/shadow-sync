@@ -1617,16 +1617,22 @@ function firstParentTree(mappedParents: string[], commitShort: string): string {
  */
 function reconcileOuter(mappedParents: string[], dc: DirectionConfig): ComposeResult {
   const targetDirs = targetDirsOf(dc);
-  if (mappedParents.length === 2) {
-    const mergeRes = git(["merge-tree", "--write-tree", mappedParents[0], mappedParents[1]], { safe: true });
-    // Clean auto-merge prints just the tree SHA; a conflict prints a multiline
-    // body, so the full-string match fails and we fall through to agreement.
-    if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) {
-      return { tree: outerOnlyTree(mergeRes.stdout, targetDirs) };
-    }
-  }
   const outers = mappedParents.map(p => outerOnlyTree(p, targetDirs));
+  // Identical outers need no merge — the common fast path.
   if (outers.every(o => o === outers[0])) return { tree: outers[0] };
+  if (mappedParents.length === 2) {
+    // Reconcile the OUTER only: the base's inner comes from the first parent
+    // (composeMergeBaseTree splices it back), so an inner-region conflict is
+    // irrelevant here. Merging the full trees would let such a conflict mask a
+    // cleanly-mergeable outer and halt spuriously. Merge the outer-only trees
+    // against the outer-only merge-base so only genuine outer conflicts halt.
+    const mbRes = git(["merge-base", mappedParents[0], mappedParents[1]], { safe: true });
+    const baseOuter = mbRes.ok && mbRes.stdout ? outerOnlyTree(mbRes.stdout, targetDirs) : EMPTY_TREE;
+    const mergeRes = git(["merge-tree", "--write-tree", `--merge-base=${baseOuter}`, outers[0], outers[1]], { safe: true });
+    // Clean merge prints just the tree SHA (already outer-only); a conflict
+    // prints a multiline body, so the full-string match fails and we halt.
+    if (mergeRes.ok && /^[0-9a-f]{40}$/.test(mergeRes.stdout)) return { tree: mergeRes.stdout };
+  }
   return { halt: "outer-divergence" };
 }
 

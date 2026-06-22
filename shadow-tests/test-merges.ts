@@ -48,6 +48,104 @@ function extractLocalSHA(log: string, messagePrefix: string): string {
   throw new Error(`Could not find commit with message prefix "${messagePrefix}" in log`);
 }
 
+// Add `files` (root-relative path -> content) to a shadow commit's tree,
+// preserving its inner subtree + replay trailer (the full message). Returns the
+// rewritten commit SHA. Simulates outer state arriving via a sibling pair's
+// splice — outer paths the engine has nothing to fall back to.
+function injectOuterFiles(localRepo: string, tmpDir: string, shadowSha: string, files: Record<string, string>): string {
+  const idx = path.join(tmpDir, `idx-${shadowSha.slice(0, 7)}`);
+  const idxEnv = { ...process.env, GIT_INDEX_FILE: idx };
+  git(`read-tree "${shadowSha}^{tree}"`, localRepo, { env: idxEnv });
+  for (const [p, body] of Object.entries(files)) {
+    const blob = git("hash-object -w --stdin", localRepo, { input: body });
+    git(`update-index --add --cacheinfo 100644,${blob},${p}`, localRepo, { env: idxEnv });
+  }
+  const newTree = git("write-tree", localRepo, { env: idxEnv });
+  fs.rmSync(idx, { force: true });
+  const parents = git(`log -1 --format=%P ${shadowSha}`, localRepo).split(/\s+/).filter(Boolean);
+  const msgFile = path.join(tmpDir, `msg-${shadowSha.slice(0, 7)}`);
+  fs.writeFileSync(msgFile, git(`log -1 --format=%B ${shadowSha}`, localRepo) + "\n");
+  const newSha = git(`commit-tree ${newTree} ${parents.map(p => `-p ${p}`).join(" ")} -F "${msgFile}"`, localRepo);
+  fs.rmSync(msgFile, { force: true });
+  return newSha;
+}
+
+// ── H. two-parent merge: outer reconciled independently of an inner conflict ─
+// A 2-parent merge whose mapped parents conflict in the INNER (mapped) region
+// but whose OUTER is cleanly mergeable must NOT halt — the base's inner comes
+// from the first parent, so the inner conflict is irrelevant to the outer.
+// (Merging the full parent trees would let the inner conflict mask the
+// mergeable outer and halt spuriously.) `sameOuterFile` flips the outer to a
+// genuine add/add conflict, which MUST still halt.
+function runTwoParentOuterReconcile(sameOuterFile: boolean): void {
+  const tag = sameOuterFile ? "2p-outer-conflict" : "2p-outer-mergeable";
+  const env = createTestEnv(`two-parent-outer-${sameOuterFile ? "conflict" : "mergeable"}`);
+  const local = env.localRepo;
+  const team = env.remoteWorking;
+  const shadowPrefix = `b-${env.subdir}`;
+  try {
+    // Base on main; branch-a and branch-b both edit shared.txt (inner
+    // modify/modify conflict) and each add their own file.
+    fs.writeFileSync(path.join(team, "shared.txt"), "base\n");
+    git("add shared.txt", team); git('commit -m "Base"', team); git("push origin main", team);
+
+    git("checkout -b branch-a", team);
+    fs.writeFileSync(path.join(team, "shared.txt"), "A\n");
+    fs.writeFileSync(path.join(team, "feat-a.txt"), "a\n");
+    git("add -A", team); git('commit -m "feat A"', team); git("push origin branch-a", team);
+
+    git("checkout main", team); git("checkout -b branch-b", team);
+    fs.writeFileSync(path.join(team, "shared.txt"), "B\n");
+    fs.writeFileSync(path.join(team, "feat-b.txt"), "b\n");
+    git("add -A", team); git('commit -m "feat B"', team); git("push origin branch-b", team);
+
+    assertEqual(runCiSync(env).status, 0, `[${tag}] initial fan-out sync`);
+
+    // Inject divergent outer onto each branch's shadow tip. Distinct filenames
+    // -> clean union; same filename with different content -> add/add conflict.
+    git("fetch origin", local);
+    const aFile = sameOuterFile ? "outer.txt" : "outer-a.txt";
+    const bFile = sameOuterFile ? "outer.txt" : "outer-b.txt";
+    const newA = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-a`, local), { [aFile]: "from-A\n" });
+    const newB = injectOuterFiles(local, env.tmpDir, git(`rev-parse origin/${shadowPrefix}/branch-b`, local), { [bFile]: "from-B\n" });
+    git(`push origin ${newA}:refs/heads/${shadowPrefix}/branch-a --force`, local);
+    git(`push origin ${newB}:refs/heads/${shadowPrefix}/branch-b --force`, local);
+
+    // Source 2-parent merge: branch-b into branch-a, resolving the inner conflict.
+    git("checkout branch-a", team);
+    try { git("merge --no-ff --no-commit branch-b", team); } catch { /* inner conflict expected */ }
+    fs.writeFileSync(path.join(team, "shared.txt"), "RESOLVED\n");
+    git("add shared.txt", team);
+    git('commit -m "merge branch-b into branch-a"', team);
+    git("push origin branch-a", team);
+
+    const r = runCiSync(env);
+    const branchAShadow = `origin/${shadowPrefix}/branch-a`;
+
+    if (sameOuterFile) {
+      assertEqual(r.status, 1, `[${tag}] genuine outer conflict must still halt`);
+      assertIncludes(r.stderr, "cannot auto-resolve replay parent tree", `[${tag}] error names the outer-divergence halt`);
+      return;
+    }
+
+    assertEqual(r.status, 0, `[${tag}] mergeable outer + inner conflict must NOT halt`);
+    assertNotIncludes(r.stdout + r.stderr, "cannot auto-resolve replay parent tree", `[${tag}] no spurious outer-divergence halt`);
+
+    git(`fetch origin ${shadowPrefix}/branch-a`, local);
+    const mergeParents = git(`log -1 --format=%P ${branchAShadow}`, local).split(/\s+/).filter(Boolean);
+    assertEqual(mergeParents.length, 2, `[${tag}] replayed merge has 2 parents`);
+    // Outer reconciled to the clean union of both sides.
+    assertEqual(git(`show ${branchAShadow}:outer-a.txt`, local), "from-A", `[${tag}] outer-a.txt survived from branch-a`);
+    assertEqual(git(`show ${branchAShadow}:outer-b.txt`, local), "from-B", `[${tag}] outer-b.txt merged in from branch-b`);
+    // Inner carries the merge's resolution + both features.
+    assertEqual(git(`show ${branchAShadow}:${env.subdir}/shared.txt`, local), "RESOLVED", `[${tag}] inner resolution preserved`);
+    assertEqual(git(`show ${branchAShadow}:${env.subdir}/feat-a.txt`, local), "a", `[${tag}] feat-a in inner`);
+    assertEqual(git(`show ${branchAShadow}:${env.subdir}/feat-b.txt`, local), "b", `[${tag}] feat-b in inner`);
+  } finally {
+    env.cleanup();
+  }
+}
+
 // ── A. merge-topology: shared SHAs, evil merges, octopus merges ────────────
 function runMergeTopology(): void {
   const env = createTestEnv("pull-merge-topology");
@@ -791,6 +889,8 @@ export default function run(): void {
     runSquashCrossRepoBroken();
     runSquashFeatureAbsorbsShadow();
     runManualMergeRecovery();
+    runTwoParentOuterReconcile(false);  // mergeable outer + inner conflict -> replays
+    runTwoParentOuterReconcile(true);   // genuine outer conflict -> still halts
   } finally {
     setTestBranchAllowlist();
   }
