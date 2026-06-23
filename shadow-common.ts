@@ -1717,6 +1717,19 @@ interface ResolvedParents {
   foreignAbsorbed?: { parent: string; entries: AbsorbedEntry[] };
 }
 
+// The squash target standing in for an absorbed parent on this commit's lineage,
+// or a `foreign` payload when no absorber is an ancestor (caller halts). Shared
+// by the direct-parent and masked-behind-a-drop absorbed branches so the two
+// can't drift apart.
+function resolveAbsorbedParent(
+  commitHash: string,
+  absorbedParent: string,
+  entries: AbsorbedEntry[],
+): { target: string } | { foreign: { parent: string; entries: AbsorbedEntry[] } } {
+  const valid = entries.find(e => isAncestor(e.absorber, commitHash));
+  return valid ? { target: valid.target } : { foreign: { parent: absorbedParent, entries } };
+}
+
 /**
  * Find target side parent from source side hash:
  * 1. parent recorded in syncedShaMap (direct replay)
@@ -1753,11 +1766,9 @@ function resolveHaltAwareParents(
     } else if (haltAnchors && haltAnchors.length > 0) {
       for (const ac of haltAnchors) pushUnique(ac);
     } else if (absorbedEntries && absorbedEntries.length > 0) {
-      const valid = absorbedEntries.find(e => isAncestor(e.absorber, commit.hash));
-      if (!valid) {
-        return { parents, foreignAbsorbed: { parent: parentHash, entries: absorbedEntries } };
-      }
-      pushUnique(valid.target);
+      const r = resolveAbsorbedParent(commit.hash, parentHash, absorbedEntries);
+      if ("foreign" in r) return { parents, foreignAbsorbed: r.foreign };
+      pushUnique(r.target);
     } else {
       // Unmapped parent. Walk first-parent to the nearest synced, halted, or
       // squash-absorbed ancestor — dropped intermediaries are transparent
@@ -1774,11 +1785,9 @@ function resolveHaltAwareParents(
       const maskedAbsorbed = masked ? absorbedMap.get(anchor!) : undefined;
       const maskedAnchors = masked ? haltRecords.get(anchor!)?.anchorCommits : undefined;
       if (maskedAbsorbed && maskedAbsorbed.length > 0) {
-        const valid = maskedAbsorbed.find(e => isAncestor(e.absorber, commit.hash));
-        if (!valid) {
-          return { parents, foreignAbsorbed: { parent: anchor!, entries: maskedAbsorbed } };
-        }
-        pushUnique(valid.target);
+        const r = resolveAbsorbedParent(commit.hash, anchor!, maskedAbsorbed);
+        if ("foreign" in r) return { parents, foreignAbsorbed: r.foreign };
+        pushUnique(r.target);
       } else if (maskedAnchors && maskedAnchors.length > 0) {
         for (const ac of maskedAnchors) pushUnique(ac);
       } else {
