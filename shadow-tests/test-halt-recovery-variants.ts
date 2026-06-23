@@ -811,6 +811,65 @@ async function runAll(): Promise<void> {
     return sm;
   }
 
+  /** Fork `side` off the halted Bm, but interpose a DROPPED (empty) commit D so
+   *  Bm is reached only via D's first-parent line — never as Bs1's direct
+   *  parent. Returns Bs1's SHA. */
+  function forkSideBehindDroppedCommit(env: TestEnv, bm: string): string {
+    git(`checkout -b side ${bm}`, env.remoteWorking);
+    git('commit --allow-empty -m "D (dropped empty commit on side)"', env.remoteWorking);
+    writeFile(env.remoteWorking, "side.ts", "side work v1\n");
+    git("add -A", env.remoteWorking);
+    git('commit -m "Bs1 (kept child of dropped D)"', env.remoteWorking);
+    const bs1 = gitOut("rev-parse HEAD", env.remoteWorking);
+    git("push origin side", env.remoteWorking);
+    git("checkout core-dev", env.remoteWorking);
+    return bs1;
+  }
+
+  // Same foreign-squash situation as fork-from-absorbed-late-filter, but with a
+  // DROPPED commit interposed between the absorbed Bm and the fork's kept commit
+  // Bs1. Bs1's direct parent is now the dropped D, so resolveHaltAwareParents
+  // takes its unmapped-parent first-parent WALK (which omits absorbedMap from its
+  // stop set, unlike haltBehindParent) instead of the direct absorbed-entries
+  // branch. The fork is in the identical foreign-squash predicament as the direct
+  // case, so it MUST halt the same way; replaying Bs1 anchored past the absorbed
+  // Bm would be a silent content lie.
+  function runForkFromAbsorbedMaskedByDropped(): void {
+    const { env, info } = setupAndFailReplay("fork-absorbed-masked-dropped");
+    try {
+      const bs1 = forkSideBehindDroppedCommit(env, info.bm);
+
+      // Trunk recovers while side is invisible to the engine; Bm is absorbed
+      // into the squash and persisted via the absorbed trailer.
+      roundTripResolution(env);
+      const r1 = runCiSync(env);
+      assertEqual(r1.status, 0, `recovery sync (side not in filter): ${r1.stderr}`);
+      git("fetch origin --prune", env.localRepo);
+      const sq = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
+
+      // side enters the filter. The masked-absorbed fork must halt exactly like
+      // the direct fork-from-absorbed case.
+      setBranchFiltersForTesting(new Map([
+        ["origin", ["core-dev", "project", "side"].map(compileIgnorePattern)],
+        ["team",   ["core-dev", "project", "side"].map(compileIgnorePattern)],
+      ]));
+      const r2 = runCiSync(env);
+      assert(r2.status !== 0, "masked-absorbed fork must halt, not replay past the squash");
+      const out = r2.stdout + r2.stderr;
+      assert(/squash-resolved on another (branch|lineage)/.test(out),
+        `expected absorbed-elsewhere diagnostic, got:\n${out}`);
+
+      git("fetch origin --prune", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/b-backend/side", env.localRepo);
+      assert(sideTip !== sq, "stranded fork must not be created at the squash");
+      const tree = gitOut("ls-tree -r --name-only origin/b-backend/side", env.localRepo);
+      assert(!tree.includes("backend/side.ts"),
+        `faithful partial tip must predate Bs1; tree:\n${tree}`);
+    } finally {
+      env.cleanup();
+    }
+  }
+
   // A branch forks off the halted Bm; the trunk recovers via the squash. The
   // fork must NOT inherit the squash (silent content lie) — it halts with the
   // absorbed-elsewhere diagnostic until the resolution is merged into it.
@@ -944,6 +1003,7 @@ async function runAll(): Promise<void> {
     ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
     ["fork-from-absorbed-same-run", runForkFromAbsorbedSameRun],
     ["fork-from-absorbed-late-filter", runForkFromAbsorbedLateFilter],
+    ["fork-from-absorbed-masked-by-dropped", runForkFromAbsorbedMaskedByDropped],
   ];
   let failed = 0;
   try {

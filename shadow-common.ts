@@ -1759,17 +1759,27 @@ function resolveHaltAwareParents(
       }
       pushUnique(valid.target);
     } else {
-      // Unmapped parent. Walk first-parent to the nearest mapped-or-halted
-      // ancestor — dropped intermediaries are transparent (matching the gate
-      // and collectAbsorbedHalted). A halt masked behind dropped commits
-      // substitutes its anchors, exactly as a direct halted parent would;
-      // anchoring below it would drop the halt's content. Otherwise anchor to
-      // the synced ancestor (echo) or the target root.
-      const anchor = firstParentUntil(graph, parentHash, x => syncedShaMap.has(x) || haltedSources.has(x));
-      const maskedAnchors = anchor !== undefined && !syncedShaMap.has(anchor)
-        ? haltRecords.get(anchor)?.anchorCommits
-        : undefined;
-      if (maskedAnchors && maskedAnchors.length > 0) {
+      // Unmapped parent. Walk first-parent to the nearest synced, halted, or
+      // squash-absorbed ancestor — dropped intermediaries are transparent
+      // (matching the gate and collectAbsorbedHalted). The stop set mirrors
+      // haltBehindParent's; anchoring below any of them would drop its content.
+      // A masked halt substitutes its anchors, exactly as a direct halted parent
+      // would. A masked squash-absorbed ancestor gets the same lineage scoping
+      // as a direct absorbed parent: its squash stands in only if this commit
+      // descends from the absorber, else the branch halts (foreign squash).
+      // Otherwise anchor to the synced ancestor (echo) or the target root.
+      const anchor = firstParentUntil(graph, parentHash,
+        x => syncedShaMap.has(x) || haltedSources.has(x) || absorbedMap.has(x));
+      const masked = anchor !== undefined && !syncedShaMap.has(anchor);
+      const maskedAbsorbed = masked ? absorbedMap.get(anchor!) : undefined;
+      const maskedAnchors = masked ? haltRecords.get(anchor!)?.anchorCommits : undefined;
+      if (maskedAbsorbed && maskedAbsorbed.length > 0) {
+        const valid = maskedAbsorbed.find(e => isAncestor(e.absorber, commit.hash));
+        if (!valid) {
+          return { parents, foreignAbsorbed: { parent: anchor!, entries: maskedAbsorbed } };
+        }
+        pushUnique(valid.target);
+      } else if (maskedAnchors && maskedAnchors.length > 0) {
         for (const ac of maskedAnchors) pushUnique(ac);
       } else {
         pushUnique((anchor !== undefined ? syncedShaMap.get(anchor) : undefined) ?? targetInit);
