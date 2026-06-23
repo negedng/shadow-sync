@@ -870,6 +870,78 @@ async function runAll(): Promise<void> {
     }
   }
 
+  // One absorber (R_be) resolves TWO halts at once — Bm and its propagated
+  // child Bm+1 — while a fork hangs off the EARLIER halt Bm. When the trunk
+  // squash absorbs both, the fork must fire the foreign-squash halt against ITS
+  // ancestor (Bm), not the other absorbed halt (Bm+1). resolveAbsorbedParent
+  // looks up absorbedMap keyed on the fork's actual parent, so the entry it
+  // finds — and the Halted-ancestor / anchor it records — must be Bm's.
+  function runForkOffOneOfTwoAbsorbedHalts(): void {
+    const { env, info } = setupAndFailReplay("fork-off-one-of-two-halts");
+    try {
+      setBranchFiltersForTesting(new Map([
+        ["origin", ["core-dev", "project", "side"].map(compileIgnorePattern)],
+        ["team",   ["core-dev", "project", "side"].map(compileIgnorePattern)],
+      ]));
+
+      // Fork side off the earlier halt Bm (before Bm+1 exists).
+      const bs1 = forkSideFromHalt(env, info.bm);
+
+      // Bm+1: a linear child of Bm on core-dev → a second (propagated) halt.
+      git("checkout core-dev", env.remoteWorking);
+      writeFile(env.remoteWorking, "post-halt.ts", "post-halt content\n");
+      git("add -A", env.remoteWorking);
+      git('commit -m "Bm+1: linear commit after halt"', env.remoteWorking);
+      const bmPlus1 = gitOut("rev-parse HEAD", env.remoteWorking);
+      git("push origin core-dev", env.remoteWorking);
+
+      // Both halts (Bm, Bm+1) plus the stranded fork are present.
+      const h = runCiSync(env);
+      assert(h.status !== 0, "expected halts (Bm, Bm+1) + stranded fork");
+      git("fetch origin --prune", env.localRepo);
+      const sideTipBefore = gitOut("rev-parse origin/b-backend/side", env.localRepo);
+
+      // Trunk round-trip: R_be absorbs BOTH Bm and Bm+1 into one squash.
+      roundTripResolution(env);
+      const r = runCiSync(env);
+      assert(r.status !== 0, "fork stranded off Bm must halt while the trunk absorbs both halts");
+      const out = r.stdout + r.stderr;
+      assert(/squash-resolved on another (branch|lineage)/.test(out),
+        `expected absorbed-elsewhere diagnostic; got:\n${out}`);
+
+      // The right entry: the halt is attributed to the fork's ancestor Bm, NOT
+      // the other absorbed halt Bm+1.
+      assert(new RegExp(`Halted ancestor:\\s+${info.bm}`).test(out),
+        `diagnostic must name Bm as the halted ancestor; got:\n${out}`);
+      assert(!new RegExp(`Halted ancestor:\\s+${bmPlus1}`).test(out),
+        `the fork's halt must NOT be attributed to Bm+1; got:\n${out}`);
+
+      // Fork ref must not move to the squash.
+      git("fetch origin --prune", env.localRepo);
+      const sq = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
+      const sideTipAfter = gitOut("rev-parse origin/b-backend/side", env.localRepo);
+      assertEqual(sideTipAfter, sideTipBefore, "stranded fork ref must not move");
+      assert(sideTipAfter !== sq, "stranded fork must not inherit the squash");
+
+      // Recovery: merge the resolution into side → absorbs Bs1, and the fork tip
+      // gets the squash (Bm's anchor) as a parent.
+      const sm = mergeShadowIntoSide(env);
+      const r2 = runCiSync(env);
+      assertEqual(r2.status, 0, `sync after fork recovery: ${r2.stderr}`);
+      git("fetch origin --prune", env.localRepo);
+      const sideTip = gitOut("rev-parse origin/b-backend/side", env.localRepo);
+      const sideMsg = gitOut(`log -1 --format=%B ${sideTip}`, env.localRepo);
+      const key = trailerKeyOf(env, "b");
+      assertDirectReplay(sideMsg, key, sm, "fork-off-two Sm");
+      assertAbsorbed(sideMsg, key, bs1, "fork-off-two Bs1");
+      const parents = gitOut(`log -1 --format=%P ${sideTip}`, env.localRepo).split(/\s+/);
+      assert(parents.includes(sq),
+        `fork tip must have the squash ${sq.slice(0, 7)} (Bm's anchor) as a parent; got ${parents.join(" ")}`);
+    } finally {
+      env.cleanup();
+    }
+  }
+
   // A branch forks off the halted Bm; the trunk recovers via the squash. The
   // fork must NOT inherit the squash (silent content lie) — it halts with the
   // absorbed-elsewhere diagnostic until the resolution is merged into it.
@@ -1004,6 +1076,7 @@ async function runAll(): Promise<void> {
     ["fork-from-absorbed-same-run", runForkFromAbsorbedSameRun],
     ["fork-from-absorbed-late-filter", runForkFromAbsorbedLateFilter],
     ["fork-from-absorbed-masked-by-dropped", runForkFromAbsorbedMaskedByDropped],
+    ["fork-off-one-of-two-absorbed-halts", runForkOffOneOfTwoAbsorbedHalts],
   ];
   let failed = 0;
   try {
