@@ -20,6 +20,10 @@
  *                                     not replay around it (ref pinned, Bm not absorbed)
  *   multi-echo-octopus-halts        — 3-parent octopus whose 2nd/3rd parents carry echo trailers halts
  *   multi-echo-octopus-recovery     — recovery from the octopus halt
+ *   concurrent-outer-during-recovery — a 3rd branch touches the same outer file
+ *                                     while recovering an A/B halt: ≥3 live mapped
+ *                                     parents re-halt (no 2-way union) until the
+ *                                     operator folds C in so the resolution dominates
  *   halted-partial-tip-first-parent — mapBranchesToTargetTips picks project-a's tip via first-parent walk
  *   fork-from-absorbed-same-run     — branch forked off a halted commit stays halted when the trunk
  *                                     squash-resolves; recovers by merging the resolved shadow ref
@@ -559,6 +563,111 @@ async function runAll(): Promise<void> {
     }
   }
 
+  // A/B halt recovered, but a THIRD branch C touches the SAME outer file
+  // (frontend.txt) concurrently. The operator is only told to reconcile the
+  // divergent A/B pair (Mc vs Mp); C never appears in that diagnostic. Folding
+  // just the A/B resolution back leaves C as a live, non-dominated mapped parent
+  // at recovery — reconcileOuter then sees ≥3 mapped parents (so its 2-way outer
+  // union is unavailable) with no dominator, and RE-HALTS on a fresh merge.
+  // Recovery is only possible once the operator ALSO merges C, so the resolution
+  // dominates it (the union path can never save a ≥3-parent reconcile).
+  function runConcurrentOuterDuringRecovery(): void {
+    const { env, bm } = setupMultiEchoHalt("concurrent-outer-recovery");
+    try {
+      // Allow the config branch too (setup only allowed core-dev + project).
+      setBranchFiltersForTesting(new Map([
+        ["origin", [compileIgnorePattern("core-dev"), compileIgnorePattern("project"), compileIgnorePattern("config")]],
+        ["team",   [compileIgnorePattern("core-dev"), compileIgnorePattern("project"), compileIgnorePattern("config")]],
+      ]));
+
+      // Operator resolves ONLY the A/B (core-dev vs project) frontend conflict.
+      git("checkout core-dev", env.localRepo);
+      try {
+        git('merge --no-ff project -m "Mm (resolve A/B frontend)"', env.localRepo);
+      } catch {
+        writeFile(env.localRepo, "frontend.txt", "v_fe_merged\n");
+        git("add -A", env.localRepo);
+        git('commit --no-edit', env.localRepo);
+      }
+
+      // C: a third branch off the pre-Mc root that touches the SAME outer file
+      // (frontend.txt) concurrently — never part of the A/B resolution.
+      git("checkout -b config core-dev~1", env.localRepo);
+      writeFile(env.localRepo, "frontend.txt", "v_fe_config\n");
+      writeFile(env.localRepo, "backend/cfg.ts", "Mx cfg\n");
+      git("add -A", env.localRepo);
+      git('commit -m "Mx (concurrent outer on C)"', env.localRepo);
+      git("checkout core-dev", env.localRepo);
+
+      // Propagate Mm -> a-backend/core-dev and Mx -> a-backend/config.
+      const rA = runPush(env);
+      assertEqual(rA.status, 0, `--from a propagation: ${rA.stderr}`);
+
+      // BE catch-up folds in BOTH the resolution echo and C's echo.
+      git("fetch origin --prune", env.remoteWorking);
+      git("checkout core-dev", env.remoteWorking);
+      try {
+        git('merge --no-ff origin/a-backend/core-dev origin/a-backend/config -m "R_be (catch-up + C)"', env.remoteWorking);
+      } catch {
+        git("add -A", env.remoteWorking);
+        git('commit --no-edit', env.remoteWorking);
+      }
+      const rbe = gitOut("rev-parse HEAD", env.remoteWorking);
+      git("push origin core-dev", env.remoteWorking);
+
+      // --from b RE-HALTS: ≥3 live mapped parents, no dominator, no 2-way union.
+      const rHalt = runCiSync(env);
+      assert(rHalt.status !== 0, "concurrent C on the same outer must re-halt the recovery merge");
+      const out = rHalt.stdout + rHalt.stderr;
+      assert(/cannot auto-resolve replay parent tree/.test(out),
+        `expected a fresh halt diagnostic; got:\n${out}`);
+      assert(out.includes(rbe), `re-halt diagnostic should name the catch-up merge ${rbe}\n${out}`);
+
+      // The shadow tip must NOT have advanced past the unresolved outer — C's
+      // content must not leak onto it while recovery is incomplete.
+      git("fetch origin --prune", env.localRepo);
+      const treeMid = gitOut("ls-tree -r --name-only origin/b-backend/core-dev", env.localRepo);
+      assert(!treeMid.includes("backend/cfg.ts"),
+        `C content must not land while recovery is unresolved; tree:\n${treeMid}`);
+
+      // Resolution: operator now ALSO merges C, so the resolution dominates it.
+      git("checkout core-dev", env.localRepo);
+      try {
+        git('merge --no-ff config -m "Mm2 (fold in C)"', env.localRepo);
+      } catch {
+        writeFile(env.localRepo, "frontend.txt", "v_fe_merged_all\n");
+        git("add -A", env.localRepo);
+        git('commit --no-edit', env.localRepo);
+      }
+      const rA2 = runPush(env);
+      assertEqual(rA2.status, 0, `--from a (post-fold) propagation: ${rA2.stderr}`);
+
+      git("fetch origin --prune", env.remoteWorking);
+      git("checkout core-dev", env.remoteWorking);
+      try {
+        git('merge --no-ff origin/a-backend/core-dev -m "R_be2 (catch-up after folding C)"', env.remoteWorking);
+      } catch {
+        git("add -A", env.remoteWorking);
+        git('commit --no-edit', env.remoteWorking);
+      }
+      git("push origin core-dev", env.remoteWorking);
+
+      const rOk = runCiSync(env);
+      assertEqual(rOk.status, 0, `recovery after folding C must succeed: ${rOk.stderr}`);
+
+      // The squash absorbs the original octopus Bm; C's inner content lands.
+      git("fetch origin --prune", env.localRepo);
+      const sqHash = gitOut("rev-parse origin/b-backend/core-dev", env.localRepo);
+      const sqMsg = gitOut(`log -1 --format=%B ${sqHash}`, env.localRepo);
+      const key = trailerKeyOf(env, "b");
+      assertAbsorbed(sqMsg, key, bm, "concurrent-outer Bm");
+      assertEqual(gitOut(`show ${sqHash}:backend/cfg.ts`, env.localRepo), "Mx cfg",
+        "C inner (cfg.ts) present after dominator recovery");
+    } finally {
+      env.cleanup();
+    }
+  }
+
   function runHaltedPartialTipFirstParent(): void {
     // Topology: backend has project-a + project-b. Bm = `git merge project-b`
     // on project-a creates a 2-parent merge whose mapped parents on mono
@@ -831,6 +940,7 @@ async function runAll(): Promise<void> {
     ["halt-not-resolved-by-dropped-child", runHaltNotResolvedByDroppedChild],
     ["multi-echo-octopus-halts", runMultiEchoOctopusHalts],
     ["multi-echo-octopus-recovery", runMultiEchoOctopusRecovery],
+    ["concurrent-outer-during-recovery", runConcurrentOuterDuringRecovery],
     ["halted-partial-tip-first-parent", runHaltedPartialTipFirstParent],
     ["fork-from-absorbed-same-run", runForkFromAbsorbedSameRun],
     ["fork-from-absorbed-late-filter", runForkFromAbsorbedLateFilter],
