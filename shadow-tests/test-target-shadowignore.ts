@@ -124,3 +124,42 @@ assertEqual(readShadowFile(env, "skip-me/secret.txt"), null,
 
 env.cleanup();
 console.log("PASS — target .shadowignore drops incoming paths on --from b (union with source).");
+
+// ── Precedence is by depth, not `git ls-tree` emit order ────────────────────
+// git: a deeper .shadowignore overrides a shallower one (realized as last-match-
+// wins in matchState). ls-tree emits tree order, which is depth order EXCEPT for
+// a sibling dir whose name sorts before "." (leading char < 0x2E: "!", "#", "-"):
+// it is recursed into first, so its deeper file is emitted BEFORE the shallower
+// parent's, inverting precedence. readShadowIgnoreFilePatterns sorts by depth to
+// defend against this. Repro on the source/b-side root mapping, where neither
+// conflicting file is the mapping-root file the ancestor probe force-orders first:
+//   sub/.shadowignore        → *.secret      (depth 1, ignore all)
+//   sub/!deep/.shadowignore  → !keep.secret  (depth 2, re-include; "!deep" < ".")
+{
+  const env2 = createTestEnv("shadowignore-depth-order", "frontend");
+  setTestBranchAllowlist({ team: ["main"], origin: ["main"] });
+
+  fs.mkdirSync(`${env2.remoteWorking}/sub/!deep`, { recursive: true });
+  commitOnRemote(env2, {
+    "sub/.shadowignore": "*.secret\n",
+    "sub/!deep/.shadowignore": "!keep.secret\n",
+    "sub/!deep/keep.secret": "kept by the deeper re-include\n",
+    "sub/!deep/drop.secret": "no re-include — stays ignored\n",
+    "sub/top.secret": "ignored by the shallow rule\n",
+  }, "nested .shadowignore stack with a before-dot sibling dir");
+
+  assertEqual(runCiSync(env2).status, 0, "import --from b should succeed");
+
+  // Bug-catcher: deepest rule re-includes, so git (and we) keep the file.
+  // Pre-fix this was null — the shallow *.secret won last.
+  assertEqual(readShadowFile(env2, "sub/!deep/keep.secret"), "kept by the deeper re-include\n",
+    "deepest .shadowignore wins: re-included file is synced");
+  // Controls — the deeper file re-includes only keep.secret; the rest stay dropped.
+  assertEqual(readShadowFile(env2, "sub/!deep/drop.secret"), null,
+    "control: a sibling the deeper rule does NOT re-include stays ignored");
+  assertEqual(readShadowFile(env2, "sub/top.secret"), null,
+    "control: the shallow rule still ignores files at its own level");
+
+  env2.cleanup();
+  console.log("PASS — .shadowignore precedence sorts by depth, not ls-tree emit order.");
+}

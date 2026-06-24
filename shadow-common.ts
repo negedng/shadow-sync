@@ -422,7 +422,7 @@ function filterExistingRefs(refs: string[]): string[] {
     ["for-each-ref", "--format=%(refname)", ...refs.map(r => `refs/remotes/${r}`)],
     { safe: true },
   );
-  // Fail loud: an empty result here silently empties syncedShaMap downstream.
+  // A failed command must not be read as "no refs": fail() it.
   if (!result.ok) fail(`for-each-ref failed: ${result.stderr}`);
   if (!result.stdout) return [];
   const existing = new Set(
@@ -1274,8 +1274,12 @@ function readShadowIgnoreFilePatterns(commitHash: string, sourceDir: string, par
     for (const p of sub.stdout.split("\0")) if (p && SHADOWIGNORE_SELF_RE.test(p)) found.push(p);
   }
 
+  // Sort by depth so precedence never depends on entry names (folders with leading char in char-order before '.' would go before the ignore file in plain ls-tree).
+  const ordered = [...new Set(found)].sort(
+    (x, y) => x.split("/").length - y.split("/").length,
+  );
   const patterns: IgnoreRule[] = [];
-  for (const ignorePath of [...new Set(found)]) {
+  for (const ignorePath of ordered) {
     const dir = ignorePath === SHADOWIGNORE_FILE ? "" : ignorePath.slice(0, -(SHADOWIGNORE_FILE.length + 1));
     const res = git(["show", `${commitHash}:${ignorePath}`], { safe: true });
     if (!res.ok || !res.stdout) continue;
